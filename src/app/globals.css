@@ -1,15 +1,10 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,3 +19,173 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Hide native scrollbar while keeping scroll functionality */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Thin dark-themed scrollbar for the reserved panel */
+.thin-scrollbar::-webkit-scrollbar { width: 4px; }
+.thin-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 9999px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
+
+/* Marquee ticker animation */
+@keyframes ticker {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+/* Danmu (bullet comment) flow animation */
+@keyframes danmuFloat {
+  from { transform: translateX(120vw); }
+  to   { transform: translateX(-120vw); }
+}
+
+/* Fade-in + slide-up for SSE-streamed content */
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: fadeSlideIn 0.35s ease-out both;
+}
+
+/* Language selector <select> thin scrollbar */
+.lang-select::-webkit-scrollbar { width: 3px; }
+.lang-select::-webkit-scrollbar-track { background: transparent; }
+.lang-select::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 9999px;
+}
+.lang-select::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.6);
+}
+
+/* ── Theme tokens ────────────────────────────────────────────── */
+:root, [data-theme="dark"] {
+  --ats-bg-base:    #040b19;
+  --ats-bg-section: #071224;
+  --ats-bg-panel:   #050e1d;
+  --ats-bg-emerald: #071a1c;
+}
+
+[data-theme="light"] {
+  /* Page canvas = near-white; each section = subtle gray so sections stand out */
+  --ats-bg-base:    #f5f6f8;
+  --ats-bg-section: #e8e9ec;
+  --ats-bg-panel:   #e2e4e8;
+  --ats-bg-emerald: #e3eeeb;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LIGHT MODE — comprehensive colour overrides
+   Audit checklist:
+   ✓ text-slate-* / text-white  →  dark equivalents
+   ✓ bg-slate-9xx / bg-[hex]    →  light equivalents
+   ✓ prose-invert text          →  dark prose
+   ✓ SVG fill="white"           →  dark (chart-center-num)
+   ✓ inputs / selects           →  dark text
+   ✓ borders                    →  visible on light bg
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Light: root colour — fixes ALL inherited text (headings, titles, etc.) ── */
+/* main IS the [data-theme="light"] element, so the descendant selector          */
+/* "[data-theme="light"] .text-slate-100" does NOT apply to main itself.          */
+/* This compound selector targets main directly and re-darkens the baseline.      */
+main[data-theme="light"] { color: #0f172a !important; }
+
+/* ── Light: all Tailwind text utilities ──────────────────────── */
+[data-theme="light"] .text-slate-100 { color: #0f172a !important; }
+[data-theme="light"] .text-slate-200 { color: #1e293b !important; }
+[data-theme="light"] .text-slate-300 { color: #334155 !important; }
+[data-theme="light"] .text-slate-400 { color: #475569 !important; }
+[data-theme="light"] .text-slate-500 { color: #64748b !important; }
+[data-theme="light"] .text-slate-600 { color: #64748b !important; }
+/* text-white → near-black; buttons with colored bg (bg-blue-500) still read fine with dark text */
+[data-theme="light"] .text-white      { color: #0f172a !important; }
+[data-theme="light"] .text-blue-300   { color: #1d4ed8 !important; }
+[data-theme="light"] .text-blue-400   { color: #2563eb !important; }
+[data-theme="light"] .text-blue-500   { color: #2563eb !important; }
+[data-theme="light"] .text-emerald-400 { color: #059669 !important; }
+[data-theme="light"] .text-emerald-500 { color: #047857 !important; }
+[data-theme="light"] .text-red-200    { color: #dc2626 !important; }
+[data-theme="light"] .text-red-400    { color: #dc2626 !important; }
+/* Blue opacity variants used in the announcement area */
+[data-theme="light"] .text-blue-400\/70 { color: rgba(37,99,235,0.80) !important; }
+
+/* ── Light: backgrounds ──────────────────────────────────────── */
+[data-theme="light"] .bg-slate-950\/20,
+[data-theme="light"] .bg-slate-950\/40,
+[data-theme="light"] .bg-slate-950\/60  { background-color: rgba(200,205,214,0.55) !important; }
+[data-theme="light"] .bg-slate-900\/20,
+[data-theme="light"] .bg-slate-900\/30,
+[data-theme="light"] .bg-slate-900\/40,
+[data-theme="light"] .bg-slate-900\/50,
+[data-theme="light"] .bg-slate-900\/60  { background-color: rgba(188,197,210,0.45) !important; }
+[data-theme="light"] .bg-blue-500\/8,
+[data-theme="light"] .bg-blue-500\/10   { background-color: rgba(59,130,246,0.08) !important; }
+[data-theme="light"] .bg-blue-500\/5    { background-color: rgba(59,130,246,0.05) !important; }
+[data-theme="light"] .bg-red-500\/10    { background-color: rgba(239,68,68,0.08) !important; }
+[data-theme="light"] .bg-emerald-500\/15 { background-color: rgba(16,185,129,0.10) !important; }
+/* Hardcoded dark-navy classes (progress/run block) → soft blue-gray */
+[data-theme="light"] .bg-\[\#0f1e35\]  { background-color: #dce8f5 !important; }
+[data-theme="light"] .bg-\[\#09162d\]  { background-color: #d8e4f2 !important; }
+[data-theme="light"] .bg-\[\#0a1a35\]  { background-color: #dde9f6 !important; }
+[data-theme="light"] .bg-slate-800     { background-color: #c5cdd9 !important; }
+/* Announcement / panel transparent backgrounds */
+[data-theme="light"] .bg-slate-700\/30 { background-color: rgba(148,163,184,0.20) !important; }
+/* DividerScrollbar track */
+[data-theme="light"] .bg-white\/5               { background-color: rgba(0,0,0,0.05) !important; }
+[data-theme="light"] .hover\:bg-white\/10:hover { background-color: rgba(0,0,0,0.09) !important; }
+[data-theme="light"] .bg-slate-600\/60          { background-color: rgba(100,116,139,0.35) !important; }
+
+/* ── Light: hover overrides ──────────────────────────────────── */
+[data-theme="light"] .hover\:bg-slate-800:hover  { background-color: #bdc7d4 !important; }
+[data-theme="light"] .hover\:bg-red-500\/20:hover { background-color: rgba(239,68,68,0.12) !important; }
+
+/* ── Light: inputs / textareas / selects ─────────────────────── */
+[data-theme="light"] input::placeholder,
+[data-theme="light"] textarea::placeholder { color: #94a3b8 !important; }
+[data-theme="light"] input,
+[data-theme="light"] textarea { color: #0f172a !important; }
+[data-theme="light"] select   { color: #0f172a !important; background-color: #e4e6ea !important; }
+
+/* ── Light: borders ──────────────────────────────────────────── */
+[data-theme="light"] .border-slate-700           { border-color: #adb8c8 !important; }
+[data-theme="light"] .border-slate-700\/50,
+[data-theme="light"] .border-slate-700\/60       { border-color: rgba(173,184,200,0.6) !important; }
+[data-theme="light"] .border-slate-700\/40       { border-color: rgba(173,184,200,0.45) !important; }
+[data-theme="light"] .border-slate-800           { border-color: #bcc5d4 !important; }
+[data-theme="light"] .border-slate-800\/50       { border-color: rgba(188,197,212,0.5) !important; }
+[data-theme="light"] .border-blue-500\/15        { border-color: rgba(59,130,246,0.22) !important; }
+[data-theme="light"] .border-blue-500\/20        { border-color: rgba(59,130,246,0.28) !important; }
+[data-theme="light"] .border-blue-500\/30        { border-color: rgba(59,130,246,0.35) !important; }
+[data-theme="light"] .border-blue-500\/40        { border-color: rgba(59,130,246,0.45) !important; }
+[data-theme="light"] .border-red-500\/30         { border-color: rgba(239,68,68,0.35) !important; }
+[data-theme="light"] .border-emerald-500\/30     { border-color: rgba(16,185,129,0.35) !important; }
+
+/* ── Light: prose (Research Brief) — override prose-invert ──── */
+/* prose-invert sets text to white; these rules re-darken everything */
+[data-theme="light"] [class*="prose"]            { color: #1e293b !important; }
+[data-theme="light"] [class*="prose"] p,
+[data-theme="light"] [class*="prose"] li         { color: #1e293b !important; }
+[data-theme="light"] [class*="prose"] strong     { color: #0f172a !important; }
+[data-theme="light"] [class*="prose"] h2         { color: #1d4ed8 !important; border-color: #bcc5d4 !important; }
+[data-theme="light"] [class*="prose"] h3         { color: #2563eb !important; }
+[data-theme="light"] [class*="prose"] a          { color: #2563eb !important; }
+[data-theme="light"] [class*="prose"] code       { color: #1e293b !important; background: rgba(0,0,0,0.06) !important; }
+[data-theme="light"] [class*="prose"] blockquote { color: #334155 !important; border-color: #b0bcd0 !important; }
+[data-theme="light"] [class*="prose"] hr         { border-color: #c0cad8 !important; }
+
+/* ── Light: charts ───────────────────────────────────────────── */
+[data-theme="light"] .chart-svg .chart-label     { fill: #475569 !important; }
+[data-theme="light"] .chart-svg .chart-grid      { stroke: #c4cdd9 !important; }
+[data-theme="light"] .chart-svg .chart-axis      { stroke: #94a3b8 !important; }
+/* Donut chart center number (fill="white" SVG attribute) */
+[data-theme="light"] .chart-svg .chart-center-num { fill: #0f172a !important; }
