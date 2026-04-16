@@ -56,6 +56,13 @@ body {
   animation: fadeSlideIn 0.35s ease-out both;
 }
 
+/* Agent progress bar — slides a fill strip back and forth while running */
+@keyframes progress-slide {
+  0%   { transform: translateX(-150%); }
+  50%  { transform: translateX(180%); }
+  100% { transform: translateX(-150%); }
+}
+
 /* Language selector <select> thin scrollbar */
 .lang-select::-webkit-scrollbar { width: 3px; }
 .lang-select::-webkit-scrollbar-track { background: transparent; }

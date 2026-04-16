@@ -175,6 +175,7 @@ type Paper = {
   ranking_reason?: string;
   citation_count?: number | string;
   evidence_breakdown?: Record<string, number>;
+  word_count?: number;
   raw?: Record<string, any>;
 };
 
@@ -482,15 +483,28 @@ function AnnouncementBanner({
 }
 
 function AgentSection({ title, payload, running = false }: { title: string; payload?: AgentPayload; running?: boolean }) {
-  const hasData = payload && Object.keys(payload).length > 0;
+  const hasData = payload && Object.keys(payload).filter(k => {
+    const v = payload[k];
+    return v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && v.length === 0);
+  }).length > 0;
+
+  // Hide completely if not running and no meaningful output
+  if (!running && !hasData) return null;
 
   return (
-    <details className={`rounded-2xl border px-4 py-3 transition-colors duration-300 ${running && !hasData ? "border-blue-500/30 bg-blue-500/8 animate-pulse" : hasData ? "border-slate-700 bg-slate-950/40" : "border-slate-800 bg-slate-950/20"}`} open={hasData}>
+    <details
+      className={`rounded-2xl border px-4 py-3 transition-colors duration-300 ${
+        running && !hasData
+          ? "border-blue-500/30 bg-blue-500/5"
+          : "border-slate-700 bg-slate-950/40"
+      }`}
+      open={hasData || running}
+    >
       <summary className="flex cursor-pointer items-center gap-2 font-semibold text-slate-200 select-none">
         {title}
         {running && !hasData && (
-          <span className="flex items-center gap-1 text-xs font-normal text-blue-400">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400" />
+          <span className="flex items-center gap-1 text-xs font-normal text-blue-400 ml-1">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
             running…
           </span>
         )}
@@ -499,21 +513,26 @@ function AgentSection({ title, payload, running = false }: { title: string; payl
         )}
       </summary>
 
+      {/* Per-agent progress bar */}
+      <div className="mt-2 h-0.5 w-full overflow-hidden rounded-full bg-slate-800">
+        {hasData ? (
+          <div className="h-full w-full rounded-full bg-emerald-500 transition-all duration-500" />
+        ) : running ? (
+          <div className="h-full rounded-full bg-blue-500/70 animate-[progress-slide_1.8s_ease-in-out_infinite]"
+               style={{ width: "40%" }} />
+        ) : null}
+      </div>
+
       {running && !hasData ? (
-        <div className="mt-3 flex items-center gap-2 text-sm text-blue-400/70">
-          <span className="inline-block h-2 w-2 rounded-full bg-blue-400/60" />
-          Agent is running…
-        </div>
-      ) : !hasData ? (
-        <div className="mt-3 text-sm text-slate-500">No output in this run.</div>
+        <div className="mt-2 text-xs text-blue-400/70 animate-pulse">Working…</div>
       ) : (
-        <div className="mt-4 space-y-3 text-sm text-slate-300 fade-in">
+        <div className="mt-4 space-y-3 text-xs text-slate-300 fade-in">
           {Object.entries(payload!).map(([key, value]) => {
             if (value === null || value === undefined || value === "") return null;
             if (Array.isArray(value) && value.length === 0) return null;
             return (
               <div key={key} className="rounded-xl bg-slate-900/30 p-3">
-                <div className="mb-2 font-semibold capitalize text-slate-100">{key.replace(/_/g, " ")}</div>
+                <div className="mb-1.5 text-xs font-semibold capitalize text-slate-100">{key.replace(/_/g, " ")}</div>
                 {Array.isArray(value) ? (
                   <ul className="list-disc space-y-1 pl-5">
                     {value.map((item, idx) => (
@@ -627,10 +646,9 @@ export default function HomePage() {
   const centerSectionRef = useRef<HTMLElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const labAbortRef = useRef<AbortController | null>(null);
-  const deepBarFullAtRef = useRef<number | null>(null);
 
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const [query, setQuery] = useState("AR games");
+  const [query, setQuery] = useState("");
   const [queryOptionsData, setQueryOptionsData] = useState<QueryOptionsResponse | null>(null);
   const [selectedOptionIndex, setSelectedOptionIndex] = useState<number | null>(null);
   const [customQueryEnabled, setCustomQueryEnabled] = useState(false);
@@ -659,6 +677,8 @@ export default function HomePage() {
   const [briefStreamText, setBriefStreamText] = useState("");
   const [streamPapers, setStreamPapers] = useState<Paper[]>([]);
   const [streamAgents, setStreamAgents] = useState<Record<string, AgentPayload>>({});
+  const [startedAgents, setStartedAgents] = useState<Set<string>>(new Set());
+  const [rawProgressMsg, setRawProgressMsg] = useState("");
   const [uiError, setUiError] = useState("");
   const [nowMs, setNowMs] = useState(Date.now());
 
@@ -677,7 +697,6 @@ export default function HomePage() {
 
   // ── Workspace collapsible panel state ─────────────────────────────────────
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [workflowOpen, setWorkflowOpen] = useState(false);
 
   // ── Right panel tabs: Analytics | Synthesis Lab ────────────────────────────
   const [rightTab, setRightTab] = useState<"analytics" | "lab">("analytics");
@@ -716,10 +735,19 @@ export default function HomePage() {
   const [translateErrors, setTranslateErrors] = useState<Record<string, string>>({});
   const [translationLanguages, setTranslationLanguages] = useState<Record<string, string[]>>({});
 
+
+  // Timer — ticks while search is running AND the progress bar hasn't hit 100 yet.
+  // "Bar at 100" mirrors the displayProgress useMemo logic but computed inline here
+  // (using only state values declared above) to avoid a TDZ reference error.
+  const _timerBarFull = !isSubmitting
+    || (job?.status === "done")
+    || (!fastMode && (streamPapers.length > 0 || job?.status === "done"))
+    || (fastMode && Math.min(100, job?.progress ?? 0) >= 100);
   useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (_timerBarFull) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [_timerBarFull]);
 
   // Load persisted public danmu messages from localStorage on first mount
   useEffect(() => {
@@ -813,6 +841,20 @@ export default function HomePage() {
     }
   }, [analyticsVisible]);
 
+  // Cascade agent "started" state based on which agents have completed.
+  // Wave 1 (researcher/theorist/methodologist) is triggered from the "papers" SSE event.
+  // Wave 2 (critic) starts when all wave-1 agents have results.
+  // Wave 3 (gap_analyst/verifier) starts when critic has results.
+  useEffect(() => {
+    if (fastMode || !isSubmitting) return;
+    setStartedAgents(prev => {
+      const s = new Set(prev);
+      if (["researcher", "theorist", "methodologist"].every(a => a in streamAgents)) s.add("critic");
+      if ("critic" in streamAgents) { s.add("gap_analyst"); s.add("verifier"); }
+      return s;
+    });
+  }, [streamAgents, fastMode, isSubmitting]);
+
   const options = queryOptionsData?.options || [];
   const recommendedIndex = typeof queryOptionsData?.recommended_index === "number" ? queryOptionsData.recommended_index : 0;
   const effectiveSelectedIndex = selectedOptionIndex !== null ? selectedOptionIndex : options.length > 0 ? recommendedIndex : null;
@@ -841,31 +883,21 @@ export default function HomePage() {
   // Fast mode: use raw backend progress as-is.
   const displayProgress = useMemo(() => {
     if (fastMode || !isSubmitting) return progress;
-    if (streamPapers.length > 0 || (job?.result?.papers?.length ?? 0) > 0) return 100;
+    // Deep mode: jump to 100 as soon as papers are retrieved (agents run in background, don't block progress)
+    if (streamPapers.length > 0 || job?.status === "done") return 100;
     if (retrievalCount !== null && candidateLimit && candidateLimit > 0) {
       return Math.min(99, Math.round((retrievalCount / candidateLimit) * 100));
     }
     return Math.min(99, progress);
   }, [fastMode, isSubmitting, progress, streamPapers, job, retrievalCount, candidateLimit]);
-  const workflowItems = useMemo(() => (job?.workflow || []).slice().reverse(), [job?.workflow]);
   const result = job?.result || null;
 
-  // Track when deep-mode bar first hits 100 so the timer can freeze at that moment.
-  useEffect(() => {
-    if (!fastMode && isSubmitting && displayProgress === 100 && deepBarFullAtRef.current === null) {
-      deepBarFullAtRef.current = nowMs / 1000;
-    }
-    if (!isSubmitting) {
-      deepBarFullAtRef.current = null;
-    }
-  }, [fastMode, isSubmitting, displayProgress, nowMs]);
-
+  // Run-time label: ticks while isSubmitting, freezes when job finishes
   const runTimeLabel = (() => {
     const startedAt = job?.started_at;
-    if (!startedAt) return "Run time: --";
-    const deepFreezeAt = (!fastMode && deepBarFullAtRef.current) ? deepBarFullAtRef.current : null;
-    const end = job?.finished_at ?? deepFreezeAt ?? nowMs / 1000;
-    return `Run time: ${formatDuration(end - startedAt)}`;
+    if (!startedAt) return null;
+    const end = job?.finished_at ?? nowMs / 1000;
+    return formatDuration(end - startedAt);
   })();
 
   // Convert plain-text section headers to markdown ## headings for proper rendering
@@ -938,9 +970,10 @@ export default function HomePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
 
-  // Papers: show streamed papers, fall back to final result, then client-sort
+  // Papers: once the final result arrives, prefer result.papers (properly LLM-scored).
+  // While waiting (phase 1 streaming), fall back to streamPapers (rule-scored candidates).
   const displayedPapers: Paper[] = useMemo(() => {
-    const base: Paper[] = streamPapers.length > 0 ? streamPapers : (result?.papers ?? []);
+    const base: Paper[] = (result?.papers?.length ? result.papers : null) ?? (streamPapers.length > 0 ? streamPapers : []);
     const toNum = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : -1; };
     const copy = [...base];
     if (sortMode === "Relevance score")   copy.sort((a, b) => toNum(b.evidence_score ?? b.score) - toNum(a.evidence_score ?? a.score));
@@ -951,7 +984,8 @@ export default function HomePage() {
     // "Balanced" keeps backend order
     return copy;
   }, [streamPapers, result, sortMode]);
-  const papersAreStreaming = isSubmitting && streamPapers.length > 0 && !result;
+  // Phase-1 streaming only applies in deep mode (fast mode shows final card immediately)
+  const papersAreStreaming = !fastMode && isSubmitting && streamPapers.length > 0 && !result;
 
   // Agents: merge streamed results with final result (stream takes live priority)
   const agentData = {
@@ -1182,15 +1216,19 @@ ${html}
     setBriefStreamText("");
     setStreamPapers([]);
     setStreamAgents({});
+    setStartedAgents(new Set());
     setDeepReadResults({});
     setDeepReadErrors({});
     setOriginalErrors({});
     setTranslateErrors({});
     setRetrievalCount(null);
     setCandidateLimit(null);
+    setRawProgressMsg("");
+    // Show the actual search query that will be used (refined/selected, not raw input)
+    const effectiveQuery = selectedSearchQuery || trimmed;
+    if (effectiveQuery !== trimmed) setQuery(effectiveQuery);
     // Collapse workspace panels so the run-status block is immediately visible
     setSettingsOpen(false);
-    setWorkflowOpen(false);
     setQueryOptionsData(null);
     setDirectionData(null);
 
@@ -1247,6 +1285,9 @@ ${html}
             if (typeof data.candidate_limit === "number" && data.candidate_limit > 0) {
               setCandidateLimit(data.candidate_limit);
             }
+            if (typeof data.raw_message === "string" && data.raw_message) {
+              setRawProgressMsg(data.raw_message);
+            }
             setJob((prev) => ({
               ...prev,
               status: "running",
@@ -1259,7 +1300,18 @@ ${html}
           } else if (sseEvent === "brief_chunk") {
             setBriefStreamText((prev) => prev + (data.text ?? ""));
           } else if (sseEvent === "papers") {
-            if (Array.isArray(data.papers)) setStreamPapers(data.papers);
+            if (Array.isArray(data.papers)) {
+              setStreamPapers(data.papers);
+              // All analysis agents start as soon as papers are retrieved
+              if (!fastMode) {
+                setStartedAgents(prev => {
+                  const s = new Set(prev);
+                  s.add("researcher"); s.add("theorist"); s.add("methodologist");
+                  s.add("critic"); s.add("gap_analyst"); s.add("verifier");
+                  return s;
+                });
+              }
+            }
           } else if (sseEvent === "agent_result") {
             if (data.agent && data.data) {
               setStreamAgents((prev) => ({ ...prev, [data.agent]: data.data }));
@@ -1542,7 +1594,12 @@ ${html}
           }}
         >
           <section ref={leftSectionRef} className="min-w-0 h-full overflow-y-auto no-scrollbar rounded-xl bg-[var(--ats-bg-section)] p-5 transition-[width] duration-200">
-            <div className="mb-5 text-2xl font-bold">📄 Research Brief</div>
+            <div className="mb-5 text-2xl font-bold flex items-baseline gap-2 flex-wrap">
+              📄 {!fastMode && isSubmitting && !result ? "Preliminary Research Brief" : "Research Brief"}
+              {!fastMode && isSubmitting && !result && researchBriefMarkdown && (
+                <span className="text-xs font-normal text-amber-400/80">· preliminary · updates after deep analysis</span>
+              )}
+            </div>
 
             {/* Brief — writing indicator before first token arrives */}
             {isSubmitting && !researchBriefMarkdown && (
@@ -1610,39 +1667,16 @@ ${html}
 
             <div className="mt-6 space-y-4">
               <div className="rounded-3xl bg-slate-950/40 p-4">
-                <div className="mb-2 text-2xl font-bold">🤝 Collaboration Trace</div>
-                <p className="mb-4 text-sm text-slate-400">Router decisions, refinement steps, and collaboration metrics.</p>
-                {result?.collaboration_trace?.length ? (
-                  <details className="rounded-2xl bg-slate-900/30 px-4 py-3">
-                    <summary className="cursor-pointer font-semibold text-slate-200">Open Collaboration Trace</summary>
-                    <div className="mt-4 space-y-3">
-                      {(result.collaboration_trace || []).map((item, idx) => (
-                        <div key={idx} className="rounded-xl bg-slate-950/40 p-3 text-sm text-slate-300">
-                          <div className="font-semibold text-slate-100 break-words">{item.agent || "Agent"} · {item.action || "action"}</div>
-                          <div className="mt-1 break-words">{item.details || "No details."}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                ) : (
-                  <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">
-                    Run Search & Analysis to see the collaboration trace here.
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-3xl bg-slate-950/40 p-4">
                 <div className="mb-2 text-2xl font-bold">🧠 Analytical Trace</div>
                 <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
                 <div className="space-y-3">
-                  <AgentSection title="Query Planner" payload={result?.query_planner} />
-                  <AgentSection title="Query Planner Review" payload={result?.query_planner_review} />
-                  <AgentSection title="🔬 Researcher"    payload={agentData.researcher}    running={isSubmitting && !fastMode} />
-                  <AgentSection title="💡 Theorist"      payload={agentData.theorist}      running={isSubmitting && !fastMode} />
-                  <AgentSection title="🔧 Methodologist" payload={agentData.methodologist} running={isSubmitting && !fastMode} />
-                  <AgentSection title="⚠️ Critic"        payload={agentData.critic}        running={isSubmitting && !fastMode} />
-                  <AgentSection title="🕳️ Gap Analyst"   payload={agentData.gap_analyst}   running={isSubmitting && !fastMode} />
-                  <AgentSection title="✅ Verifier"      payload={agentData.verifier}      running={isSubmitting && !fastMode} />
+                  <AgentSection title="Query Planner" payload={result?.query_planner ? Object.fromEntries(Object.entries(result.query_planner).filter(([k]) => !["query_type","search_focus","theorist_needed","critic_needed","verifier_needed"].includes(k))) as AgentPayload : undefined} />
+                  <AgentSection title="🔬 Researcher"    payload={agentData.researcher}    running={isSubmitting && !fastMode && startedAgents.has("researcher")} />
+                  <AgentSection title="💡 Theorist"      payload={agentData.theorist}      running={isSubmitting && !fastMode && startedAgents.has("theorist")} />
+                  <AgentSection title="🔧 Methodologist" payload={agentData.methodologist} running={isSubmitting && !fastMode && startedAgents.has("methodologist")} />
+                  <AgentSection title="⚠️ Critic"        payload={agentData.critic}        running={isSubmitting && !fastMode && startedAgents.has("critic")} />
+                  <AgentSection title="🕳️ Gap Analyst"   payload={agentData.gap_analyst}   running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
+                  <AgentSection title="✅ Verifier"      payload={agentData.verifier}      running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
                 </div>
               </div>
 
@@ -1650,7 +1684,7 @@ ${html}
                 <div className="mb-2 text-2xl font-bold">🧭 Retrieval Strategy Summary</div>
                 <p className="mb-4 text-sm text-slate-400">How the search was run, screened, and selected.</p>
                 {result?.strategy_summary ? (
-                  <div className="space-y-3 text-sm text-slate-300">
+                  <div className="space-y-2 text-xs text-slate-300">
                     {Array.isArray(result.strategy_summary.strategy_points) &&
                       result.strategy_summary.strategy_points.map((item: any, idx: number) => (
                         <div key={idx} className="break-words">• {String(item)}</div>
@@ -1691,11 +1725,9 @@ ${html}
                 {isUnderstanding ? (
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
-                    {understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing")
+                    {understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing") || understandStatus.toLowerCase().includes("found")
                       ? "Analysing directions\u2026"
-                      : understandStatus.toLowerCase().includes("searching")
-                        ? "Searching papers\u2026"
-                        : "Understanding\u2026"}
+                      : "Thinking\u2026"}
                   </span>
                 ) : "🔍 Understand Query"}
               </button>
@@ -1712,10 +1744,10 @@ ${html}
 
             {isUnderstanding && (() => {
               const pct = understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing")
-                ? 70
-                : understandStatus.toLowerCase().includes("searching")
-                  ? 25
-                  : 45;
+                ? 75
+                : understandStatus.toLowerCase().includes("found")
+                  ? 45
+                  : 15;
               return (
                 <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-800">
                   <div
@@ -1731,19 +1763,19 @@ ${html}
                 onClick={() => setFastMode(true)}
                 className={`flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition ${fastMode ? "bg-blue-500 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
               >
-                ⚡ Fast
+                ⚡ Quick Search
               </button>
               <button
                 onClick={() => setFastMode(false)}
                 className={`flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition ${!fastMode ? "bg-blue-500 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
               >
-                🧠 Deep
+                🧠 Curated Analysis
               </button>
             </div>
             <p className="mt-1 px-1 text-xs text-slate-500">
               {fastMode
-                ? "Fast: rule-based ranking, no AI screening, single-agent brief. Faster and always returns results."
-                : "Deep: full AI reranking, adversarial screening, 6-agent analysis + editor brief. Slower but richer."}
+                ? "Get results in seconds with smart ranking. Great for rapid literature scanning."
+                : "Deep AI curation with adversarial screening and 6-agent analysis. Best for thorough research."}
             </p>
 
             <details
@@ -1892,7 +1924,7 @@ ${html}
                   )}
                   <div className="text-right text-sm text-slate-300">
                     <div className={`font-semibold text-slate-100 ${isSubmitting && displayProgress < 100 ? "animate-pulse" : ""}`}>{displayProgress}%</div>
-                    <div>{runTimeLabel}</div>
+                    {runTimeLabel && <div className="text-xs text-slate-500">{runTimeLabel}</div>}
                   </div>
                 </div>
               </div>
@@ -1925,33 +1957,43 @@ ${html}
               })()}
             </div>
 
-            <details
-              className="mt-4 rounded-2xl bg-slate-950/40 px-4 py-3"
-              open={workflowOpen}
-              onToggle={(e) => setWorkflowOpen((e.currentTarget as HTMLDetailsElement).open)}
-            >
-              <summary className="cursor-pointer select-none text-sm font-semibold text-slate-200">Recent Workflow</summary>
-              <div className="mt-4 space-y-3">
-                {workflowItems.length > 0 ? workflowItems.map((item, index) => {
-                  const row = item;
-                  return <div key={`${row.agent}-${row.action}-${index}`} className="rounded-2xl bg-slate-900/30 p-3"><div className="text-sm font-semibold text-slate-100 break-words">{row.agent || "System"} · {row.action || "update"}</div><div className="mt-1 text-sm text-slate-400 break-words">{row.details || "No details."}</div></div>;
-                }) : <div className="text-sm text-slate-500">No workflow entries yet.</div>}
-              </div>
-            </details>
-
             <div className="mt-6 border-t border-slate-800 pt-6">
               <div className="mb-3 flex items-center gap-3">
                 <span className="text-3xl font-black">📚 Retrieved Papers</span>
                 {papersAreStreaming && (
                   <span className="flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-xs font-semibold text-blue-400">
                     <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
-                    Analysis running…
+                    Deep analysis running…
                   </span>
                 )}
                 {displayedPapers.length > 0 && (
                   <span className="text-sm text-slate-500">{displayedPapers.length} papers</span>
                 )}
               </div>
+              {papersAreStreaming && (
+                <div className="mb-3 rounded-2xl border border-blue-500/20 bg-blue-500/5 px-4 py-3">
+                  <div className="flex items-center justify-between text-xs mb-1.5">
+                    <span className="flex items-center gap-1.5 text-blue-300 font-semibold">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400 shrink-0" />
+                      Deep analysis in progress
+                    </span>
+                    <span className="text-slate-500 tabular-nums">{progress}%</span>
+                  </div>
+                  <div className="h-1 w-full rounded-full bg-slate-800 overflow-hidden mb-1.5">
+                    <div
+                      className="h-full rounded-full bg-blue-500/70 transition-all duration-700"
+                      style={{ width: `${Math.max(progress, 5)}%` }}
+                    />
+                  </div>
+                  {/* Raw backend message — shows exact step (e.g. adversarial batch X/Y) */}
+                  <div className="text-[11px] text-slate-400 leading-snug">
+                    {rawProgressMsg || "Initialising deep validation…"}
+                  </div>
+                  <div className="mt-1 text-[10px] text-slate-600">
+                    {displayedPapers.length} candidates found · Scores available after analysis completes
+                  </div>
+                </div>
+              )}
               {displayedPapers.length > 0 ? (
                 <div className="space-y-5">
                   {displayedPapers.map((paper, index) => {
@@ -1960,10 +2002,11 @@ ${html}
                     const deepRead = deepReadResults[paperKey];
                     return (
                       <article key={`${paper.title}-${index}`} className="rounded-3xl bg-slate-950/40 p-5 fade-in">
-                        {/* Title + Add-to-Lab button */}
+                        {/* Title row */}
                         <div className="flex items-start gap-3">
                           <h3 className="flex-1 text-sm font-semibold leading-snug break-words text-slate-100">{index + 1}. {paper.title || "Untitled"}</h3>
-                          {(() => {
+                          {/* Add-to-Lab button — only in final phase */}
+                          {!papersAreStreaming && (() => {
                             const inLab = labRefs.some(r => r.key === paperKey);
                             return (
                               <button
@@ -1979,15 +2022,27 @@ ${html}
                           })()}
                         </div>
 
+                        {papersAreStreaming ? (
+                          /* ── Phase 1: candidate preview ── */
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                            <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-300">Candidate</span>
+                            <span><span className="font-semibold text-slate-300">Authors:</span> {paper.authors || "Unknown authors"}</span>
+                            <span><span className="font-semibold text-slate-300">Year:</span> {paper.year || "Unknown year"}</span>
+                            <span><span className="font-semibold text-slate-300">Source:</span> {paper.source || "Unknown source"}</span>
+                          </div>
+                        ) : (
+                          /* ── Phase 2: full scored result ── */
+                          <>
                         {/* Meta row — score chip first, then fields */}
-
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
                           {(() => {
-                            const sc = scoreChip(paper.evidence_score as number ?? paper.score as number);
-                            const raw = paper.evidence_score ?? paper.score;
+                            const deepScore = deepRead?.relevance_score != null ? (deepRead.relevance_score as number) : null;
+                            const rawScore = deepScore ?? (paper.evidence_score as number) ?? (paper.score as number);
+                            const sc = scoreChip(rawScore);
                             return (
                               <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold shrink-0 ${sc.cls}`}>
-                                {sc.label} &middot; {raw != null ? `${raw}/100` : "N/A"}
+                                {sc.label} &middot; {rawScore != null ? `${rawScore}/100` : "N/A"}
+                                {deepScore != null && <span className="ml-1 opacity-60 font-normal">(deep)</span>}
                               </span>
                             );
                           })()}
@@ -1995,6 +2050,12 @@ ${html}
                           <span><span className="font-semibold text-slate-300">Year:</span> {paper.year || "Unknown year"}</span>
                           <span><span className="font-semibold text-slate-300">Source:</span> {paper.source || "Unknown source"}</span>
                           <span><span className="font-semibold text-slate-300">OA:</span> {String(Boolean(paper.is_oa))}</span>
+                          {paper.paper_type_label && paper.paper_type_label !== "theory/other" && (
+                            <span><span className="font-semibold text-slate-300">Type:</span> {paper.paper_type_label}</span>
+                          )}
+                          {paper.domain_fit_label && paper.domain_fit_label !== "adjacent" && (
+                            <span><span className="font-semibold text-slate-300">Domain fit:</span> {paper.domain_fit_label}</span>
+                          )}
                         </div>
 
                         {/* One-line Insight */}
@@ -2037,9 +2098,9 @@ ${html}
                           >
                             {originalLoading[`${paperKey}-original`] ? "⬇ Downloading…" : "⬇ Download PDF"}
                           </button>
-                          {/* Translate PDF */}
+                          {/* Translate PDF + inline language selector */}
                           <button
-                            onClick={() => void triggerDownload(buildApiUrl("/api/papers/translate-pdf"), { paper: toBackendPaper(paper), target_languages: langs }, `${paper.title || "paper"}_${langs.map((l: string) => l.replace(/\s*\(.*?\)/g, "").trim()).join("-")}.pdf`, `${paperKey}-translate`)}
+                            onClick={() => void triggerDownload(buildApiUrl("/api/papers/translate-pdf"), { paper: toBackendPaper(paper), target_languages: langs }, `${paper.title || "paper"}_${(langs[0] || "translated").replace(/\s*\(.*?\)/g, "").trim()}.pdf`, `${paperKey}-translate`)}
                             disabled={!hasDownloadSource(paper) || translateLoading[`${paperKey}-translate`]}
                             className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
                               translateLoading[`${paperKey}-translate`]
@@ -2049,20 +2110,16 @@ ${html}
                           >
                             {translateLoading[`${paperKey}-translate`] ? "🌐 Translating…" : "🌐 Translate PDF"}
                           </button>
+                          <select
+                            value={langs[0] ?? "Chinese (Simplified)"}
+                            onChange={(e) => setTranslationLanguages((prev) => ({ ...prev, [paperKey]: [e.target.value] }))}
+                            className="rounded-xl border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-400 outline-none focus:border-purple-500/50 cursor-pointer"
+                          >
+                            {["Chinese (Simplified)","Chinese (Traditional)","English","Japanese","Korean","Spanish","French","German","Indonesian"].map((lang) => (
+                              <option key={lang} value={lang}>{lang}</option>
+                            ))}
+                          </select>
                         </div>
-
-                        {/* Translation language selector — collapsible */}
-                        <details className="mt-2 rounded-xl bg-slate-950/20">
-                          <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold text-slate-500 hover:text-slate-200 transition-colors">
-                            🌐 Translation target — {langs.join(", ")}
-                          </summary>
-                          <div className="px-3 pb-3 pt-1">
-                            <select multiple value={langs} onChange={(e) => setTranslationLanguages((prev) => ({ ...prev, [paperKey]: Array.from(e.target.selectedOptions).map((o) => o.value) }))} className="lang-select min-h-[96px] w-full rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500">
-                              {["Chinese (Simplified)","Chinese (Traditional)","English","Japanese","Korean","Spanish","French","German","Indonesian"].map((lang) => <option key={lang} value={lang}>{lang}</option>)}
-                            </select>
-                            <p className="mt-1 text-xs text-slate-600">Ctrl / Cmd to multi-select.</p>
-                          </div>
-                        </details>
 
                         {/* Error messages */}
                         {deepReadErrors[paperKey] && <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{deepReadErrors[paperKey]}</div>}
@@ -2077,12 +2134,6 @@ ${html}
                           </details>
                         )}
 
-                        {/* Open paper link */}
-                        {paper.url && (
-                          <div className="mt-2">
-                            <a href={paper.url} target="_blank" rel="noreferrer" className="text-xs text-blue-400 underline underline-offset-4 hover:text-blue-300">Open paper page ↗</a>
-                          </div>
-                        )}
 
                         {/* Deep Reading result — collapsible */}
                         {deepRead && (
@@ -2139,6 +2190,8 @@ ${html}
                               </div>
                             </div>
                           </details>
+                        )}
+                          </>
                         )}
                       </article>
                     );
@@ -2345,14 +2398,14 @@ ${html}
                       onChange={e => setLabOutputType(e.target.value)}
                       className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500"
                     >
-                      <option value="literature_review">Literature Review · 文献综述</option>
-                      <option value="theoretical_framework">Theoretical Framework · 理论框架</option>
-                      <option value="research_proposal">Research Proposal · 研究提案</option>
-                      <option value="discussion">Discussion Section · 讨论章节</option>
-                      <option value="introduction">Introduction · 引言</option>
-                      <option value="conclusion">Conclusion · 结论</option>
-                      <option value="abstract">Abstract · 摘要</option>
-                      <option value="argumentative_essay">Academic Essay · 学术论文</option>
+                      <option value="literature_review">Literature Review</option>
+                      <option value="theoretical_framework">Theoretical Framework</option>
+                      <option value="research_proposal">Research Proposal</option>
+                      <option value="discussion">Discussion Section</option>
+                      <option value="introduction">Introduction</option>
+                      <option value="conclusion">Conclusion</option>
+                      <option value="abstract">Abstract</option>
+                      <option value="argumentative_essay">Academic Essay</option>
                     </select>
                   </div>
 
@@ -2401,15 +2454,15 @@ ${html}
                       className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500"
                     >
                       <option value="English">English</option>
-                      <option value="Chinese (Simplified)">Chinese (Simplified) · 简体中文</option>
-                      <option value="Chinese (Traditional)">Chinese (Traditional) · 繁體中文</option>
-                      <option value="Japanese">Japanese · 日本語</option>
-                      <option value="Korean">Korean · 한국어</option>
-                      <option value="Spanish">Spanish · Español</option>
-                      <option value="French">French · Français</option>
-                      <option value="German">German · Deutsch</option>
-                      <option value="Portuguese">Portuguese · Português</option>
-                      <option value="Arabic">Arabic · العربية</option>
+                      <option value="Chinese (Simplified)">Chinese (Simplified)</option>
+                      <option value="Chinese (Traditional)">Chinese (Traditional)</option>
+                      <option value="Japanese">Japanese</option>
+                      <option value="Korean">Korean</option>
+                      <option value="Spanish">Spanish</option>
+                      <option value="French">French</option>
+                      <option value="German">German</option>
+                      <option value="Portuguese">Portuguese</option>
+                      <option value="Arabic">Arabic</option>
                     </select>
                   </div>
 

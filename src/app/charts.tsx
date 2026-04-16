@@ -11,7 +11,10 @@ export type ChartPaper = {
   score?: number | string;
   paper_type_label?: string;
   domain_fit_label?: string;
+  evidence_strength?: string;         // "Strong" | "Moderate" | "Limited" | "Weak" — Y fallback
+  research_fit_score?: number | null; // 0–100 numeric fit — secondary Y fallback
   citation_count?: number | string;   // used by BullseyeChart X-axis when available
+  word_count?: number;                // used by BullseyeChart for dot size
 };
 
 // ── Colour palette ────────────────────────────────────────────────────────────
@@ -248,6 +251,51 @@ function toScore(v: number | string | undefined, fallback = 50): number {
   return isNaN(n) ? fallback : Math.min(100, Math.max(0, n));
 }
 
+/** Maps evidence_strength string to a methodology proxy score (fallback when paper_type_label absent). */
+function evidenceStrengthScore(s?: string): number | null {
+  if (!s) return null;
+  const map: Record<string, number> = {
+    "very strong": 88, "strong": 80, "high": 80,
+    "moderate": 62, "medium": 62,
+    "limited": 46, "low": 46, "weak": 38,
+  };
+  return map[s.toLowerCase()] ?? null;
+}
+
+/**
+ * Derive a methodology-rigour score (0–100) from paper_type_label.
+ * Used for the Y axis ("Methodology Strength ↑").
+ * Meta-analyses and empirical studies rank highest; theoretical/other rank lowest.
+ * Falls back to evidence_strength tier, then research_fit_score, then 50 (centre).
+ */
+function methodologyScore(label?: string, evStrength?: string, rfScore?: number | null): number {
+  // Primary: paper_type_label (only available in deep/curated mode after LLM enrichment)
+  if (label) {
+    const scores: Record<string, number> = {
+      "Meta":         93,
+      "Empirical":    85,
+      "Quantitative": 82,
+      "Mixed":        76,
+      "Review":       70,
+      "Qualitative":  65,
+      "Design":       58,
+      "Framework":    54,
+      "Case":         49,
+      "Theory":       44,
+      "Other":        40,
+    };
+    const s = scores[normType(label)];
+    if (s !== undefined) return s;
+  }
+  // Fallback 1: evidence_strength tier (available in fast mode from rule ranker)
+  const es = evidenceStrengthScore(evStrength);
+  if (es !== null) return es;
+  // Fallback 2: research_fit_score (numeric, 0–100)
+  if (rfScore != null && rfScore > 0) return Math.max(30, Math.min(95, rfScore));
+  // Default: centre
+  return 50;
+}
+
 /** Arrowhead path for an axis line */
 function arrowHead(x: number, y: number, dir: "up" | "right"): string {
   const s = 5;
@@ -256,145 +304,72 @@ function arrowHead(x: number, y: number, dir: "up" | "right"): string {
 }
 
 export function BullseyeChart({ papers }: { papers: ChartPaper[] }) {
-  const { dots, presentTypes, axisLabels } = useMemo(() => {
-    if (papers.length === 0)
-      return { dots: [], presentTypes: [], axisLabels: { x: "Score", y: "Methodology" } };
+  const { dots, presentTypes } = useMemo(() => {
+    if (papers.length === 0) return { dots: [], presentTypes: [] };
 
-    // ── Stable deterministic pseudo-random in [0, 1] for paper i, axis tag t ─
-    // Uses a simple bijective integer hash so every (i, t) pair gives a unique,
-    // stable value without depending on any mutable state.
+    // Stable deterministic hash for reproducible per-paper jitter
     const pseudoRand = (i: number, t: number): number => {
       let h = (i * 2654435761 + t * 40503) >>> 0;
       h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
       h = Math.imul(h ^ (h >>> 11), 0xac4d6a45) >>> 0;
       h = (h ^ (h >>> 16)) >>> 0;
-      return h / 0xffffffff; // [0, 1]
+      return h / 0xffffffff;
     };
 
-    // ── domain label → 4-tier score baseline [0, 100] ────────────────────
-    // Gives natural vertical spread even when evidence_score is absent.
-    const domainBase = (label: string | undefined): number => {
-      const d = normDomain(label);
-      if (d === "Direct")        return 82;
-      if (d === "Mostly Direct") return 64;
-      if (d === "Adjacent")      return 40;
-      return 20; // Off-Target
-    };
-
-    // ── Collect raw field values ──────────────────────────────────────────
-    const n = papers.length;
-    const rawScore    = papers.map(p => toScore(p.score, -1));
-    const rawEvidence = papers.map(p =>
-      p.evidence_score != null ? toScore(p.evidence_score, -1) : -1
-    );
-    // Citation: log-scale so a 1000-citation paper doesn't dwarf a 10-citation one
-    const rawCitation = papers.map(p => {
-      const c = Number(p.citation_count);
-      return Number.isFinite(c) && c >= 0 ? Math.min(100, Math.log1p(c) * 14.4) : -1;
-    });
-
-    // ── How many papers have a real (non-default) value for each field? ───
-    const countReal = (arr: number[]) => arr.filter(v => v >= 0).length;
-    const citReal  = countReal(rawCitation);
-    const evReal   = countReal(rawEvidence);
-    const scoreReal = papers.filter(p => p.score != null).length;
-
-    // Range of a series (ignoring sentinel -1)
-    const realRange = (arr: number[]): number => {
-      const vals = arr.filter(v => v >= 0);
-      if (vals.length < 2) return 0;
-      return Math.max(...vals) - Math.min(...vals);
-    };
-
-    // ── Choose X axis ─────────────────────────────────────────────────────
-    // Priority: citation (if ≥ 40% populated) → score (if range ≥ 8) → domain+jitter
-    let xLabel: string;
-    let xBases: number[];
-
-    if (citReal >= n * 0.4) {
-      xBases = rawCitation.map((v, i) => v >= 0 ? v : domainBase(papers[i].domain_fit_label));
-      xLabel = "Citation Count (log)";
-    } else if (scoreReal >= n * 0.4 && realRange(rawScore) >= 8) {
-      xBases = rawScore.map((v, i) => v >= 0 ? v : 50);
-      xLabel = "Relevance Score";
-    } else {
-      // All scores identical or absent → use domain baseline so rings spread horizontally
-      xBases = papers.map(p => domainBase(p.domain_fit_label));
-      xLabel = "Relevance Score";
-    }
-
-    // ── Choose Y axis ─────────────────────────────────────────────────────
-    // Priority: evidence_score (if ≥ 40% populated AND range ≥ 8) → domain+jitter
-    let yLabel = "Methodology Strength";
-    let yBases: number[];
-
-    if (evReal >= n * 0.4 && realRange(rawEvidence) >= 8) {
-      yBases = rawEvidence.map((v, i) => v >= 0 ? v : domainBase(papers[i].domain_fit_label));
-    } else {
-      // evidence_score absent or flat → domain-derived 4-tier baseline
-      yBases = papers.map(p => domainBase(p.domain_fit_label));
-    }
-
-    // ── Add deterministic jitter to both axes ─────────────────────────────
-    // Even when real data has good range, a small jitter prevents exact overlaps.
-    // Jitter amplitude scales inversely with data quality: less jitter when data
-    // has real spread, more when we're relying on the domain fallback.
-    const xJitterAmp = xLabel === "Citation Count (log)" ? 4 : realRange(xBases) >= 20 ? 4 : 14;
-    const yJitterAmp = evReal >= n * 0.4 && realRange(rawEvidence) >= 8 ? 4 : 12;
-
-    const xValues = xBases.map((b, i) => b + (pseudoRand(i, 1) * 2 - 1) * xJitterAmp);
-    const yValues = yBases.map((b, i) => b + (pseudoRand(i, 2) * 2 - 1) * yJitterAmp);
-
-    // ── Normalize to chart space ─────────────────────────────────────────
-    const xMin = Math.min(...xValues), xMax = Math.max(...xValues);
-    const yMin = Math.min(...yValues), yMax = Math.max(...yValues);
-    // Guarantee minimum range so dots are never all at center
-    const xRange = Math.max(20, xMax - xMin);
-    const yRange = Math.max(20, yMax - yMin);
-    const xMid = (xMin + xMax) / 2;
-    const yMid = (yMin + yMax) / 2;
-
-    const CX = 178, CY = 170;
-    const plotR = 125;
-
+    const CX = 178, CY = 170, maxR = 136;
+    // Usable plotting radius — leave room for dot radius
+    const plotR = maxR * 0.92;
     const typeSet = new Set<string>();
+
     const dots = papers.map((p, i) => {
-      const xv = xValues[i];
-      const yv = yValues[i];
-      const dx = ((xv - xMid) / xRange) * plotR * 1.65;
-      const dy = -((yv - yMid) / yRange) * plotR * 1.65; // SVG y flipped
+      // ── X axis: Relevance Score (evidence_score, 0–100) ──────────────────────
+      // Right side of chart = higher relevance.
+      const relevance = p.evidence_score != null ? toScore(p.evidence_score) : toScore(p.score, 50);
 
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const clampFactor = dist > plotR ? plotR / dist : 1;
-      const x = CX + dx * clampFactor;
-      const y = CY + dy * clampFactor;
+      // ── Y axis: Methodology Strength (derived from paper_type_label, 0–100) ──
+      // Top of chart = stronger methodology.
+      // Fallback chain: paper_type_label → evidence_strength tier → research_fit_score → 50
+      const meth = methodologyScore(p.paper_type_label, p.evidence_strength, p.research_fit_score);
 
-      const dotR = 1.8 + (Math.max(0, yv) / 100) * 2.2;
+      // Normalise both axes to [-1, +1] so 50 maps to the chart centre.
+      const xNorm = (relevance - 50) / 50;   // positive → right half
+      const yNorm = (meth      - 50) / 50;   // positive → top half (SVG Y inverted)
+
+      // Small deterministic jitter (±5 px) to prevent exact overlap
+      const jx = (pseudoRand(i, 5) * 2 - 1) * 5;
+      const jy = (pseudoRand(i, 9) * 2 - 1) * 5;
+
+      // Dot size = content volume (word count)
+      const wc  = p.word_count ?? 0;
+      const dotR = 2.5 + Math.min(4.5, (wc / 400) * 4.5);
+
+      // Clamp to stay inside outer ring
+      const bx = CX + xNorm * plotR + jx;
+      const by = CY - yNorm * plotR + jy;   // minus because SVG Y grows downward
+      const x  = Math.max(CX - maxR + dotR + 1, Math.min(CX + maxR - dotR - 1, bx));
+      const y  = Math.max(CY - maxR + dotR + 1, Math.min(CY + maxR - dotR - 1, by));
+
       const type   = normType(p.paper_type_label);
       const domain = normDomain(p.domain_fit_label);
       typeSet.add(type);
       const color = TYPE_COLORS[type] ?? TYPE_COLORS["Other"];
-      return { x, y, dotR, color, type, domain, xVal: Math.round(xv), yVal: Math.round(yv) };
+      return { x, y, dotR, color, type, domain, score: relevance, meth };
     });
 
-    return {
-      dots,
-      presentTypes: [...typeSet],
-      axisLabels: { x: xLabel, y: yLabel },
-    };
+    return { dots, presentTypes: [...typeSet] };
   }, [papers]);
 
   if (dots.length === 0)
-    return <ChartCard title="Scatter · Methodology vs Citation"><EmptyChart msg="Need score data" /></ChartCard>;
+    return <ChartCard title="Bullseye · Score vs Methodology"><EmptyChart msg="Need score data" /></ChartCard>;
 
   const W = 356, H = 430, CX = 178, CY = 170, maxR = 136;
-  const axisExt = maxR + 14; // axis lines extend a bit past outer ring
+  const axisExt = maxR + 14;
 
   return (
-    <ChartCard title={`Scatter · ${axisLabels.y} vs ${axisLabels.x} · dot size = methodology`}>
+    <ChartCard title="Bullseye · X = relevance · Y = methodology strength">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto chart-svg">
 
-        {/* ── Background rings (visual reference only) ── */}
+        {/* ── Background rings ── */}
         {BULLSEYE_RINGS.map(({ domain, innerR, outerR, fill, stroke }) => (
           <path
             key={`ring-${domain}`}
@@ -408,79 +383,56 @@ export function BullseyeChart({ papers }: { papers: ChartPaper[] }) {
         ))}
 
         {/* ── Crosshair axes ── */}
-        {/* Y axis (Methodology Strength — up) */}
-        <line
-          x1={CX} y1={CY + axisExt}
-          x2={CX} y2={CY - axisExt}
-          stroke="#3b82f6" strokeWidth={1.1} strokeOpacity={0.55}
-        />
+        <line x1={CX} y1={CY + axisExt} x2={CX} y2={CY - axisExt}
+          stroke="#3b82f6" strokeWidth={1.1} strokeOpacity={0.55} />
         <path d={arrowHead(CX, CY - axisExt, "up")} fill="#3b82f6" opacity={0.7} />
-
-        {/* X axis (Citation Count — right) */}
-        <line
-          x1={CX - axisExt} y1={CY}
-          x2={CX + axisExt} y2={CY}
-          stroke="#3b82f6" strokeWidth={1.1} strokeOpacity={0.55}
-        />
+        <line x1={CX - axisExt} y1={CY} x2={CX + axisExt} y2={CY}
+          stroke="#3b82f6" strokeWidth={1.1} strokeOpacity={0.55} />
         <path d={arrowHead(CX + axisExt, CY, "right")} fill="#3b82f6" opacity={0.7} />
 
-        {/* Axis labels */}
-        <text
-          x={CX} y={CY - axisExt - 8}
-          textAnchor="middle" fill="#60a5fa"
-          fontSize={8} fontWeight={600} opacity={0.85}
-          className="chart-label"
-        >{axisLabels.y} ↑</text>
-        <text
-          x={CX + axisExt - 2} y={CY - 10}
-          textAnchor="end" fill="#60a5fa"
-          fontSize={8} fontWeight={600} opacity={0.85}
-          className="chart-label"
-        >→ {axisLabels.x}</text>
+        {/* ── Axis labels ── */}
+        <text x={CX} y={CY - axisExt - 8} textAnchor="middle"
+          fill="#60a5fa" fontSize={8} fontWeight={600} opacity={0.85}
+          className="chart-label">Methodology Strength ↑</text>
+        <text x={CX + axisExt - 2} y={CY - 10} textAnchor="end"
+          fill="#60a5fa" fontSize={8} fontWeight={600} opacity={0.85}
+          className="chart-label">→ Relevance Score</text>
 
-        {/* Quadrant micro-labels */}
-        <text x={CX + 6}  y={CY - 6} fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label">High both</text>
-        <text x={CX - 50} y={CY - 6} fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label" textAnchor="end">Rigorous</text>
-        <text x={CX + 6}  y={CY + 10} fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label">Cited</text>
-        <text x={CX - 50} y={CY + 10} fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label" textAnchor="end">Low</text>
+        {/* ── Quadrant micro-labels ── */}
+        <text x={CX + 6}  y={CY - 6}  fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label">Best picks</text>
+        <text x={CX - 50} y={CY - 6}  fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label" textAnchor="end">Rigorous</text>
+        <text x={CX + 6}  y={CY + 10} fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label">High fit</text>
+        <text x={CX - 50} y={CY + 10} fill="#94a3b8" fontSize={6.5} opacity={0.5} className="chart-label" textAnchor="end">Low priority</text>
 
-        {/* ── Dots (positioned by real data) ── */}
+        {/* ── Dots (2D Cartesian: X=relevance, Y=methodology) ── */}
         {dots.map((d, i) => (
           <circle
             key={`dot-${i}`}
             cx={d.x} cy={d.y} r={d.dotR}
-            fill={d.color} fillOpacity={0.50}
-            stroke={d.color} strokeWidth={0.6} strokeOpacity={0.35}
+            fill={d.color} fillOpacity={0.6}
+            stroke={d.color} strokeWidth={0.6} strokeOpacity={0.5}
           >
-            <title>{d.type} · {d.domain} · {axisLabels.x}={Math.round(d.xVal)} · {axisLabels.y}={Math.round(d.yVal)}</title>
+            <title>{d.type} · {d.domain} · relevance {d.score} · methodology {d.meth}</title>
           </circle>
         ))}
 
-        {/* ── Ring domain labels — placed at 210° (lower-left arc), horizontal ── */}
+        {/* ── Ring domain labels at 210° arc ── */}
         {BULLSEYE_RINGS.map(({ domain, innerR, outerR, stroke }) => {
           const midR = innerR > 0 ? (innerR + outerR) / 2 : outerR * 0.52;
-          // 210° in standard math coords = lower-left in SVG (y-down)
-          // lx = CX + cos(210°)*midR,  ly = CY − sin(210°)*midR
-          // cos(210°) = −0.866,  sin(210°) = −0.5  →  ly = CY + 0.5*midR
-          const rad = (210 * Math.PI) / 180;
-          const lx = CX + Math.cos(rad) * midR;
-          const ly = CY - Math.sin(rad) * midR;
+          const rad  = (210 * Math.PI) / 180;
+          const lx   = CX + Math.cos(rad) * midR;
+          const ly   = CY - Math.sin(rad) * midR;
           return (
-            <text
-              key={`rl-${domain}`}
-              x={lx} y={ly}
-              textAnchor="middle"
+            <text key={`rl-${domain}`} x={lx} y={ly} textAnchor="middle"
               fill={stroke} fontSize={6.5} fontWeight={600} opacity={0.70}
-              className="chart-label"
-            >
-              {domain}
+              className="chart-label">{domain}
             </text>
           );
         })}
 
         {/* ── Summary line ── */}
         <text x={CX} y={CY + maxR + 18} textAnchor="middle" fill={C.label} className="chart-label" fontSize={7.5}>
-          {dots.length} paper{dots.length !== 1 ? "s" : ""}{" · "}centre = median{" · "}larger dot = stronger methodology
+          {dots.length} paper{dots.length !== 1 ? "s" : ""}{" · "}X = relevance{" · "}Y = methodology{" · "}dot size = word count
         </text>
 
         {/* ── Type color legend ── */}
