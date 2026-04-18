@@ -368,8 +368,8 @@ export default function SearchPage() {
         {/* ── Header ── */}
         <div>
           <h1 className="text-2xl font-bold tracking-tight flex items-baseline gap-2">
-            Academic ATS
-            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-normal text-slate-500">v1.3</span>
+            <span className="text-slate-900">Academi</span><span className="text-blue-500">Cats</span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-normal text-slate-500">v1.5.0-Alpha</span>
           </h1>
           <p className="mt-1 text-sm text-slate-500">Deep search · Research Brief · Multi-agent analysis</p>
         </div>

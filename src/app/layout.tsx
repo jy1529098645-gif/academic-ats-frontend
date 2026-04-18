@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Academic ATS",
+  title: "AcademiCats",
   description: "AI-powered academic research assistant",
 };
 

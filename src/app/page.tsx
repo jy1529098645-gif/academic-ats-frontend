@@ -1818,10 +1818,10 @@ ${html}
           {/* Title block */}
           <div className="shrink-0 flex flex-col justify-center py-1">
             <div className="text-5xl font-black tracking-tight">
-              <span className="text-slate-100">Academic </span>
-              <span className="text-blue-500">ATS</span>
+              <span className="text-slate-100">Academi</span>
+              <span className="text-blue-500">Cats</span>
             </div>
-            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.4.0-Alpha</span></p>
+            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.5.0-Alpha</span></p>
           </div>
           {/* Announcement banner – fills remaining width */}
           <div className="min-w-0 flex-1">

@@ -54,7 +54,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center p-6 bg-gray-50">
       <div className="w-full max-w-md space-y-4 rounded-2xl border bg-white p-8 shadow-sm">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">AcademicATS Alpha</h1>
+          <h1 className="text-2xl font-semibold"><span className="text-gray-900">Academi</span><span className="text-blue-500">Cats</span></h1>
           <p className="text-sm text-gray-500">Sign in to continue</p>
         </div>
 
