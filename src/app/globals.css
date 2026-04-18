@@ -35,6 +35,18 @@ body {
   background: rgba(148, 163, 184, 0.55);
 }
 
+/* Horizontal thin scrollbar (history timeline) */
+.thin-scrollbar-x::-webkit-scrollbar { height: 2px; }
+.thin-scrollbar-x::-webkit-scrollbar-track { background: transparent; }
+.thin-scrollbar-x::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 9999px;
+}
+.thin-scrollbar-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
+.thin-scrollbar-x { scrollbar-width: thin; scrollbar-color: rgba(100,116,139,0.35) transparent; }
+
 /* Marquee ticker animation */
 @keyframes ticker {
   from { transform: translateX(0); }

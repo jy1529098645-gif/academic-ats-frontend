@@ -2,7 +2,9 @@
 
 import ReactMarkdown from "react-markdown";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { PaperCharts } from "./charts";
+import { supabase } from "@/lib/supabase/client";
 
 const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 const CONFIGURED_API_BASE = RAW_API_BASE.replace(/\/+$/, "");
@@ -85,6 +87,24 @@ async function fetchWithApiFallback(path: string, init?: RequestInit, preferBlob
 
   if (lastResponse) return lastResponse;
   throw lastError instanceof Error ? lastError : new Error(preferBlob ? "Download failed." : "Request failed.");
+}
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
+// Always calls getSession() fresh so the token is never stale.
+async function getAuthToken(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+}
+
+async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = await getAuthToken();
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers as Record<string, string> | undefined ?? {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
 }
 
 function explainFetchError(error: unknown) {
@@ -654,6 +674,7 @@ export default function HomePage() {
   const [customQueryEnabled, setCustomQueryEnabled] = useState(false);
   const [customQueryValue, setCustomQueryValue] = useState("");
   const [directionData, setDirectionData] = useState<QueryDirectionsResponse | null>(null);
+  const [understandOpen, setUnderstandOpen] = useState(true);
   const [selectedDirIndex, setSelectedDirIndex] = useState<number | null>(null);
   const [selectedSubIndex, setSelectedSubIndex] = useState<number | null>(null);
 
@@ -735,6 +756,125 @@ export default function HomePage() {
   const [translateErrors, setTranslateErrors] = useState<Record<string, string>>({});
   const [translationLanguages, setTranslationLanguages] = useState<Record<string, string[]>>({});
 
+  // ── Auth state ─────────────────────────────────────────────────────────────
+  const [authUser, setAuthUser] = useState<{ email?: string } | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | null>(null);
+
+  // ── Role & multi-account management ───────────────────────────────────────
+  // Single source of truth for developer emails — used for role checks everywhere.
+  const DEV_ACCTS = ["dev01@academicats.com", "dev02@academicats.com", "dev03@academicats.com"];
+  const DEV_PWD   = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "";
+  // userRole: "guest" | "user" | "dev"
+  const userRole = !authUser ? "guest" : DEV_ACCTS.includes(authUser.email ?? "") ? "dev" : "user";
+  const isDeveloper = userRole === "dev";
+  type SavedAccount = { email: string; type: "dev" | "otp" };
+  const [savedAccounts, setSavedAccounts] = useState<SavedAccount[]>(() => {
+    try { return JSON.parse(localStorage.getItem("ats-saved-accounts") || "[]"); } catch { return []; }
+  });
+  const [addAcctInput, setAddAcctInput]       = useState("");
+  const [acctSwitchMsg, setAcctSwitchMsg]     = useState<{ text: string; error?: boolean } | null>(null);
+  const [acctSwitching, setAcctSwitching]     = useState<string | null>(null);
+
+  const persistAccounts = (list: SavedAccount[]) => {
+    localStorage.setItem("ats-saved-accounts", JSON.stringify(list));
+    setSavedAccounts(list);
+  };
+  const addSavedAccount = () => {
+    const email = addAcctInput.trim().toLowerCase();
+    if (!email || savedAccounts.some(a => a.email === email)) { setAddAcctInput(""); return; }
+    const type: SavedAccount["type"] = DEV_ACCTS.includes(email) ? "dev" : "otp";
+    persistAccounts([...savedAccounts, { email, type }]);
+    setAddAcctInput("");
+  };
+  const removeSavedAccount = (email: string) => persistAccounts(savedAccounts.filter(a => a.email !== email));
+
+  const handleGoogleLogin = async () => {
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/` : 'http://localhost:3000/';
+    await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } });
+  };
+
+  const switchToAccount = async (acct: SavedAccount) => {
+    setAcctSwitchMsg(null);
+    setAcctSwitching(acct.email);
+    try {
+      if (acct.type === "dev") {
+        const { error } = await supabase.auth.signInWithPassword({ email: acct.email, password: DEV_PWD });
+        if (error) { setAcctSwitchMsg({ text: error.message, error: true }); }
+        else { setUserPanel(null); setUserMenuOpen(false); }
+      } else {
+        const redirectTo = typeof window !== "undefined" ? `${window.location.origin}/` : "/";
+        const { error } = await supabase.auth.signInWithOtp({ email: acct.email, options: { emailRedirectTo: redirectTo } });
+        if (error) { setAcctSwitchMsg({ text: error.message, error: true }); }
+        else { setAcctSwitchMsg({ text: `Magic link sent to ${acct.email} — check your inbox.` }); }
+      }
+    } catch (e: any) {
+      setAcctSwitchMsg({ text: e?.message ?? "Unknown error", error: true });
+    }
+    setAcctSwitching(null);
+  };
+  const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
+  const [historyPanelHeight, setHistoryPanelHeight] = useState(150);
+  type HistoryEntry = { id: string; title: string; updated_at: string; result?: SearchResponse | null; directionData?: QueryDirectionsResponse | null; entryType?: "understand" | "search"; usedUnderstand?: boolean };
+  const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [favoritedIds, setFavoritedIds] = useState<Set<string>>(new Set());
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const historyDragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const historyPanelRef = useRef<HTMLDivElement | null>(null);
+  const authWidgetRef = useRef<HTMLDivElement | null>(null);
+
+  const toggleFavorite = useCallback((id: string) => {
+    setFavoritedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      try { if (authUser?.email) localStorage.setItem(_fKey(authUser.email), JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+
+  const clearAllHistory = useCallback(() => {
+    if (authUser?.email) localStorage.removeItem(_hKey(authUser.email));
+    setHistoryList([]);
+    setActiveHistoryId(null);
+  }, [authUser?.email]);
+
+  const deleteHistoryEntry = useCallback((id: string) => {
+    setHistoryList(prev => {
+      const next = prev.filter(e => e.id !== id);
+      if (authUser?.email) localStorage.setItem(_hKey(authUser.email), JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const restoreHistory = useCallback((item: HistoryEntry) => {
+    setQuery(item.title);
+    setActiveHistoryId(item.id);
+    // Restore understand directions if present
+    if (item.directionData) {
+      setDirectionData(item.directionData);
+      setUnderstandOpen(true);
+      setSelectedDirIndex(item.directionData.recommended_direction ?? 0);
+      setSelectedSubIndex(item.directionData.recommended_sub ?? 0);
+      setCustomQueryEnabled(false);
+      setCustomQueryValue("");
+    }
+    // Restore search result if present
+    if (item.result) {
+      briefTextRef.current = item.result.brief || "";
+      setBriefStreamText(item.result.brief || "");
+      setStreamPapers(item.result.papers || []);
+      setIsSubmitting(false);
+      setJob({ status: "done", progress: 100, result: item.result, finished_at: Date.now() / 1000, message: "✅ Finished.", workflow: [] } as any);
+    }
+  }, []);
+  const authTokenRef = useRef<string | null>(null);
+  const briefTextRef = useRef("");          // mirrors briefStreamText for use inside closures
+  const briefClearedRef = useRef(false);    // guards: clear old brief only on first chunk of new search
+  const router = useRouter();
+
 
   // Timer — ticks while search is running AND the progress bar hasn't hit 100 yet.
   // "Bar at 100" mirrors the displayProgress useMemo logic but computed inline here
@@ -749,6 +889,76 @@ export default function HomePage() {
     return () => window.clearInterval(id);
   }, [_timerBarFull]);
 
+  // ── Auth: load current session + subscribe to changes ─────────────────────
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      authTokenRef.current = session?.access_token ?? null;
+      setAuthUser(session?.user ?? null);
+      console.log("[auth] getSession →", session?.user?.email ?? "no session", "| token:", session?.access_token ? "✓" : "✗");
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      authTokenRef.current = session?.access_token ?? null;
+      setAuthUser(session?.user ?? null);
+      console.log("[auth] onAuthStateChange →", session?.user?.email ?? "signed out", "| token:", session?.access_token ? "✓" : "✗");
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ── Per-user localStorage key helpers ────────────────────────────────────
+  const _hKey = (email: string) => `ats-search-history::${email}`;
+  const _fKey = (email: string) => `ats-history-favorites::${email}`;
+
+  // Load / reload history + favorites whenever the logged-in user changes
+  useEffect(() => {
+    const email = authUser?.email;
+    if (!email) { setHistoryList([]); setFavoritedIds(new Set()); return; }
+
+    // One-time migration: move legacy unscoped data → dev01's bucket
+    const LEGACY_H = "ats-search-history";
+    const LEGACY_F = "ats-history-favorites";
+    const DEV01 = "dev01@academicats.com";
+    if (email === DEV01) {
+      const legacy = localStorage.getItem(LEGACY_H);
+      if (legacy) { if (!localStorage.getItem(_hKey(DEV01))) localStorage.setItem(_hKey(DEV01), legacy); localStorage.removeItem(LEGACY_H); }
+      const legacyF = localStorage.getItem(LEGACY_F);
+      if (legacyF) { if (!localStorage.getItem(_fKey(DEV01))) localStorage.setItem(_fKey(DEV01), legacyF); localStorage.removeItem(LEGACY_F); }
+    }
+
+    // Always load localStorage first for instant display
+    let localItems: HistoryEntry[] = [];
+    try { localItems = JSON.parse(localStorage.getItem(_hKey(email)) || "[]"); } catch { /* ignore */ }
+    setHistoryList(localItems);
+
+    // Favorites
+    try { setFavoritedIds(new Set(JSON.parse(localStorage.getItem(_fKey(email)) || "[]"))); } catch { setFavoritedIds(new Set()); }
+
+    // If user has a real Supabase token, also fetch from cloud and merge
+    const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+    getAuthToken().then(token => {
+      console.log("[history] getAuthToken →", token ? `✓ (${token.slice(0, 20)}…)` : "✗ no token — skip cloud fetch");
+      if (!token) return;
+      console.log("[history] fetching /api/history with Bearer token");
+      fetch(`${API}/api/history?limit=50`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => { console.log("[history] /api/history response status:", r.status); return r.ok ? r.json() : Promise.reject(r.status); })
+        .then((cloudItems: HistoryEntry[]) => {
+          console.log("[history] cloud items received:", cloudItems.length);
+          // Merge: local items take precedence (have more data like directionData/usedUnderstand)
+          // Cloud items fill in anything not already in local by id
+          const localIds = new Set(localItems.map(e => e.id));
+          const merged = [
+            ...localItems,
+            ...cloudItems.filter(c => !localIds.has(c.id)),
+          ].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+            .slice(0, 50);
+          setHistoryList(merged);
+          // Persist merged list locally so next load is fast
+          try { localStorage.setItem(_hKey(email), JSON.stringify(merged)); } catch { /* ignore */ }
+        })
+        .catch((err) => { console.warn("[history] cloud fetch failed:", err, "— falling back to local"); });
+    });
+  }, [authUser?.email]);
+
   // Load persisted public danmu messages from localStorage on first mount
   useEffect(() => {
     try {
@@ -759,6 +969,20 @@ export default function HomePage() {
       }
     } catch { /* ignore */ }
   }, []);
+
+  useEffect(() => {
+    if (!historyPanelOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        historyPanelRef.current && !historyPanelRef.current.contains(e.target as Node) &&
+        authWidgetRef.current && !authWidgetRef.current.contains(e.target as Node)
+      ) {
+        setHistoryPanelOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [historyPanelOpen]);
 
   async function handleSendMessage() {
     const text = msgInput.trim();
@@ -1118,6 +1342,7 @@ ${html}
   }
 
   async function handleUnderstand() {
+    if (!authUser) { router.push("/login"); return; }
     const trimmed = query.trim();
     if (!trimmed || isUnderstanding) return;
     setUiError("");
@@ -1129,10 +1354,22 @@ ${html}
 
     const applyResult = (data: QueryDirectionsResponse) => {
       setDirectionData(data);
+      setUnderstandOpen(true);
       setSelectedDirIndex(data.recommended_direction ?? 0);
       setSelectedSubIndex(data.recommended_sub ?? 0);
       setCustomQueryEnabled(false);
       setCustomQueryValue("");
+      // Save understand result to history
+      try {
+        const _id = `u-${Date.now()}`;
+        const _entry: HistoryEntry = { id: _id, title: trimmed, updated_at: new Date().toISOString(), entryType: "understand", directionData: data };
+        const _key = authUser?.email ? _hKey(authUser.email) : null;
+        const _prev: HistoryEntry[] = JSON.parse((_key && localStorage.getItem(_key)) || "[]");
+        const _next = [_entry, ..._prev].slice(0, 20);
+        if (_key) localStorage.setItem(_key, JSON.stringify(_next));
+        setHistoryList(_next);
+        setActiveHistoryId(_id);
+      } catch { /* ignore */ }
     };
 
     try {
@@ -1166,32 +1403,37 @@ ${html}
       let sseEvent = "";
       let sseData = "";
 
-      outer: while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) { sseEvent = line.slice(7).trim(); }
-          else if (line.startsWith("data: ")) { sseData = line.slice(6).trim(); }
-          else if (line === "") {
-            if (!sseEvent || !sseData) { sseEvent = ""; sseData = ""; continue; }
-            try {
-              const obj = JSON.parse(sseData) as Record<string, unknown>;
-              if (sseEvent === "status") {
-                setUnderstandStatus(String(obj.message ?? ""));
-              } else if (sseEvent === "result") {
-                applyResult(obj as QueryDirectionsResponse);
-                break outer;
-              } else if (sseEvent === "error") {
-                setUiError(String(obj.error ?? "Query understanding failed."));
-                break outer;
-              }
-            } catch { /* ignore malformed */ }
-            sseEvent = ""; sseData = "";
+      try {
+        outer: while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (line.startsWith("event: ")) { sseEvent = line.slice(7).trim(); }
+            else if (line.startsWith("data: ")) { sseData = line.slice(6).trim(); }
+            else if (line === "") {
+              if (!sseEvent || !sseData) { sseEvent = ""; sseData = ""; continue; }
+              try {
+                const obj = JSON.parse(sseData) as Record<string, unknown>;
+                if (sseEvent === "status") {
+                  setUnderstandStatus(String(obj.message ?? ""));
+                } else if (sseEvent === "result") {
+                  applyResult(obj as QueryDirectionsResponse);
+                  break outer;
+                } else if (sseEvent === "error") {
+                  setUiError(String(obj.error ?? "Query understanding failed."));
+                  break outer;
+                }
+              } catch { /* ignore malformed */ }
+              sseEvent = ""; sseData = "";
+            }
           }
         }
+      } finally {
+        // Always release the stream — prevents ERR_INCOMPLETE_CHUNKED_ENCODING
+        reader.cancel().catch(() => {});
       }
     } catch (error) {
       setUiError(explainFetchError(error));
@@ -1202,6 +1444,7 @@ ${html}
   }
 
   async function handleSearch() {
+    if (!authUser) { router.push("/login"); return; }
     const trimmed = query.trim();
     if (!trimmed || isSubmitting) return;
     if (!sourceFilters.length) {
@@ -1209,11 +1452,12 @@ ${html}
       return;
     }
 
+    const _usedUnderstand = directionData !== null;
     abortRef.current = new AbortController();
     setIsSubmitting(true);
     setUiError("");
     setJob(null);
-    setBriefStreamText("");
+    briefClearedRef.current = false;  // will clear on first brief_chunk of the new search
     setStreamPapers([]);
     setStreamAgents({});
     setStartedAgents(new Set());
@@ -1229,8 +1473,8 @@ ${html}
     if (effectiveQuery !== trimmed) setQuery(effectiveQuery);
     // Collapse workspace panels so the run-status block is immediately visible
     setSettingsOpen(false);
+    setUnderstandOpen(false);
     setQueryOptionsData(null);
-    setDirectionData(null);
 
     const payload = {
       query: trimmed,
@@ -1255,9 +1499,11 @@ ${html}
     };
 
     try {
+      const authToken = await getAuthToken();
+      const authHeaders: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {};
       const res = await fetchWithApiFallback("/api/search/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify(payload),
         signal: abortRef.current.signal,
       });
@@ -1298,7 +1544,14 @@ ${html}
                 : (prev?.workflow ?? []),
             }));
           } else if (sseEvent === "brief_chunk") {
-            setBriefStreamText((prev) => prev + (data.text ?? ""));
+            if (!briefClearedRef.current) {
+              briefClearedRef.current = true;
+              briefTextRef.current = "";
+              setBriefStreamText("");
+            }
+            const chunk = data.text ?? "";
+            briefTextRef.current += chunk;
+            setBriefStreamText((prev) => prev + chunk);
           } else if (sseEvent === "papers") {
             if (Array.isArray(data.papers)) {
               setStreamPapers(data.papers);
@@ -1329,6 +1582,25 @@ ${html}
               result: data.result ?? null,
               finished_at: Date.now() / 1000,
             }));
+            // ── Auto-save to local history ──────────────────────────────────
+            const _slim = data.result ? {
+              ...data.result,
+              // Prefer streamed brief (briefTextRef) over result.brief — they should match,
+              // but the streamed version is guaranteed to be complete even if backend omits it from result.
+              brief: data.result.brief || briefTextRef.current || undefined,
+              papers: (data.result.papers || []).map((p: Paper) => { const { raw: _r, ...rest } = p as any; return rest; }),
+            } : null;
+            const _histTitle = _slim?.final_search_query || _slim?.original_query || query.trim();
+            const _histId = `${Date.now()}`;
+            const _histEntry: HistoryEntry = { id: _histId, title: _histTitle, updated_at: new Date().toISOString(), entryType: "search", usedUnderstand: _usedUnderstand, result: _slim };
+            try {
+              const _key = authUser?.email ? _hKey(authUser.email) : null;
+              const _prev: HistoryEntry[] = JSON.parse((_key && localStorage.getItem(_key)) || "[]");
+              const _next = [_histEntry, ..._prev].slice(0, 20);
+              if (_key) localStorage.setItem(_key, JSON.stringify(_next));
+              setHistoryList(_next);
+              setActiveHistoryId(_histId);
+            } catch { /* ignore */ }
           } else if (sseEvent === "error") {
             setJob((prev) => ({
               ...prev,
@@ -1549,7 +1821,7 @@ ${html}
               <span className="text-slate-100">Academic </span>
               <span className="text-blue-500">ATS</span>
             </div>
-            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.4.0</span></p>
+            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.4.0-Alpha</span></p>
           </div>
           {/* Announcement banner – fills remaining width */}
           <div className="min-w-0 flex-1">
@@ -1839,7 +2111,7 @@ ${html}
               </div>
             </details>
 
-            <details className="mt-3 rounded-2xl bg-slate-950/40 px-3 py-2.5" open={Boolean(directionData?.directions?.length)}>
+            <details className="mt-3 rounded-2xl bg-slate-950/40 px-3 py-2.5" open={Boolean(directionData?.directions?.length) && understandOpen} onToggle={e => setUnderstandOpen((e.currentTarget as HTMLDetailsElement).open)}>
               <summary className="cursor-pointer select-none text-sm font-semibold text-slate-200">🔍 Query Understanding</summary>
               <div className="mt-3">
                 {directionData?.directions?.length ? (
@@ -2730,6 +3002,500 @@ ${html}
         </div>
       </div>
 
+      {/* ── Auth widget — fixed bottom-left ───────────────────────────────── */}
+      {!authLoading && (
+        <div ref={authWidgetRef} className="fixed left-4 z-50 transition-[bottom] duration-200" style={{ bottom: historyPanelOpen ? historyPanelHeight + 12 : 16 }}>
+          {authUser ? (
+            <div className="relative">
+              {/* User menu popup */}
+              {userMenuOpen && (
+                <>
+                  {/* Backdrop */}
+                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute bottom-12 left-0 z-50 w-64 rounded-2xl border border-slate-700/60 bg-slate-900/95 shadow-2xl backdrop-blur-md overflow-hidden">
+                    {/* User info header */}
+                    <div className="px-4 py-3 border-b border-slate-700/50">
+                      <div className="flex items-center gap-3">
+                        <div className="h-9 w-9 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold shrink-0">
+                          {(authUser.email?.[0] ?? "U").toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-slate-200 truncate">{authUser.email}</p>
+                          <p className="text-[10px] text-blue-400 mt-0.5">Alpha Member</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Menu items */}
+                    <div className="py-1.5">
+                      {([
+                        { key: "profile",      label: "Profile" },
+                        { key: "accounts",     label: "Accounts" },
+                        { key: "settings",     label: "Settings" },
+                        { key: "subscription", label: "Subscription" },
+                        { key: "help",         label: "Help" },
+                      ] as const).map(({ key, label }) => (
+                        <button
+                          key={key}
+                          onClick={() => { setUserPanel(key); setUserMenuOpen(false); }}
+                          className="w-full flex items-center px-4 py-2 text-sm text-slate-300 hover:bg-slate-800/60 hover:text-slate-100 transition-colors text-left"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Add account — inline below Help */}
+                    <div className="border-t border-slate-700/50 px-4 py-2.5 space-y-2">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide">Add account</p>
+                      {/* Saved accounts quick-switch */}
+                      {savedAccounts.length > 0 && (
+                        <div className="space-y-1">
+                          {savedAccounts.map(acct => {
+                            const isCurrent = acct.email === authUser?.email;
+                            const isLoading = acctSwitching === acct.email;
+                            return (
+                              <div key={acct.email} className={`flex items-center gap-2 rounded-lg px-2 py-1.5 ${isCurrent ? "bg-blue-500/10" : "bg-slate-800/40"}`}>
+                                <div className="h-5 w-5 rounded-full bg-slate-700 flex items-center justify-center text-[9px] font-bold text-slate-300 shrink-0">
+                                  {acct.email[0].toUpperCase()}
+                                </div>
+                                <p className="flex-1 text-[11px] text-slate-300 truncate">{acct.email}</p>
+                                {isCurrent
+                                  ? <span className="text-[9px] text-blue-400 shrink-0">Active</span>
+                                  : <button onClick={() => switchToAccount(acct)} disabled={acctSwitching !== null} className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-50 shrink-0">{isLoading ? "…" : "Switch"}</button>
+                                }
+                                <button onClick={() => removeSavedAccount(acct.email)} className="text-[9px] text-slate-600 hover:text-red-400 shrink-0 ml-0.5">✕</button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {/* Status message */}
+                      {acctSwitchMsg && (
+                        <p className={`text-[10px] rounded px-2 py-1 ${acctSwitchMsg.error ? "text-red-400 bg-red-500/10" : "text-emerald-400 bg-emerald-500/10"}`}>
+                          {acctSwitchMsg.text}
+                        </p>
+                      )}
+                      {/* Google login */}
+                      <button
+                        onClick={handleGoogleLogin}
+                        className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900/60 hover:bg-slate-800 px-2.5 py-1.5 text-[11px] text-slate-200 transition-colors"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 48 48" fill="none"><path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/><path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/><path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/><path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/></svg>
+                        Continue with Google
+                      </button>
+                      {/* Input + Add (coming soon) */}
+                      <div className="flex gap-1.5 opacity-40 cursor-not-allowed">
+                        <input
+                          type="email"
+                          disabled
+                          placeholder="email@example.com"
+                          className="flex-1 min-w-0 rounded-lg border border-slate-700 bg-slate-900/60 px-2.5 py-1 text-[11px] text-slate-500 placeholder-slate-700 cursor-not-allowed"
+                        />
+                        <button
+                          disabled
+                          className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] text-slate-600 cursor-not-allowed shrink-0"
+                        >Add</button>
+                      </div>
+                      <p className="text-[9px] text-slate-600">Email login coming soon · use Google to sign in</p>
+                    </div>
+
+                    {/* Sign out */}
+                    <div className="border-t border-slate-700/50 py-1.5">
+                      <button
+                        onClick={() => { supabase.auth.signOut(); setAuthUser(null); setUserMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-4 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors text-left"
+                      >
+                        <span className="text-base w-5 text-center">→</span>
+                        Sign out
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Avatar button + History button */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setUserMenuOpen(o => !o)}
+                  className="flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/90 pl-1 pr-3 py-1 shadow-lg backdrop-blur-sm hover:border-blue-500/40 transition-all"
+                >
+                  <div className="h-6 w-6 rounded-full bg-blue-600 flex items-center justify-center text-white text-[10px] font-bold">
+                    {(authUser.email?.[0] ?? "U").toUpperCase()}
+                  </div>
+                  <span className="max-w-[140px] truncate text-xs text-slate-400">{authUser.email}</span>
+                </button>
+                <button
+                  onClick={() => {
+                    const next = !historyPanelOpen;
+                    setHistoryPanelOpen(next);
+                    if (next) {
+                      // Load from localStorage immediately (works for all users)
+                      try {
+                        const _k = authUser?.email ? _hKey(authUser.email) : null;
+                        const local: typeof historyList = JSON.parse((_k && localStorage.getItem(_k)) || "[]");
+                        setHistoryList(local);
+                      } catch { setHistoryList([]); }
+                      setHistoryLoading(false);
+                    }
+                  }}
+                  className={`rounded-full border px-3 py-1 text-xs shadow-lg backdrop-blur-sm transition-all ${
+                    historyPanelOpen
+                      ? "border-blue-500/60 bg-blue-500/10 text-blue-400"
+                      : "border-slate-700/60 bg-slate-900/90 text-slate-400 hover:border-blue-500/40 hover:text-blue-400"
+                  }`}
+                >
+                  History
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => router.push("/login")}
+              className="rounded-full border border-slate-700/60 bg-slate-900/90 px-4 py-1.5 text-xs font-medium text-slate-400 shadow-lg backdrop-blur-sm hover:border-blue-500/50 hover:text-blue-400 transition-all"
+            >
+              Sign in
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── History slide-up panel ───────────────────────────────────────────── */}
+      {historyPanelOpen && (
+        <div
+          ref={historyPanelRef}
+          className="fixed bottom-0 left-0 right-0 z-40 rounded-t-2xl border-t border-slate-700/60 bg-slate-950/95 backdrop-blur-md shadow-2xl flex flex-col"
+          style={{ height: historyPanelHeight }}
+        >
+          {/* Drag strip — invisible h-0 touch target at top, nub sits over border */}
+          <div
+            className="absolute top-0 left-0 right-0 h-3 cursor-ns-resize select-none z-10 flex items-center justify-center"
+            onMouseDown={e => {
+              e.preventDefault();
+              historyDragRef.current = { startY: e.clientY, startH: historyPanelHeight };
+              const onMove = (ev: MouseEvent) => {
+                if (!historyDragRef.current) return;
+                const delta = historyDragRef.current.startY - ev.clientY;
+                const next = Math.max(120, Math.min(window.innerHeight * 0.85, historyDragRef.current.startH + delta));
+                setHistoryPanelHeight(next);
+              };
+              const onUp = () => {
+                historyDragRef.current = null;
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+          >
+            <div className="w-8 h-0.5 rounded-full bg-slate-700/80 mt-1" />
+          </div>
+
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 pt-3 pb-1.5 shrink-0">
+            <div className="flex items-center gap-3">
+              {/* Title + count badge */}
+              <span className="relative text-sm font-semibold text-slate-200 pr-3">
+                Search History
+                {historyList.length > 0 && (
+                  <span className="absolute -top-1.5 right-0 min-w-[14px] text-center text-[8px] font-normal leading-tight bg-slate-700 text-slate-300 rounded-full px-0.5">
+                    {historyList.length}
+                  </span>
+                )}
+              </span>
+              {historyList.length > 0 && (
+                <button onClick={clearAllHistory} className="text-[10px] text-slate-600 hover:text-red-400 transition-colors leading-none">Clear all</button>
+              )}
+            </div>
+            <button onClick={() => setHistoryPanelOpen(false)} className="text-slate-600 hover:text-slate-300 transition-colors text-base leading-none">✕</button>
+          </div>
+
+          {/* Timeline body — horizontal scroll, no vertical scroll */}
+          <div
+            ref={timelineScrollRef}
+            className="flex-1 overflow-x-auto overflow-y-hidden thin-scrollbar-x"
+            onWheel={e => {
+              if (!timelineScrollRef.current) return;
+              e.preventDefault();
+              timelineScrollRef.current.scrollLeft += e.deltaY + e.deltaX;
+            }}
+          >
+            {/* Inner column: nodes row + clear-all row (both scroll together; clear-all is sticky-left) */}
+            <div className="flex flex-col min-w-max px-4 pt-2 pb-1">
+              {!historyLoading && historyList.length === 0 && (
+                <p className="text-xs text-slate-500 py-2">No history yet. Run a search to get started.</p>
+              )}
+              {!historyLoading && historyList.length > 0 && (
+                <div className="relative flex items-start">
+                  {/* Continuous timeline line behind all nodes */}
+                  <div className="absolute top-[19px] left-[5px] right-[5px] h-px bg-slate-700/50 pointer-events-none" />
+                  {historyList.map((item, i) => {
+                    const next = historyList[i + 1];
+                    const sameGroup = next && next.title === item.title;
+                    const isFav = favoritedIds.has(item.id);
+                    const d = new Date(item.updated_at);
+                    const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                    const dateStr = d.toLocaleDateString([], { year: "2-digit", month: "2-digit", day: "2-digit" });
+                    // Dot color: blue = newest (i===0), green = search with understand, amber = direct search or understand-only
+                    const dotCls = i === 0
+                      ? "border-blue-500 bg-blue-500/40"
+                      : (item.entryType === "search" && item.usedUnderstand)
+                        ? "border-emerald-500 bg-emerald-500/20"
+                        : "border-amber-500 bg-amber-500/20";
+                    return (
+                      <div
+                        key={item.id}
+                        className={`relative flex flex-col items-center z-10 group ${i < historyList.length - 1 ? (sameGroup ? "mr-3" : "mr-10") : ""}`}
+                      >
+                        {/* Active highlight */}
+                        {activeHistoryId === item.id && (
+                          <div className="absolute inset-x-0 -top-0.5 bottom-0 rounded-lg bg-blue-500/10 ring-1 ring-blue-500/20 pointer-events-none" />
+                        )}
+                        {/* Delete button */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteHistoryEntry(item.id); }}
+                          className="absolute -top-1 -right-1 hidden group-hover:flex h-3.5 w-3.5 items-center justify-center rounded-full bg-slate-700 hover:bg-red-600 text-slate-400 hover:text-white text-[9px] leading-none transition-colors z-20"
+                          title="Delete"
+                        >✕</button>
+                        {/* Star — above dot */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleFavorite(item.id); }}
+                          className={`text-[10px] leading-none mb-0.5 transition-colors ${isFav ? "text-amber-400" : "text-slate-700 hover:text-amber-400"}`}
+                          title={isFav ? "Unfavourite" : "Favourite"}
+                        >{isFav ? "★" : "☆"}</button>
+                        {/* Restore button */}
+                        <button
+                          onClick={() => restoreHistory(item)}
+                          className="relative flex flex-col items-center gap-1 px-1.5 pt-0 pb-0.5 focus:outline-none"
+                          title={item.title}
+                        >
+                          {/* Dot — ring masks the line behind it */}
+                          <div className={`h-2.5 w-2.5 rounded-full border-2 ring-[3px] ring-slate-950 transition-colors group-hover:border-blue-400 group-hover:bg-blue-400/30 ${dotCls}`} />
+                          <p className="max-w-[100px] text-[11px] text-slate-300 group-hover:text-blue-300 transition-colors leading-snug line-clamp-2 text-center mt-0.5">{item.title}</p>
+                          <p className="text-[9px] text-slate-600 whitespace-nowrap leading-[1.1]">{timeStr}</p>
+                          <p className="text-[9px] text-slate-700 whitespace-nowrap leading-[1.1]">{dateStr}</p>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── User panel modals ─────────────────────────────────────────────────── */}
+      {userPanel && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6" onClick={() => setUserPanel(null)}>
+          <div className="w-full max-w-md rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
+              <h2 className="text-base font-semibold text-slate-100">
+                {userPanel === "profile"      && "Profile"}
+                {userPanel === "accounts"     && "Accounts"}
+                {userPanel === "settings"     && "Settings"}
+                {userPanel === "subscription" && "Subscription"}
+                {userPanel === "help"         && "Help"}
+              </h2>
+              <button onClick={() => setUserPanel(null)} className="text-slate-500 hover:text-slate-300 transition-colors text-lg leading-none">✕</button>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5">
+
+              {userPanel === "profile" && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-4">
+                    <div className="h-16 w-16 rounded-full bg-blue-600 flex items-center justify-center text-white text-2xl font-bold">
+                      {(authUser?.email?.[0] ?? "U").toUpperCase()}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200">{authUser?.email}</p>
+                      <p className="text-xs text-blue-400 mt-0.5">Alpha Member</p>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">Email</p>
+                      <p className="text-sm text-slate-300">{authUser?.email}</p>
+                    </div>
+                    <div className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">Plan</p>
+                      <p className="text-sm text-slate-300">Alpha — Early Access</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {userPanel === "settings" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
+                    <div>
+                      <p className="text-sm text-slate-200">Theme</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Dark / Light mode</p>
+                    </div>
+                    <button
+                      onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
+                      className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-400 hover:border-blue-500/50 hover:text-blue-400 transition-colors"
+                    >
+                      {theme === "dark" ? "🌙 Dark" : "☀️ Light"}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
+                    <div>
+                      <p className="text-sm text-slate-200">Default Paper Count</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Papers returned per search</p>
+                    </div>
+                    <span className="text-sm text-slate-300 font-mono">{paperCount}</span>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
+                    <div>
+                      <p className="text-sm text-slate-200">Fast Mode</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Quick results vs deep analysis</p>
+                    </div>
+                    <span className={`text-xs font-semibold px-2 py-1 rounded-full ${fastMode ? "bg-blue-500/20 text-blue-400" : "bg-slate-700 text-slate-400"}`}>
+                      {fastMode ? "On" : "Off"}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {userPanel === "subscription" && (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-lg">💎</span>
+                      <span className="text-sm font-bold text-blue-300">Alpha Access</span>
+                    </div>
+                    <p className="text-xs text-slate-400">You have full access to all features during the Alpha period.</p>
+                  </div>
+                  <div className="space-y-2 text-xs text-slate-400">
+                    {["Unlimited searches", "Multi-agent deep analysis", "PDF export", "Synthesis Lab", "Early access to new features"].map(f => (
+                      <div key={f} className="flex items-center gap-2">
+                        <span className="text-green-400">✓</span>
+                        {f}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-600">Paid plans coming after Alpha. Your feedback shapes the pricing.</p>
+                </div>
+              )}
+
+              {userPanel === "accounts" && (
+                <div className="space-y-4">
+                  {/* Current account */}
+                  <div className="rounded-xl bg-slate-800/50 px-4 py-3">
+                    <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-1.5">Current account</p>
+                    <div className="flex items-center gap-2.5">
+                      <div className="h-7 w-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                        {(authUser?.email?.[0] ?? "U").toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm text-slate-200 truncate">{authUser?.email}</p>
+                        <p className="text-[10px] text-slate-500">{isDeveloper ? "Dev account" : "User"}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Saved accounts */}
+                  {savedAccounts.length > 0 && (
+                    <div>
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">Saved accounts</p>
+                      <div className="space-y-1.5">
+                        {savedAccounts.map(acct => {
+                          const isCurrent = acct.email === authUser?.email;
+                          const isLoading = acctSwitching === acct.email;
+                          return (
+                            <div key={acct.email} className={`flex items-center gap-2 rounded-xl px-3 py-2 ${isCurrent ? "bg-blue-500/10 border border-blue-500/20" : "bg-slate-800/40"}`}>
+                              <div className="h-6 w-6 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-[10px] font-bold shrink-0">
+                                {acct.email[0].toUpperCase()}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs text-slate-200 truncate">{acct.email}</p>
+                                <p className="text-[9px] text-slate-500">{acct.type === "dev" ? "Dev · password login" : "OTP · magic link"}</p>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {!isCurrent && (
+                                  <button
+                                    onClick={() => switchToAccount(acct)}
+                                    disabled={acctSwitching !== null}
+                                    className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors font-medium"
+                                  >{isLoading ? "…" : "Switch"}</button>
+                                )}
+                                {isCurrent && <span className="text-[9px] text-blue-400">Active</span>}
+                                <button
+                                  onClick={() => removeSavedAccount(acct.email)}
+                                  className="text-[10px] text-slate-600 hover:text-red-400 transition-colors ml-1"
+                                  title="Remove"
+                                >✕</button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Status message */}
+                  {acctSwitchMsg && (
+                    <p className={`text-xs rounded-lg px-3 py-2 ${acctSwitchMsg.error ? "bg-red-500/10 text-red-400" : "bg-emerald-500/10 text-emerald-400"}`}>
+                      {acctSwitchMsg.text}
+                    </p>
+                  )}
+
+                  {/* Add account */}
+                  <div>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">Add account</p>
+                    <button
+                      onClick={handleGoogleLogin}
+                      className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900/50 hover:bg-slate-800 px-3 py-1.5 text-xs text-slate-200 transition-colors mb-2"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 48 48" fill="none"><path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/><path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/><path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/><path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/></svg>
+                      Continue with Google
+                    </button>
+                    <div className="flex gap-2 opacity-40 cursor-not-allowed">
+                      <input
+                        type="email"
+                        disabled
+                        placeholder="email@example.com"
+                        className="flex-1 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs text-slate-500 placeholder-slate-700 cursor-not-allowed"
+                      />
+                      <button
+                        disabled
+                        className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-600 cursor-not-allowed shrink-0"
+                      >Add</button>
+                    </div>
+                    <p className="text-[9px] text-slate-600 mt-1.5">
+                      Email login coming soon · use Google to sign in
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {userPanel === "help" && (
+                <div className="space-y-3">
+                  {[
+                    { icon: "📖", title: "How to search", desc: "Enter a research question and click Run Search or Quick Search." },
+                    { icon: "🧪", title: "Synthesis Lab", desc: "Select papers from results, then generate a literature review or proposal." },
+                    { icon: "📄", title: "Deep Read", desc: "Click Deep Read on any paper to get a full structured analysis." },
+                    { icon: "✉️", title: "Contact us", desc: "Email jy1529098645@gmail.com for feedback or support." },
+                  ].map(({ icon, title, desc }) => (
+                    <div key={title} className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span>{icon}</span>
+                        <p className="text-sm font-semibold text-slate-200">{title}</p>
+                      </div>
+                      <p className="text-xs text-slate-400">{desc}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
