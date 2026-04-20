@@ -7,189 +7,37 @@ import { PaperCharts } from "./charts";
 import { supabase } from "@/lib/supabase/client";
 import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
 import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
-import { THEME_REGISTRY, THEME_STORAGE, themesByMode, defaultThemeFor, type ThemeMode } from "@/lib/themes";
+import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
+import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
+import {
+  buildApiUrl,
+  fetchWithApiFallback,
+  fetchWithAuth,
+  getAuthToken,
+  explainFetchError,
+} from "@/lib/api";
+import {
+  AnnouncementBanner,
+  makeMsg,
+  type DanmuMsg,
+} from "@/components/header/AnnouncementBanner";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
   Zap, FlaskConical, SlidersHorizontal, BookOpen, Upload, FolderOpen,
   PenLine, ListChecks, Ruler, Quote, Globe, Sparkles, Square, Play, Star,
   ChevronRight, ChevronLeft, ChevronDown, Trash2, Download, ClipboardList,
   X, Gem, Check, Mail, Moon, Sun, User, Settings, CreditCard, HelpCircle, Users,
-  Plus, Minus, ArrowRight, Megaphone, MessageSquare, Lightbulb, ExternalLink,
+  Plus, Minus, ArrowRight, Lightbulb, ExternalLink,
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical
 } from "lucide-react";
 
-const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
-const CONFIGURED_API_BASE = RAW_API_BASE.replace(/\/+$/, "");
-let runtimeApiBase = CONFIGURED_API_BASE;
-
-function normalizeBase(base: string) {
-  return (base || "").replace(/\/+$/, "");
-}
-
-function buildApiUrl(path: string, baseOverride?: string) {
-  if (!path.startsWith("/")) {
-    throw new Error(`API path must start with "/": ${path}`);
-  }
-  const base = normalizeBase(baseOverride ?? runtimeApiBase);
-  return base ? `${base}${path}` : path;
-}
-
-function getApiBaseCandidates() {
-  const candidates: string[] = [];
-  const push = (value: string) => {
-    const normalized = normalizeBase(value);
-    if (!candidates.includes(normalized)) candidates.push(normalized);
-  };
-
-  if (CONFIGURED_API_BASE) {
-    // Explicit base is configured — only try it and same-host:8000.
-    // Do NOT fall back to the relative-path ("") candidate: that would
-    // hit the Next.js server which always returns 404 for /api/* routes
-    // it doesn't own, producing a misleading "404" when the real problem
-    // is that the Python backend is not reachable.
-    push(CONFIGURED_API_BASE);
-  } else {
-    // No explicit base: try relative first, then auto-detect port 8000.
-    push("");
-  }
-
-  if (typeof window !== "undefined") {
-    const { protocol, hostname, port } = window.location;
-    if (hostname) {
-      const defaultPort = protocol === "https:" ? "443" : "80";
-      if (port !== "8000") {
-        push(`${protocol}//${hostname}:8000`);
-      }
-      if (port && port !== defaultPort) {
-        push(`${protocol}//${hostname}`);
-      }
-    }
-  }
-
-  return candidates;
-}
-
-/** Thrown when both the initial request and the one automatic retry failed
- * with a network-level error (no HTTP response received). */
-class NetworkError extends Error {
-  constructor(message: string, public cause?: unknown) {
-    super(message);
-    this.name = "NetworkError";
-  }
-}
-
-/** Detect whether an error looks like a network/transport failure (no response
- * came back at all). Used to decide whether an automatic retry makes sense. */
-function _isNetworkError(err: unknown): boolean {
-  if (!err) return false;
-  // AbortError = user cancelled, never retry
-  if ((err as { name?: string }).name === "AbortError") return false;
-  if (err instanceof TypeError) return true;              // fetch network failure
-  const msg = (err as { message?: string }).message || "";
-  return /network|failed to fetch|load failed|ECONN|ETIMEDOUT|fetch failed/i.test(msg);
-}
-
-async function _tryFetchOnce(path: string, init?: RequestInit) {
-  const candidates = getApiBaseCandidates();
-  let lastResponse: Response | null = null;
-  let lastError: unknown = null;
-
-  for (const candidate of candidates) {
-    try {
-      const res = await fetch(buildApiUrl(path, candidate), init);
-      if (res.ok) {
-        runtimeApiBase = normalizeBase(candidate);
-        return { res };
-      }
-      lastResponse = res;
-      if (res.status !== 404) {
-        return { res };                                    // non-404 HTTP error is not retry-worthy
-      }
-    } catch (error) {
-      lastError = error;
-      if (CONFIGURED_API_BASE && candidate === normalizeBase(CONFIGURED_API_BASE)) {
-        // Configured base threw a transport error — bubble up so the retry
-        // layer can decide whether to try again.
-        throw lastError;
-      }
-    }
-  }
-  if (lastResponse) return { res: lastResponse };
-  throw lastError ?? new Error("Request failed.");
-}
-
-async function fetchWithApiFallback(path: string, init?: RequestInit, preferBlob = false) {
-  // One automatic retry on pure network failures (backend unreachable, DNS
-  // glitch, flaky tunnel). HTTP error statuses (4xx / 5xx) are returned as-is
-  // — the caller owns semantic error handling.
-  try {
-    const { res } = await _tryFetchOnce(path, init);
-    return res;
-  } catch (firstErr) {
-    // Don't retry if the caller aborted, or if the error isn't a transport problem.
-    if ((firstErr as { name?: string })?.name === "AbortError") throw firstErr;
-    if (!_isNetworkError(firstErr)) {
-      throw firstErr instanceof Error ? firstErr : new Error(preferBlob ? "Download failed." : "Request failed.");
-    }
-    // Brief pause so we don't hammer the server in the same tick — enough for
-    // a transient hiccup to clear but short enough to feel responsive.
-    await new Promise(r => setTimeout(r, 600));
-    try {
-      const { res } = await _tryFetchOnce(path, init);
-      return res;
-    } catch (secondErr) {
-      if ((secondErr as { name?: string })?.name === "AbortError") throw secondErr;
-      throw new NetworkError(
-        preferBlob ? "Download failed after one retry — the backend appears to be unreachable."
-                   : "Network error: the backend is unreachable (auto-retried once).",
-        secondErr,
-      );
-    }
-  }
-}
-
-// ── Auth helpers ──────────────────────────────────────────────────────────────
-// Always calls getSession() fresh so the token is never stale.
-async function getAuthToken(): Promise<string | null> {
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? null;
-}
-
-async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = await getAuthToken();
-  return fetch(url, {
-    ...options,
-    headers: {
-      ...(options.headers as Record<string, string> | undefined ?? {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-  });
-}
-
-function explainFetchError(error: unknown) {
-  if (!(error instanceof Error)) return "Request failed.";
-  const lowered = error.message.toLowerCase();
-  if (
-    lowered.includes("failed to fetch") ||
-    lowered.includes("networkerror") ||
-    lowered.includes("load failed") ||
-    lowered.includes("connection refused") ||
-    lowered.includes("econnrefused")
-  ) {
-    if (!CONFIGURED_API_BASE) {
-      return "Cannot reach the backend. No NEXT_PUBLIC_API_BASE_URL is configured. Set it to your FastAPI service URL (e.g. http://localhost:8000) and restart the frontend.";
-    }
-    return `Cannot reach the backend at ${CONFIGURED_API_BASE}. Please start (or restart) the Python backend with: uvicorn main:app --host 0.0.0.0 --port 8000 --reload`;
-  }
-  if (lowered.includes("404")) {
-    if (!CONFIGURED_API_BASE) {
-      return "The request returned 404. No NEXT_PUBLIC_API_BASE_URL is configured — set it to your FastAPI backend URL (e.g. http://localhost:8000), then restart the frontend.";
-    }
-    return `The request returned 404 from ${CONFIGURED_API_BASE}. The backend is reachable but the route is missing — make sure you are running the latest version of main.py and that the backend was restarted after any code changes.`;
-  }
-  return error.message;
-}
+// Transport / auth / error-copy helpers live in src/lib/api.ts. They used to
+// be duplicated in this file; keeping them in one place means the retry /
+// backoff behaviour is consistent across every future page and testable in
+// isolation. The imports at the top of this file pull them in; we re-declare
+// a thin `explainFetchError` alias only so the dev-time API_BASE mention in
+// error copy stays accurate when NEXT_PUBLIC_API_BASE_URL is missing.
 
 const DEFAULT_SOURCES = [
   "Semantic Scholar",
@@ -402,177 +250,9 @@ function scoreChip(score: number | undefined | null): { label: string; cls: stri
   return             { label: "Weak match",    cls: "score-chip-weak border-rose-500/40   bg-rose-500/15   text-rose-400"       };
 }
 
-// ── Announcement marquee ticker ───────────────────────────────────────────────
-const TICKER_ITEMS = [
-  <>👋 Hi everyone! I&apos;m Zest, the developer. Together with my team β lyrea, we built AcademiCats to empower researchers. 🐾</>,
-  <>🎯 Our goal is to improve efficiency and output quality throughout the academic research process — from literature discovery to deep analysis. 📚</>,
-  <>💌 Feedback is always welcome! Email <a href="mailto:jy1529098645@gmail.com" className="underline underline-offset-2 decoration-blue-400/60 text-blue-400 hover:text-blue-300 transition-colors">jy1529098645@gmail.com</a> or drop a note below. Thank you! 🙏</>,
-];
-
-// Join ticker items with a separator for the continuous scroll
-function TickerTrack() {
-  // Render the track twice (side-by-side) so the loop is seamless
-  const segment = (
-    <span className="inline-flex items-center gap-0">
-      {TICKER_ITEMS.map((item, i) => (
-        <span key={i} className="inline-block shrink-0 pr-16 text-xs leading-relaxed text-slate-300">
-          {item}
-        </span>
-      ))}
-    </span>
-  );
-  return (
-    // translate="no" — the ticker content is constantly re-composed by the
-    // keyframe animation; letting Google Translate rewrite its text nodes mid-
-    // flight produces a "removeChild" DOM mismatch. Opt out for this region so
-    // the rest of the app can still be translated freely.
-    <div translate="no" className="notranslate flex overflow-hidden" style={{ maskImage: "linear-gradient(to right, transparent 0%, black 4%, black 96%, transparent 100%)" }}>
-      <div
-        className="flex shrink-0 whitespace-nowrap"
-        style={{ animation: "ticker 38s linear infinite" }}
-      >
-        {segment}{segment}
-      </div>
-    </div>
-  );
-}
-
-// ── Danmu message shape ──────────────────────────────────────────────────────
-type DanmuMsg = { id: string; text: string; y: number; speed: number; delay: number; color: string };
-
-function makeMsg(text: string, idx: number): DanmuMsg {
-  const colors = ["#60a5fa","#a78bfa","#34d399","#fb923c","#f472b6","#38bdf8","#facc15"];
-  const h = (Math.imul(idx + 1, 2654435761) >>> 0);
-  return {
-    id: `msg-${idx}-${Date.now()}`,
-    text,
-    y: 6 + (h % 72),               // 6 % – 78 % vertical
-    speed: 35 + ((h >> 8) % 10),   // 35 s – 45 s  (matches ticker ~38 s)
-    color: colors[(h >> 4) % colors.length],
-    delay: -(((h >> 12) % 20)),     // stagger starting positions
-  };
-}
-
-// ── Announcement banner props ────────────────────────────────────────────────
-type AnnouncementBannerProps = {
-  collapsed: boolean;
-  onCollapse: () => void;
-  onExpand: () => void;
-  publicMsgs: DanmuMsg[];
-  msgInput: string;
-  setMsgInput: (v: string) => void;
-  msgPublic: boolean;
-  setMsgPublic: (v: boolean) => void;
-  msgSending: boolean;
-  msgSentOk: boolean;
-  onSend: () => void;
-};
-
-function AnnouncementBanner({
-  collapsed, onCollapse, onExpand,
-  publicMsgs,
-  msgInput, setMsgInput,
-  msgPublic, setMsgPublic,
-  msgSending, msgSentOk, onSend,
-}: AnnouncementBannerProps) {
-  if (collapsed) {
-    return (
-      <div className="h-full rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)] overflow-hidden flex flex-col">
-        {/* Thin collapse bar — mirrors expanded layout: 📢 | line | ▼ button at right */}
-        <div className="flex items-center gap-2 px-3 pr-10 shrink-0" style={{ height: "20px" }}>
-          <Megaphone size={11} className="shrink-0 text-blue-400/60" />
-          <div className="flex-1 h-px bg-gradient-to-r from-blue-500/25 via-purple-500/20 to-blue-500/25" />
-          <button
-            onClick={onExpand}
-            title="Expand announcements"
-            className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
-          >▼</button>
-        </div>
-        {/* Danmu area — translate="no" because each message is constantly
-            re-rendered via a CSS keyframe; Google Translate rewriting its
-            text nodes mid-flight produces a DOM mismatch crash. */}
-        <div translate="no" className="notranslate relative flex-1 overflow-hidden">
-          {publicMsgs.length === 0 ? (
-            <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-600 opacity-50 select-none pointer-events-none">
-              Public messages will flow here as danmu ✦
-            </div>
-          ) : (
-            publicMsgs.map((msg) => (
-              <span
-                key={msg.id}
-                className="absolute whitespace-nowrap text-[11px] font-medium select-none pointer-events-none"
-                style={{
-                  top: `${msg.y}%`,
-                  left: 0,
-                  color: msg.color,
-                  opacity: 0.82,
-                  animation: `danmuFloat ${msg.speed}s linear infinite`,
-                  animationDelay: `${msg.delay}s`,
-                  textShadow: "0 1px 4px rgba(0,0,0,0.35)",
-                }}
-              >
-                {msg.text}
-              </span>
-            ))
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-full flex flex-col justify-between overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
-      {/* Ticker row */}
-      <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
-        <Megaphone size={13} className="shrink-0 text-blue-400/70" />
-        <div className="min-w-0 flex-1 overflow-hidden">
-          <TickerTrack />
-        </div>
-        <button
-          onClick={onCollapse}
-          title="Collapse announcements"
-          className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
-        >▲</button>
-      </div>
-
-      {/* Message input row */}
-      <div className="flex items-center gap-1.5 border-t border-slate-800/50 px-3 py-1.5">
-        {/* Public / Private toggle */}
-        <button
-          onClick={() => setMsgPublic(!msgPublic)}
-          title={msgPublic ? "Public — will appear as danmu" : "Private — only emailed to developer"}
-          className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide transition select-none ${
-            msgPublic
-              ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-              : "bg-slate-700/30 text-slate-500 border border-slate-700/40"
-          }`}
-        >
-          {msgPublic ? "PUBLIC" : "PRIVATE"}
-        </button>
-        <MessageSquare size={11} className="shrink-0 text-slate-600" />
-        <input
-          type="text"
-          value={msgInput}
-          onChange={(e) => setMsgInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && !msgSending) void onSend(); }}
-          placeholder="Leave a message for the team…"
-          className="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-slate-300 outline-none placeholder:text-slate-700"
-        />
-        <button
-          onClick={() => void onSend()}
-          disabled={!msgInput.trim() || msgSending}
-          className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:opacity-50 ${
-            msgSentOk
-              ? "border-emerald-500/40 text-emerald-400"
-              : "border-slate-700/50 text-slate-500 hover:border-blue-500/40 hover:text-blue-400"
-          }`}
-        >
-          {msgSentOk ? <span className="inline-flex items-center gap-1"><Check size={11} strokeWidth={3} />Sent</span> : msgSending ? "…" : "Send"}
-        </button>
-      </div>
-    </div>
-  );
-}
+// Announcement banner (ticker + danmu + message input) now lives in
+// components/header/AnnouncementBanner.tsx. See the `AnnouncementBanner`
+// import at the top of this file — the component itself is fully extracted.
 
 function AgentSection({ title, payload, running = false }: { title: string; payload?: AgentPayload; running?: boolean }) {
   const hasData = payload && Object.keys(payload).filter(k => {
@@ -764,79 +444,30 @@ export default function HomePage() {
   const labAbortRef = useRef<AbortController | null>(null);
   const understandAbortRef = useRef<AbortController | null>(null);
 
-  // Theme model: a category (day/night) + a remembered theme inside each category.
-  // The header toggle flips only the category; the exact theme for each category
-  // is picked in Settings → Appearance. Persisted in localStorage per spec.
+  // Theme state is owned by the Zustand store (see src/lib/stores/theme-store).
+  // This slice used to live as three local useStates in this component; moving
+  // it to a store means every future screen (Settings modal, Login, error
+  // boundary) can read/mutate the same palette without prop drilling, and
+  // unrelated renders in this giant file no longer churn on theme changes.
   //
-  // First-time visitors (no `ats-theme-customized` flag set) ALWAYS see the
-  // default blue pair — Daylight Blue (day) preferred, Midnight Blue (night)
-  // only if the user explicitly flipped to night previously. Day is the
-  // initial-render default so the page doesn't flash a dark theme while the
-  // hydration effect reads localStorage.
-  const [themeMode, _setThemeModeRaw] = useState<ThemeMode>("day");
-  const [dayThemeId, _setDayThemeIdRaw] = useState<string>(defaultThemeFor("day").id);
-  const [nightThemeId, _setNightThemeIdRaw] = useState<string>(defaultThemeFor("night").id);
+  // First-time visitors (no `ats-theme-customized` flag) still see the default
+  // blue pair — Daylight Blue (day) / Midnight Blue (night) — because the
+  // store's initial state is the registry defaults and hydration below only
+  // runs when the flag is set.
+  const themeMode    = useThemeStore((s) => s.mode);
+  const dayThemeId   = useThemeStore((s) => s.dayThemeId);
+  const nightThemeId = useThemeStore((s) => s.nightThemeId);
+  const setThemeMode    = useThemeStore((s) => s.setMode);
+  const setDayThemeId   = useThemeStore((s) => s.setDayThemeId);
+  const setNightThemeId = useThemeStore((s) => s.setNightThemeId);
+  const setTheme        = useThemeStore((s) => s.setTheme);
   const theme = themeMode === "day" ? dayThemeId : nightThemeId;
 
-  // Capture the current (possibly-default) theme state and write it alongside
-  // setting the customized flag, so the user's first interaction snapshots
-  // what they're actually seeing — not whatever stale values happened to be
-  // in localStorage from an earlier, pre-flag session.
-  const _bootstrapCustomizedStorage = useCallback((mode: ThemeMode, dayId: string, nightId: string) => {
-    try {
-      if (localStorage.getItem(THEME_STORAGE.customized) === "1") return;
-      localStorage.setItem(THEME_STORAGE.mode,       mode);
-      localStorage.setItem(THEME_STORAGE.dayTheme,   dayId);
-      localStorage.setItem(THEME_STORAGE.nightTheme, nightId);
-      localStorage.setItem(THEME_STORAGE.customized, "1");
-    } catch {}
-  }, []);
-  const setThemeMode = useCallback((next: ThemeMode | ((prev: ThemeMode) => ThemeMode)) => {
-    _setThemeModeRaw(prev => {
-      const resolved = typeof next === "function" ? next(prev) : next;
-      _bootstrapCustomizedStorage(resolved, dayThemeId, nightThemeId);
-      try { localStorage.setItem(THEME_STORAGE.mode, resolved); } catch {}
-      return resolved;
-    });
-  }, [_bootstrapCustomizedStorage, dayThemeId, nightThemeId]);
-  const setDayThemeId = useCallback((id: string) => {
-    _setDayThemeIdRaw(id);
-    _bootstrapCustomizedStorage(themeMode, id, nightThemeId);
-    try { localStorage.setItem(THEME_STORAGE.dayTheme, id); } catch {}
-  }, [_bootstrapCustomizedStorage, themeMode, nightThemeId]);
-  const setNightThemeId = useCallback((id: string) => {
-    _setNightThemeIdRaw(id);
-    _bootstrapCustomizedStorage(themeMode, dayThemeId, id);
-    try { localStorage.setItem(THEME_STORAGE.nightTheme, id); } catch {}
-  }, [_bootstrapCustomizedStorage, themeMode, dayThemeId]);
-
-  const setTheme = (next: string) => {
-    // Back-compat shim so the two legacy callers that do `setTheme("light"|"dark")`
-    // keep working — maps the value to (mode, theme-within-mode).
-    if (next === "light") { setThemeMode("day"); setDayThemeId("light"); return; }
-    if (next === "dark")  { setThemeMode("night"); setNightThemeId("dark"); return; }
-    // Otherwise assume a registered theme id and figure out its mode.
-    const desc = THEME_REGISTRY.find(t => t.id === next);
-    if (!desc) return;
-    setThemeMode(desc.mode);
-    if (desc.mode === "day") setDayThemeId(desc.id); else setNightThemeId(desc.id);
-  };
-
   useEffect(() => {
-    // One-shot hydration from localStorage on mount — gated in an effect so SSR
-    // and first client render match (prevents hydration mismatch). Uses the
-    // raw setters so the hydration reads don't themselves mark the user as
-    // "customized" (which would defeat the first-time-visitor rule).
-    try {
-      const customized = localStorage.getItem(THEME_STORAGE.customized) === "1";
-      if (!customized) return;
-      const m = localStorage.getItem(THEME_STORAGE.mode);
-      if (m === "day" || m === "night") _setThemeModeRaw(m);
-      const d = localStorage.getItem(THEME_STORAGE.dayTheme);
-      if (d && THEME_REGISTRY.some(t => t.id === d && t.mode === "day")) _setDayThemeIdRaw(d);
-      const n = localStorage.getItem(THEME_STORAGE.nightTheme);
-      if (n && THEME_REGISTRY.some(t => t.id === n && t.mode === "night")) _setNightThemeIdRaw(n);
-    } catch {}
+    // One-shot hydration from localStorage on mount. The store's default
+    // initial state matches SSR output, so React never sees a hydration
+    // mismatch; the real persisted values land after first paint.
+    hydrateThemeStore();
   }, []);
 
   // Per-panel translucency (0.4–1.0). Applied to the three main panel backgrounds
