@@ -422,7 +422,11 @@ function TickerTrack() {
     </span>
   );
   return (
-    <div className="flex overflow-hidden" style={{ maskImage: "linear-gradient(to right, transparent 0%, black 4%, black 96%, transparent 100%)" }}>
+    // translate="no" — the ticker content is constantly re-composed by the
+    // keyframe animation; letting Google Translate rewrite its text nodes mid-
+    // flight produces a "removeChild" DOM mismatch. Opt out for this region so
+    // the rest of the app can still be translated freely.
+    <div translate="no" className="notranslate flex overflow-hidden" style={{ maskImage: "linear-gradient(to right, transparent 0%, black 4%, black 96%, transparent 100%)" }}>
       <div
         className="flex shrink-0 whitespace-nowrap"
         style={{ animation: "ticker 38s linear infinite" }}
@@ -484,8 +488,10 @@ function AnnouncementBanner({
             className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
           >▼</button>
         </div>
-        {/* Danmu area */}
-        <div className="relative flex-1 overflow-hidden">
+        {/* Danmu area — translate="no" because each message is constantly
+            re-rendered via a CSS keyframe; Google Translate rewriting its
+            text nodes mid-flight produces a DOM mismatch crash. */}
+        <div translate="no" className="notranslate relative flex-1 overflow-hidden">
           {publicMsgs.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-600 opacity-50 select-none pointer-events-none">
               Public messages will flow here as danmu ✦
@@ -958,9 +964,13 @@ export default function HomePage() {
     setLeftPct(20);
     setCenterPct(60);
   }, []);
-  const [analyticsVisible, setAnalyticsVisible] = useState(true);
-  const [leftVisible, setLeftVisible] = useState(true);
-  const [gridLeftCollapsed, setGridLeftCollapsed] = useState(false);
+  // Default collapsed — first click anywhere expands both panels to the initial
+  // 1:5:1 layout (see firstInteractionDone below). Retrieved Papers stays
+  // hidden until the same first interaction, then slides up from the bottom.
+  const [analyticsVisible, setAnalyticsVisible] = useState(false);
+  const [leftVisible, setLeftVisible] = useState(false);
+  const [gridLeftCollapsed, setGridLeftCollapsed] = useState(true);
+  const [firstInteractionDone, setFirstInteractionDone] = useState(false);
 
   // ── Left panel tabs: Research Brief | Analytics ────────────────────────────
   const [leftTab, setLeftTab] = useState<"brief" | "analytics">("brief");
@@ -978,7 +988,8 @@ export default function HomePage() {
 
   // Delay grid expansion until the aside slide-out finishes → eliminates the
   // fr→px interpolation artefact that wobbled the workspace left edge.
-  const [gridRightCollapsed, setGridRightCollapsed] = useState(false);
+  // Start collapsed to match the "first click expands" default.
+  const [gridRightCollapsed, setGridRightCollapsed] = useState(true);
 
   // ── Synthesis Lab (✍️) state ───────────────────────────────────────────────
   const [labRefs,       setLabRefs]       = useState<{ key: string; paper: Paper }[]>([]);
@@ -1275,15 +1286,13 @@ export default function HomePage() {
     });
   }, [authUser?.email]);
 
-  // Load persisted public danmu messages from localStorage on first mount
+  // Danmu messages are now cleared on mount — the announcement bar should
+  // start empty regardless of what was persisted in localStorage previously.
+  // We still leave the send/receive pipeline intact; only the initial restore
+  // is skipped and any stale persisted payload is removed.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("ats-public-msgs");
-      if (saved) {
-        const texts: string[] = JSON.parse(saved);
-        setPublicMsgs(texts.map((t, i) => makeMsg(t, i)));
-      }
-    } catch { /* ignore */ }
+    try { localStorage.removeItem("ats-public-msgs"); } catch { /* ignore */ }
+    setPublicMsgs([]);
   }, []);
 
   useEffect(() => {
@@ -1370,24 +1379,42 @@ export default function HomePage() {
     };
   }, [leftPct, centerPct]);
 
-  // ── Grid animation: decouple grid-template from panel slide animations ──
-  useEffect(() => {
-    if (!analyticsVisible) {
-      const t = setTimeout(() => setGridRightCollapsed(true), 370);
-      return () => clearTimeout(t);
-    } else {
-      setGridRightCollapsed(false);
-    }
-  }, [analyticsVisible]);
+  // ── Grid animation: grid-template follows the panel toggle IMMEDIATELY ──
+  // Previously we delayed the grid-collapse by 920ms to avoid an fr→px
+  // interpolation artefact. Now that tracks are all computed in uniform px
+  // (see gridWidth below) the delay is counter-productive — it makes the
+  // centre Workspace edge snap into place at the END of the side-panel slide
+  // instead of sliding alongside it. Update the collapsed flags in sync with
+  // leftVisible / analyticsVisible so every boundary eases at the same rate.
+  useEffect(() => { setGridRightCollapsed(!analyticsVisible); }, [analyticsVisible]);
+  useEffect(() => { setGridLeftCollapsed(!leftVisible);       }, [leftVisible]);
 
+  // While a panel toggle is in flight, animate grid-template-columns so the
+  // centre Workspace edge slides into its new position instead of snapping.
+  // During mouse-drag the transition is suppressed (see gridIsDragging) so
+  // live divider dragging still feels 1:1 with the pointer.
+  const [gridTransitioning, setGridTransitioning] = useState(false);
   useEffect(() => {
-    if (!leftVisible) {
-      const t = setTimeout(() => setGridLeftCollapsed(true), 370);
-      return () => clearTimeout(t);
-    } else {
-      setGridLeftCollapsed(false);
-    }
-  }, [leftVisible]);
+    setGridTransitioning(true);
+    const t = setTimeout(() => setGridTransitioning(false), 950);
+    return () => clearTimeout(t);
+  }, [leftVisible, analyticsVisible]);
+
+  // Tracked container width for the 5-column grid. All five tracks are computed
+  // in px from this value so grid-template-columns interpolates uniformly when
+  // panels toggle — mixing fr + px caused the centre-edge to snap faster than
+  // the side panels slid in.
+  const [gridWidth, setGridWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    setGridWidth(el.clientWidth);
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) setGridWidth(entry.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // RAF flush loop: dequeues briefQueueRef 3 tokens per animation frame.
   // Even if all tokens arrive in one TCP packet, they render gradually (~60fps).
@@ -1589,6 +1616,17 @@ export default function HomePage() {
     gap_analyst:     (streamAgents.gap_analyst     ?? result?.gap_analyst)     as AgentPayload | undefined,
     verifier:        (streamAgents.verifier        ?? result?.verifier)        as AgentPayload | undefined,
   };
+
+  // Analytical Trace & Retrieval Strategy visibility — hidden until the pipeline
+  // is running or has produced any agent output or strategy summary. Computed
+  // here so the JSX stays flat (no IIFE inside the tree).
+  const showAnalyticalTrace =
+    isSubmitting ||
+    !!agentData.evidence_mapper ||
+    !!agentData.scholar ||
+    !!agentData.gap_analyst ||
+    !!agentData.verifier ||
+    !!result?.strategy_summary;
 
   const toBackendPaper = (paper: Paper) => (paper.raw && typeof paper.raw === "object" ? paper.raw : paper);
   const hasDownloadSource = (paper: Paper) => {
@@ -2276,6 +2314,16 @@ ${html}
     }
   }
 
+  // First-click expand: while the app is still in its collapsed idle state the
+  // user can click anywhere — every click is swallowed by a transparent overlay
+  // and redirected into "open both side panels". Any single click completes
+  // the first interaction; from then on the UI behaves normally.
+  const completeFirstInteraction = useCallback(() => {
+    setFirstInteractionDone(true);
+    setLeftVisible(true);
+    setAnalyticsVisible(true);
+  }, []);
+
   return (
     <main
       data-theme={theme}
@@ -2289,6 +2337,32 @@ ${html}
         ["--ats-alpha-lab" as any]:       panelAlpha.lab,
       }}
     >
+      {/* First-click click-catcher: swallows every initial click and turns it
+          into "expand both side panels". Mouse-down is captured so the click
+          never reaches the underlying control — no search, no focus change, no
+          button activation. The overlay is fully transparent (no visual chrome)
+          and pointer-cursor'd so it still feels like the app is interactive.
+          A faint blinking bottom-right hint tells the user to tap anywhere. */}
+      {!firstInteractionDone && (
+        <div
+          className="fixed inset-0 z-[70] cursor-pointer"
+          onMouseDownCapture={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            completeFirstInteraction();
+          }}
+          onClickCapture={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          aria-hidden
+        >
+          <span className="click-hint-blink pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 text-xs font-medium tracking-wide text-[var(--ats-fg-accent)] select-none whitespace-nowrap">
+            Click anywhere to begin
+          </span>
+        </div>
+      )}
+
       {/* Day / Night category toggle — the specific theme within each category
           is chosen in Settings → Appearance. */}
       <button
@@ -2308,18 +2382,33 @@ ${html}
       </button>
 
       <div className="flex flex-col flex-1 min-h-0 px-5 pt-5 pb-4 gap-4">
-        {/* ── Top bar: title + announcement side-by-side ── */}
+        {/* ── Top bar: title + mascot + announcement side-by-side ── */}
         <div className="flex-none flex items-stretch gap-4">
-          {/* Title block */}
+          {/* Title block — the mascot sits in the SAME row as the AcademiCats
+              wordmark (right after "Cats"), NOT spanning down to the subtitle.
+              That keeps the subtitle on its own line directly below the brand. */}
           <div className="shrink-0 flex flex-col justify-center py-1">
-            <div className="text-5xl font-black tracking-tight">
-              <span className="text-slate-100">Academi</span>
-              <span className="text-blue-500">Cats</span>
+            <div className="flex items-center gap-3">
+              <div className="text-5xl font-black tracking-tight leading-none">
+                <span className="text-slate-100">Academi</span>
+                <span className="text-blue-500">Cats</span>
+              </div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/Cats_01.png"
+                alt="AcademiCats mascot"
+                // Height matches the wordmark's cap-to-baseline box (text-5xl
+                // ≈ 3rem = 48px) so the mascot is top/bottom-aligned with
+                // "AcademiCats" and doesn't push into the subtitle below.
+                className="h-12 w-12 object-contain select-none pointer-events-none shrink-0"
+                draggable={false}
+              />
             </div>
             <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.6.0-Alpha</span></p>
           </div>
-          {/* Announcement banner – fills remaining width */}
-          <div className="min-w-0 flex-1">
+          {/* Announcement banner – fills remaining width; extra left padding
+              gives the mascot image visual breathing room. */}
+          <div className="min-w-0 flex-1 pl-4">
             <AnnouncementBanner
               collapsed={announcementCollapsed}
               onCollapse={() => setAnnouncementCollapsed(true)}
@@ -2350,19 +2439,35 @@ ${html}
           ref={gridRef}
           className="relative grid flex-1 min-h-0"
           style={{
-            // Grid expands/collapses as a SNAP — decoupled from the panel slide
-            // animations (which handle their own 0.35s CSS transitions).
+            // Grid tracks are computed in uniform px units so that when panels
+            // toggle, every track (left col, dividers, centre, right col)
+            // interpolates at the same rate — mixing fr + px previously made
+            // the centre edge snap ahead of the side panels' slide-in.
+            // During live divider drag, gridTransitioning is false so the
+            // drag remains 1:1 with the pointer.
             gridTemplateColumns: (() => {
+              const W = gridWidth || 0;
+              if (W <= 0) {
+                // First paint before the ResizeObserver has measured — fall
+                // back to fr so SSR + initial render still looks right.
+                const leftCol = gridLeftCollapsed ? "36px" : `${leftPct}fr`;
+                const leftDiv = gridLeftCollapsed ? "0px" : "12px";
+                const midFr = (gridLeftCollapsed ? leftPct : 0) + centerPct + (gridRightCollapsed ? rightPct : 0);
+                const rightDiv = gridRightCollapsed ? "0px" : "12px";
+                const rightCol = gridRightCollapsed ? "36px" : `${rightPct}fr`;
+                return `${leftCol} ${leftDiv} ${midFr}fr ${rightDiv} ${rightCol}`;
+              }
               // Collapsed tracks reserve enough width for the floating expand button.
-              const leftCol = gridLeftCollapsed ? "36px" : `${leftPct}fr`;
-              const leftDiv = gridLeftCollapsed ? "0px" : "12px";
-              const midFr = (gridLeftCollapsed ? leftPct : 0) + centerPct + (gridRightCollapsed ? rightPct : 0);
-              const rightDiv = gridRightCollapsed ? "0px" : "12px";
-              const rightCol = gridRightCollapsed ? "36px" : `${rightPct}fr`;
-              return `${leftCol} ${leftDiv} ${midFr}fr ${rightDiv} ${rightCol}`;
+              const leftPx  = gridLeftCollapsed  ? 36 : (leftPct  / 100) * W;
+              const rightPx = gridRightCollapsed ? 36 : (rightPct / 100) * W;
+              const leftDivPx  = gridLeftCollapsed  ? 0 : 12;
+              const rightDivPx = gridRightCollapsed ? 0 : 12;
+              const midPx = Math.max(0, W - leftPx - rightPx - leftDivPx - rightDivPx);
+              return `${leftPx}px ${leftDivPx}px ${midPx}px ${rightDivPx}px ${rightPx}px`;
             })(),
             columnGap: 0,
             rowGap: 0,
+            transition: gridTransitioning ? "grid-template-columns 0.9s cubic-bezier(0.25,0.8,0.25,1)" : "none",
           }}
         >
           {/* Left panel — Research Brief | Analytics (collapsible) */}
@@ -2375,7 +2480,7 @@ ${html}
               style={{
                 opacity: leftVisible ? 0 : 1,
                 pointerEvents: leftVisible ? "none" : "auto",
-                transition: "opacity 0.15s 0.15s ease",
+                transition: "opacity 0.25s 0.55s ease",
               }}
               className="absolute top-[11px] left-2 z-20 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
             ><PanelLeftOpen size={15} /></button>
@@ -2385,7 +2490,7 @@ ${html}
               className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] ats-panel overflow-hidden"
               style={{
                 transform: leftVisible ? "translateX(0)" : "translateX(-105%)",
-                transition: "transform 0.35s cubic-bezier(0.4,0,0.2,1)",
+                transition: "transform 0.9s cubic-bezier(0.25,0.8,0.25,1)",
               }}
             >
               {/* Collapse button — aligned with tab bar, square. */}
@@ -2417,10 +2522,14 @@ ${html}
 
               {/* ── Research Brief content ── */}
               <div ref={leftSectionRef as React.RefObject<HTMLDivElement>} className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5 ${leftTab === "brief" ? "" : "hidden"}`}>
-                {/* Research Brief section header */}
-                <div className="mb-3 flex items-center gap-2 text-base font-bold">
-                  <FileText size={16} /><span>Research Brief</span>
-                </div>
+                {/* Research Brief section header — hidden while the panel is in
+                    its idle empty state so the centred copy below can use the
+                    full panel height (matches the Synthesis Lab empty state). */}
+                {(researchBriefMarkdown || isSubmitting) && (
+                  <div className="mb-3 flex items-center gap-2 text-base font-bold">
+                    <FileText size={16} /><span>Research Brief</span>
+                  </div>
+                )}
                 {researchBriefMarkdown && (briefStatus === "draft" || briefStatus === "final") && (
                   <div className="mb-3">
                     {briefStatus === "draft" && isSubmitting && (
@@ -2491,7 +2600,9 @@ ${html}
                     )}
                   </>
                 ) : !isSubmitting ? (
-                  <div className="flex min-h-[20rem] items-center justify-center px-6 text-center">
+                  // Mirrors the right-panel Synthesis Lab empty-state spec so both
+                  // idle panels centre their copy identically inside their region.
+                  <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
                     <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
                       Run Search &amp; Analysis first —<br />
                       your final Research Brief will appear here once the pipeline completes.
@@ -2499,35 +2610,48 @@ ${html}
                   </div>
                 ) : null}
 
-                <div className="mt-6 space-y-4">
-                  <div className="ats-card rounded-3xl bg-slate-950/40 p-4">
-                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
-                    <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
-                    <div className="space-y-3">
-                      <AgentSection title="Evidence Mapper" payload={agentData.evidence_mapper} running={isSubmitting && !fastMode && startedAgents.has("evidence_mapper")} />
-                      <AgentSection title="Scholar"         payload={agentData.scholar}        running={isSubmitting && !fastMode && startedAgents.has("scholar")} />
-                      <AgentSection title="Gap Analyst"     payload={agentData.gap_analyst}    running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
-                      <AgentSection title="Verifier"        payload={agentData.verifier}       running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
-                    </div>
-                  </div>
+                {/* Analytical Trace + Retrieval Strategy Summary — completely
+                    hidden until there is something to show. It appears once the
+                    pipeline is running or has produced any agent output / strategy
+                    summary, and stays collapsed-by-default once visible. */}
+                {showAnalyticalTrace && (
+                  <details className="ats-details-reset mt-6 ats-card rounded-2xl px-4 py-3">
+                    <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-slate-300">
+                      <Brain size={14} />
+                      <span>Analytical Trace &amp; Retrieval Strategy</span>
+                      <ChevronDown size={12} className="ml-auto transition-transform" />
+                    </summary>
+                    <div className="mt-4 space-y-4">
+                      <div className="ats-card rounded-3xl bg-slate-950/40 p-4">
+                        <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
+                        <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
+                        <div className="space-y-3">
+                          <AgentSection title="Evidence Mapper" payload={agentData.evidence_mapper} running={isSubmitting && !fastMode && startedAgents.has("evidence_mapper")} />
+                          <AgentSection title="Scholar"         payload={agentData.scholar}        running={isSubmitting && !fastMode && startedAgents.has("scholar")} />
+                          <AgentSection title="Gap Analyst"     payload={agentData.gap_analyst}    running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
+                          <AgentSection title="Verifier"        payload={agentData.verifier}       running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
+                        </div>
+                      </div>
 
-                  <div className="ats-card rounded-3xl bg-[var(--ats-bg-emerald)] p-4">
-                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Compass size={16} /><span>Retrieval Strategy Summary</span></div>
-                    <p className="mb-4 text-sm text-slate-400">How the search was run, screened, and selected.</p>
-                    {result?.strategy_summary ? (
-                      <div className="space-y-2 text-xs text-slate-300">
-                        {Array.isArray(result.strategy_summary.strategy_points) &&
-                          result.strategy_summary.strategy_points.map((item: any, idx: number) => (
-                            <div key={idx} className="break-words">• {String(item)}</div>
-                          ))}
+                      <div className="ats-card rounded-3xl bg-[var(--ats-bg-emerald)] p-4">
+                        <div className="mb-2 flex items-center gap-2 text-base font-bold"><Compass size={16} /><span>Retrieval Strategy Summary</span></div>
+                        <p className="mb-4 text-sm text-slate-400">How the search was run, screened, and selected.</p>
+                        {result?.strategy_summary ? (
+                          <div className="space-y-2 text-xs text-slate-300">
+                            {Array.isArray(result.strategy_summary.strategy_points) &&
+                              result.strategy_summary.strategy_points.map((item: any, idx: number) => (
+                                <div key={idx} className="break-words">• {String(item)}</div>
+                              ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">
+                            Run Search & Analysis to see the retrieval strategy summary here.
+                          </div>
+                        )}
                       </div>
-                    ) : (
-                      <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">
-                        Run Search & Analysis to see the retrieval strategy summary here.
-                      </div>
-                    )}
-                  </div>
-                </div>
+                    </div>
+                  </details>
+                )}
               </div>
 
               {/* ── Analytics content ── */}
@@ -2625,8 +2749,10 @@ ${html}
                   <ChevronDown size={12} className={`shrink-0 ${settingsOpen ? "rotate-180 transition-transform duration-200" : "transition-transform duration-200"}`} />
                 </button>
 
-                {/* Textarea hint — first thing to collapse; fully hidden if still too tight. */}
-                <span className="hidden md:block flex-1 min-w-0 truncate text-[11px] leading-snug text-slate-500">
+                {/* Textarea hint — first thing to collapse; fully hidden if still too tight.
+                    Retinted to the theme accent so it reads as a gentle call-to-action
+                    rather than muted help text. */}
+                <span className="hidden md:block flex-1 min-w-0 truncate text-[11px] font-semibold leading-snug text-[var(--ats-fg-accent)]">
                   Drop a research topic, a question, or a rough idea.
                 </span>
 
@@ -2824,7 +2950,7 @@ ${html}
                         // user can pick a main direction without committing to a sub-option.
                         const isSelDir = selectedDirIndex === di;
                         return (
-                          <div key={di} className={`rounded-xl border p-2 cursor-pointer transition-all ${isSelDir ? "border-blue-500/50 bg-blue-500/8" : "border-slate-800 bg-slate-900/30 hover:border-slate-700"}`}
+                          <div key={di} className={`qu-direction-card rounded-xl border p-2 cursor-pointer transition-all ${isSelDir ? "border-blue-500/50 bg-blue-500/8" : "border-slate-800 bg-slate-900/30 hover:border-slate-700"}`}
                             onClick={() => {
                               // Clicking an already-selected direction toggles it off.
                               if (isSelDir) {
@@ -2974,7 +3100,7 @@ ${html}
 
             {/* Planner thinking is rendered inline under the Query box above — no separate panel */}
 
-            <div className="mt-6 border-t border-slate-800 pt-6">
+            <div className={`mt-6 border-t border-slate-800 pt-6 ${firstInteractionDone ? "retrieved-papers-rise" : "hidden"}`}>
               <div className="mb-3 flex items-center gap-3">
                 <span className="flex items-center gap-2 text-xl font-black"><BookOpen size={18} /><span>Retrieved Papers</span></span>
                 {papersAreStreaming && (
@@ -3268,7 +3394,7 @@ ${html}
               style={{
                 opacity: analyticsVisible ? 0 : 1,
                 pointerEvents: analyticsVisible ? "none" : "auto",
-                transition: "opacity 0.15s 0.15s ease",
+                transition: "opacity 0.25s 0.55s ease",
               }}
               className="absolute top-[11px] right-2 z-20 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
             ><PanelRightOpen size={15} /></button>
@@ -3278,7 +3404,7 @@ ${html}
               className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] ats-panel overflow-hidden"
               style={{
                 transform: analyticsVisible ? "translateX(0)" : "translateX(105%)",
-                transition: "transform 0.35s cubic-bezier(0.4,0,0.2,1)",
+                transition: "transform 0.9s cubic-bezier(0.25,0.8,0.25,1)",
               }}
             >
               {/* Collapse button — aligned with header, square. */}
@@ -4328,6 +4454,11 @@ ${html}
       {userPanel && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm" onClick={() => setUserPanel(null)}>
           <div
+            // translate="yes" explicitly opts the dialog copy in to Google
+            // Translate so every label/paragraph inside profile/settings/
+            // subscription/help/accounts/legal can be translated. Volatile
+            // streaming regions still opt out individually via translate="no".
+            translate="yes"
             className={`w-full rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
               // Subscription + Legal need more horizontal room for side-by-side layouts;
               // other panels keep the compact modal.
@@ -4525,7 +4656,7 @@ ${html}
                       {
                         id: "free",
                         name: "Free",
-                        price: "$0",
+                        price: "0",
                         tagline: "Kick the tyres",
                         perks: [
                           "5 Quick Searches / day",
@@ -4539,7 +4670,7 @@ ${html}
                       {
                         id: "basic",
                         name: "Basic",
-                        price: "$9 / mo",
+                        price: "100",
                         tagline: "For daily research work",
                         perks: [
                           "50 Quick Searches / day",
@@ -4555,7 +4686,7 @@ ${html}
                       {
                         id: "scholar",
                         name: "Scholar",
-                        price: "$29 / mo",
+                        price: "200",
                         tagline: "Deep, unlimited, priority",
                         perks: [
                           "Unlimited Quick Searches",
