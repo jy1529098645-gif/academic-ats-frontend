@@ -767,10 +767,49 @@ export default function HomePage() {
   // Theme model: a category (day/night) + a remembered theme inside each category.
   // The header toggle flips only the category; the exact theme for each category
   // is picked in Settings → Appearance. Persisted in localStorage per spec.
-  const [themeMode, setThemeMode] = useState<ThemeMode>("night");
-  const [dayThemeId, setDayThemeId] = useState<string>(defaultThemeFor("day").id);
-  const [nightThemeId, setNightThemeId] = useState<string>(defaultThemeFor("night").id);
+  //
+  // First-time visitors (no `ats-theme-customized` flag set) ALWAYS see the
+  // default blue pair — Midnight Blue (night) / Daylight Blue (day) — even if
+  // other ats-theme-* keys happen to linger in localStorage. Only once the
+  // user has explicitly interacted with a theme control do their picks get
+  // persisted AND replayed on subsequent visits.
+  const [themeMode, _setThemeModeRaw] = useState<ThemeMode>("night");
+  const [dayThemeId, _setDayThemeIdRaw] = useState<string>(defaultThemeFor("day").id);
+  const [nightThemeId, _setNightThemeIdRaw] = useState<string>(defaultThemeFor("night").id);
   const theme = themeMode === "day" ? dayThemeId : nightThemeId;
+
+  // Capture the current (possibly-default) theme state and write it alongside
+  // setting the customized flag, so the user's first interaction snapshots
+  // what they're actually seeing — not whatever stale values happened to be
+  // in localStorage from an earlier, pre-flag session.
+  const _bootstrapCustomizedStorage = useCallback((mode: ThemeMode, dayId: string, nightId: string) => {
+    try {
+      if (localStorage.getItem(THEME_STORAGE.customized) === "1") return;
+      localStorage.setItem(THEME_STORAGE.mode,       mode);
+      localStorage.setItem(THEME_STORAGE.dayTheme,   dayId);
+      localStorage.setItem(THEME_STORAGE.nightTheme, nightId);
+      localStorage.setItem(THEME_STORAGE.customized, "1");
+    } catch {}
+  }, []);
+  const setThemeMode = useCallback((next: ThemeMode | ((prev: ThemeMode) => ThemeMode)) => {
+    _setThemeModeRaw(prev => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      _bootstrapCustomizedStorage(resolved, dayThemeId, nightThemeId);
+      try { localStorage.setItem(THEME_STORAGE.mode, resolved); } catch {}
+      return resolved;
+    });
+  }, [_bootstrapCustomizedStorage, dayThemeId, nightThemeId]);
+  const setDayThemeId = useCallback((id: string) => {
+    _setDayThemeIdRaw(id);
+    _bootstrapCustomizedStorage(themeMode, id, nightThemeId);
+    try { localStorage.setItem(THEME_STORAGE.dayTheme, id); } catch {}
+  }, [_bootstrapCustomizedStorage, themeMode, nightThemeId]);
+  const setNightThemeId = useCallback((id: string) => {
+    _setNightThemeIdRaw(id);
+    _bootstrapCustomizedStorage(themeMode, dayThemeId, id);
+    try { localStorage.setItem(THEME_STORAGE.nightTheme, id); } catch {}
+  }, [_bootstrapCustomizedStorage, themeMode, dayThemeId]);
+
   const setTheme = (next: string) => {
     // Back-compat shim so the two legacy callers that do `setTheme("light"|"dark")`
     // keep working — maps the value to (mode, theme-within-mode).
@@ -782,25 +821,22 @@ export default function HomePage() {
     setThemeMode(desc.mode);
     if (desc.mode === "day") setDayThemeId(desc.id); else setNightThemeId(desc.id);
   };
-  // Persist the three values to localStorage whenever they change — but gate writes
-  // behind a hydration ref so the write-effects that fire on mount don't clobber
-  // the user's saved theme with the React default before the hydrate effect runs.
-  const _themeHydratedRef = useRef(false);
-  useEffect(() => { if (!_themeHydratedRef.current) return; try { localStorage.setItem(THEME_STORAGE.mode, themeMode); } catch {} }, [themeMode]);
-  useEffect(() => { if (!_themeHydratedRef.current) return; try { localStorage.setItem(THEME_STORAGE.dayTheme, dayThemeId); } catch {} }, [dayThemeId]);
-  useEffect(() => { if (!_themeHydratedRef.current) return; try { localStorage.setItem(THEME_STORAGE.nightTheme, nightThemeId); } catch {} }, [nightThemeId]);
+
   useEffect(() => {
     // One-shot hydration from localStorage on mount — gated in an effect so SSR
-    // and first client render match (prevents hydration mismatch).
+    // and first client render match (prevents hydration mismatch). Uses the
+    // raw setters so the hydration reads don't themselves mark the user as
+    // "customized" (which would defeat the first-time-visitor rule).
     try {
+      const customized = localStorage.getItem(THEME_STORAGE.customized) === "1";
+      if (!customized) return;
       const m = localStorage.getItem(THEME_STORAGE.mode);
-      if (m === "day" || m === "night") setThemeMode(m);
+      if (m === "day" || m === "night") _setThemeModeRaw(m);
       const d = localStorage.getItem(THEME_STORAGE.dayTheme);
-      if (d && THEME_REGISTRY.some(t => t.id === d && t.mode === "day")) setDayThemeId(d);
+      if (d && THEME_REGISTRY.some(t => t.id === d && t.mode === "day")) _setDayThemeIdRaw(d);
       const n = localStorage.getItem(THEME_STORAGE.nightTheme);
-      if (n && THEME_REGISTRY.some(t => t.id === n && t.mode === "night")) setNightThemeId(n);
+      if (n && THEME_REGISTRY.some(t => t.id === n && t.mode === "night")) _setNightThemeIdRaw(n);
     } catch {}
-    _themeHydratedRef.current = true;
   }, []);
 
   // Per-panel translucency (0.4–1.0). Applied to the three main panel backgrounds

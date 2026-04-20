@@ -95,4 +95,10 @@ export const THEME_STORAGE = {
   mode:      "ats-theme-mode",        // "day" | "night"
   dayTheme:  "ats-theme-day",         // id of the day theme the user last picked
   nightTheme:"ats-theme-night",       // id of the night theme the user last picked
+  // "1" once the user has explicitly touched any theme control (day/night
+  // toggle or Settings → Appearance). Until this flag is set we show the
+  // default blue themes even if other keys happen to be in localStorage —
+  // that way first-time visitors always see the intended Midnight-Blue /
+  // Daylight-Blue palette.
+  customized:"ats-theme-customized",
 } as const;
