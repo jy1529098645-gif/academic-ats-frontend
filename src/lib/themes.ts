@@ -46,6 +46,13 @@ export const THEME_REGISTRY: ThemeDescriptor[] = [
     swatches: ["#E4F1EA", "#F5FAF6", "#047857"],
     blurb: "Cool mint canvas with emerald accents — fresh and clinical.",
   },
+  {
+    id: "day-pink",
+    label: "Cherry Blossom",
+    mode: "day",
+    swatches: ["#FDE6EC", "#FFF4F7", "#EC4899"],
+    blurb: "Soft rose canvas with cherry-pink accents — gentle springtime mood.",
+  },
 
   {
     id: "dark",
@@ -60,6 +67,13 @@ export const THEME_REGISTRY: ThemeDescriptor[] = [
     mode: "night",
     swatches: ["#0A0A0A", "#141414", "#F5A524"],
     blurb: "Crisp black canvas with amber accents — a high-contrast evening mood.",
+  },
+  {
+    id: "night-emerald",
+    label: "Emerald Noir",
+    mode: "night",
+    swatches: ["#071210", "#132521", "#34D399"],
+    blurb: "Deep forest canvas with emerald accents — quiet botanical mood.",
   },
   {
     id: "night-rose",

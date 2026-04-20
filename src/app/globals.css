@@ -270,6 +270,43 @@ body {
   --ats-bg-section: var(--ats-bg-panel);
 }
 
+[data-theme="day-pink"] {
+  /* Cherry Blossom — soft pink canvas with rose-pink accents.        */
+  --ats-bg-page:        #FDE6EC;
+  --ats-bg-panel:       #FFF4F7;
+  --ats-bg-card:        #FDE6EC;
+  --ats-bg-card-muted:  #FDE6EC;
+  --ats-bg-input:       #FFF4F7;
+  --ats-bg-accent-soft: rgba(236,72,153,0.10);
+  --ats-bg-accent:      #EC4899;
+  --ats-bg-emerald:     #F4E6EA;
+
+  --ats-fg-primary:     #3F1A2A;
+  --ats-fg-secondary:   #5E2D3E;
+  --ats-fg-muted:       #8A6574;
+  --ats-fg-accent:      #9D174D;
+  --ats-fg-on-accent:   #FFF4F7;
+
+  --ats-border-subtle:  #F1C6D3;
+  --ats-border-strong:  #D89AAE;
+  --ats-border-accent:  rgba(236,72,153,0.45);
+
+  --ats-success:        #047857;
+  --ats-danger:         #B91C1C;
+
+  --ats-ring-canvas:    #FDE6EC;
+  --ats-shadow-panel:   0 6px 20px rgba(90,20,50,0.08), 0 1px 3px rgba(90,20,50,0.05),
+                        0 0 0 1px rgba(255,255,255,0.85), inset 0 1px 0 rgba(255,255,255,1);
+
+  --ats-scroll-thumb:       rgba(157,23,77,0.28);
+  --ats-scroll-thumb-hover: rgba(157,23,77,0.50);
+
+  --ats-placeholder-fg: rgba(63,26,42,0.82);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
 [data-theme="night-prism"] {
   /* Aurora Prism — deep obsidian canvas with a shifting multi-hue accent.
      The "accent" is the centre of the rainbow (cyan-violet midpoint);
@@ -339,6 +376,50 @@ body {
   opacity: 0.55;
   animation: prism-rim-rotate 18s linear infinite;
 }
+
+[data-theme="night-emerald"] {
+  /* Emerald Noir — deep forest canvas with emerald as the sole accent.
+     Neutrals lean slightly green so "black" reads as botanical, not
+     clinical. No cool-blue anywhere in the token set.                 */
+  --ats-bg-page:        #071210;
+  --ats-bg-panel:       #0F1A17;
+  --ats-bg-card:        #132521;
+  --ats-bg-card-muted:  rgba(19,37,33,0.7);
+  --ats-bg-input:       rgba(25,50,42,0.85);
+  --ats-bg-accent-soft: rgba(52,211,153,0.12);
+  --ats-bg-accent:      #34D399;
+  --ats-bg-emerald:     #0F2A21;
+
+  --ats-fg-primary:     #D6F2E1;
+  --ats-fg-secondary:   #A3D1B4;
+  --ats-fg-muted:       #6E8A7A;
+  --ats-fg-accent:      #34D399;
+  --ats-fg-on-accent:   #08190F;
+
+  --ats-border-subtle:  rgba(52,211,153,0.15);
+  --ats-border-strong:  rgba(52,211,153,0.35);
+  --ats-border-accent:  rgba(52,211,153,0.55);
+
+  --ats-success:        #34D399;
+  --ats-danger:         #EF4444;
+
+  --ats-ring-canvas:    #071210;
+  --ats-shadow-panel:   0 6px 24px rgba(0,0,0,0.60), 0 1px 2px rgba(52,211,153,0.08);
+
+  --ats-scroll-thumb:       rgba(52,211,153,0.25);
+  --ats-scroll-thumb-hover: rgba(52,211,153,0.45);
+
+  --ats-placeholder-fg: rgba(52,211,153,0.55);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+/* Emerald Noir: retint the announcement gradient + any purple accents
+   so the banner reads as part of the theme (matches the amber approach). */
+[data-theme="night-emerald"] .from-blue-500\/25,
+[data-theme="night-emerald"] .to-blue-500\/25    { --tw-gradient-from: rgba(52,211,153,0.20) !important; --tw-gradient-to: rgba(52,211,153,0.20) !important; }
+[data-theme="night-emerald"] .via-purple-500\/20 { --tw-gradient-via:  rgba(52,211,153,0.12) !important; }
 
 [data-theme="night-rose"] {
   /* Rose Quartz — deep plum canvas with rose accents.                */
@@ -776,7 +857,8 @@ main[data-tone="day"] { color: #0f172a !important; }
    without needing its own selector.                                         */
 main[data-tone="day"],
 main[data-theme="day-sand"],
-main[data-theme="day-mint"] {
+main[data-theme="day-mint"],
+main[data-theme="day-pink"] {
   background: linear-gradient(to top, var(--ats-bg-page) 0%, var(--ats-bg-panel) 80%) !important;
 }
 
