@@ -769,11 +769,11 @@ export default function HomePage() {
   // is picked in Settings → Appearance. Persisted in localStorage per spec.
   //
   // First-time visitors (no `ats-theme-customized` flag set) ALWAYS see the
-  // default blue pair — Midnight Blue (night) / Daylight Blue (day) — even if
-  // other ats-theme-* keys happen to linger in localStorage. Only once the
-  // user has explicitly interacted with a theme control do their picks get
-  // persisted AND replayed on subsequent visits.
-  const [themeMode, _setThemeModeRaw] = useState<ThemeMode>("night");
+  // default blue pair — Daylight Blue (day) preferred, Midnight Blue (night)
+  // only if the user explicitly flipped to night previously. Day is the
+  // initial-render default so the page doesn't flash a dark theme while the
+  // hydration effect reads localStorage.
+  const [themeMode, _setThemeModeRaw] = useState<ThemeMode>("day");
   const [dayThemeId, _setDayThemeIdRaw] = useState<string>(defaultThemeFor("day").id);
   const [nightThemeId, _setNightThemeIdRaw] = useState<string>(defaultThemeFor("night").id);
   const theme = themeMode === "day" ? dayThemeId : nightThemeId;
