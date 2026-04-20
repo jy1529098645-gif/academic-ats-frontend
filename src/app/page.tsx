@@ -4706,7 +4706,7 @@ ${html}
                       {
                         id: "basic",
                         name: "Basic",
-                        price: "100",
+                        price: "0",
                         tagline: "For daily research work",
                         perks: [
                           "50 Quick Searches / day",
@@ -4722,7 +4722,7 @@ ${html}
                       {
                         id: "scholar",
                         name: "Scholar",
-                        price: "200",
+                        price: "0",
                         tagline: "Deep, unlimited, priority",
                         perks: [
                           "Unlimited Quick Searches",
