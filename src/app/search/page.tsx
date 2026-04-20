@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL } from "@/lib/api";
 
 type IntentProfile = {
@@ -35,6 +35,7 @@ type SearchSettings = {
   year_start: number;
   year_end: number;
   source_filters: string[];
+  fast_mode: boolean;
 };
 
 type WorkflowItem = {
@@ -99,6 +100,10 @@ function consumeSseBlocks(chunkBuffer: string, onEvent: (eventName: string, data
 
 export default function SearchPage() {
   const abortRef = useRef<AbortController | null>(null);
+  const briefQueueRef = useRef<string[]>([]);
+  const briefFlushGenRef = useRef(0);
+  const briefVersionRef = useRef(0);
+  const briefClearPendingRef = useRef(false);
   const [query, setQuery] = useState("AR games");
   const [queryOptions, setQueryOptions] = useState<QueryOptionsResponse | null>(null);
   const [selectedOptionIndex, setSelectedOptionIndex] = useState<number | null>(null);
@@ -110,6 +115,9 @@ export default function SearchPage() {
   const [cacheStatus, setCacheStatus] = useState<"idle" | "clearing" | "cleared" | "error">("idle");
   const [seenPaperTitles, setSeenPaperTitles] = useState<string[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [briefAnimated, setBriefAnimated] = useState("");
+  const [briefPhase, setBriefPhase] = useState<{ phase: "idle" | "draft" | "sections" | "stitch"; done: number; total: number }>({ phase: "idle", done: 0, total: 4 });
+  const [agentResults, setAgentResults] = useState<Record<string, any>>({});
   const [stream, setStream] = useState<StreamState>({
     requestId: "",
     status: "idle",
@@ -132,6 +140,7 @@ export default function SearchPage() {
     year_start: 2018,
     year_end: new Date().getFullYear(),
     source_filters: DEFAULT_SOURCES,
+    fast_mode: false,
   });
 
   const options = queryOptions?.options || [];
@@ -139,13 +148,40 @@ export default function SearchPage() {
   const selectedOption = options[selectedOptionIndex ?? recommendedIndex] || null;
   const finalSearchQuery = useMemo(() => customQuery.trim() || selectedOption?.search_query?.trim() || query.trim(), [customQuery, selectedOption, query]);
 
-  // The brief to display: streaming chunks during run, final result after done.
-  // Strip the leading "Research Brief" title from content (already shown as heading in UI).
+  // RAF flush loop: drains briefQueueRef at 3 word-tokens per animation frame (~60 fps).
+  // briefClearPendingRef signals a version bump (v1→v2): on the next flush we reset
+  // briefAnimated to just the new batch instead of appending, eliminating the blank flash.
+  useEffect(() => {
+    let rafId: number;
+    const flush = () => {
+      const q = briefQueueRef.current;
+      if (q.length > 0) {
+        const capturedGen = briefFlushGenRef.current;
+        const batch = q.splice(0, Math.min(q.length, 3));
+        if (briefClearPendingRef.current) {
+          briefClearPendingRef.current = false;
+          setBriefAnimated(batch.join(""));
+        } else {
+          setBriefAnimated(prev => {
+            if (briefFlushGenRef.current !== capturedGen) return prev;
+            return prev + batch.join("");
+          });
+        }
+      }
+      rafId = requestAnimationFrame(flush);
+    };
+    rafId = requestAnimationFrame(flush);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+
+  // The brief to display: RAF-animated text during run, final result after done.
+  // briefAnimated takes priority while it has content so the typewriter animation
+  // is never replaced mid-stream by the full result text (which would jump to the end).
+  // Falls back to stream.result?.brief only when animation never started (total SSE failure).
   const displayBrief = useMemo(() => {
-    const raw = stream.result?.brief || stream.briefText;
-    // Remove optional leading "Research Brief" header + blank lines emitted by LLM
+    const raw = briefAnimated || stream.result?.brief || "";
     return raw.replace(/^Research Brief\s*\n+/i, "").trimStart();
-  }, [stream.result, stream.briefText]);
+  }, [stream.result, briefAnimated]);
 
   // Papers to display: early papers event or final result
   const displayPapers = useMemo(() => {
@@ -220,6 +256,13 @@ export default function SearchPage() {
 
     setUiError("");
     setIsSubmitting(true);
+    briefFlushGenRef.current += 1;
+    briefVersionRef.current = 0;
+    briefQueueRef.current = [];
+    briefClearPendingRef.current = false;
+    setBriefAnimated("");
+    setBriefPhase({ phase: "idle", done: 0, total: 4 });
+    setAgentResults({});
     setStream({
       requestId: "", status: "running", progress: 0,
       message: "⚙️ Initializing...", cacheHit: false,
@@ -255,6 +298,7 @@ export default function SearchPage() {
       source_filters: settings.source_filters,
       year_range: settings.use_year_range ? [settings.year_start, settings.year_end] : null,
       excluded_titles: excludedTitles ?? [],
+      fast_mode: settings.fast_mode,
     };
 
     try {
@@ -296,17 +340,57 @@ export default function SearchPage() {
           }));
           return;
         }
-        // Brief section events — brief_reset clears stale text on re-run (e.g. after refinement)
+        // Brief lifecycle events — track section-level progress for deep mode UI
         if (eventName === "brief_event") {
-          if (parsed?.event === "brief_reset") {
+          const evt = parsed?.event;
+          if (evt === "brief_reset") {
+            briefFlushGenRef.current += 1;
+            briefVersionRef.current = 0;
+            briefQueueRef.current.length = 0;
+            briefClearPendingRef.current = false;
+            setBriefAnimated("");
+            setBriefPhase({ phase: "idle", done: 0, total: 4 });
             setStream((prev) => ({ ...prev, briefText: "" }));
+          } else if (evt === "brief_started") {
+            setBriefPhase({ phase: "sections", done: 0, total: parsed?.total_sections ?? 4 });
+          } else if (evt === "section_done") {
+            setBriefPhase((prev) => ({ ...prev, done: prev.done + 1 }));
+          } else if (evt === "stitch_started") {
+            setBriefPhase((prev) => ({ ...prev, phase: "stitch" }));
+          } else if (evt === "stitch_done") {
+            setBriefPhase((prev) => ({ ...prev, phase: "idle" }));
           }
           return;
         }
-        // Live brief chunks — accumulate as they stream in
+        // Live brief chunks — split into word-tokens then push to RAF queue.
+        // Splitting ensures even large fallback chunks (full text in one callback)
+        // get rendered token-by-token rather than appearing in a single frame.
         if (eventName === "brief_chunk") {
-          const chunk = String(parsed?.text || "");
-          if (chunk) setStream((prev) => ({ ...prev, briefText: prev.briefText + chunk }));
+          const chunk = String(parsed?.chunk || "");
+          const incomingVersion = (parsed?.version as number) ?? 1;
+          if (chunk) {
+            const tokens = chunk.match(/\S+\s*/g) ?? [chunk];
+            if (incomingVersion > briefVersionRef.current) {
+              // Version bump (draft→final): invalidate stale RAF batches.
+              // briefClearPendingRef defers the actual clear to the next RAF frame
+              // so there is no blank-flash between versions.
+              briefFlushGenRef.current += 1;
+              briefVersionRef.current = incomingVersion;
+              briefQueueRef.current.length = 0;
+              briefQueueRef.current.push(...tokens);
+              briefClearPendingRef.current = true;
+            } else if (incomingVersion === briefVersionRef.current || briefVersionRef.current === 0) {
+              briefVersionRef.current = incomingVersion;
+              briefQueueRef.current.push(...tokens);
+            }
+            setStream((prev) => ({ ...prev, briefText: prev.briefText + chunk }));
+          }
+          return;
+        }
+        if (eventName === "agent_result") {
+          const agent = String(parsed?.agent || "");
+          const data = parsed?.data;
+          if (agent && data) setAgentResults((prev) => ({ ...prev, [agent]: data }));
           return;
         }
         // Papers ready early — show before analysis completes
@@ -526,6 +610,27 @@ export default function SearchPage() {
               ) : null}
             </div>
 
+            {/* Analysis depth */}
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-600">Analysis depth</label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSettings((p) => ({ ...p, fast_mode: true }))}
+                  className={`rounded-xl border px-4 py-2 text-sm font-medium transition-colors ${settings.fast_mode ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+                >
+                  Quick <span className="ml-1 text-xs opacity-60">~15s</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettings((p) => ({ ...p, fast_mode: false }))}
+                  className={`rounded-xl border px-4 py-2 text-sm font-medium transition-colors ${!settings.fast_mode ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+                >
+                  Deep <span className="ml-1 text-xs opacity-60">~90s · multi-agent</span>
+                </button>
+              </div>
+            </div>
+
             {/* Toggles */}
             <div className="flex flex-wrap gap-4">
               {[
@@ -611,7 +716,7 @@ export default function SearchPage() {
         ) : null}
 
         {/* ── Research Brief (streams in live) ── */}
-        {displayBrief ? (
+        {(displayBrief || (stream.status === "running" && briefPhase.phase !== "idle")) ? (
           <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-1 flex items-center gap-2">
               <h2 className="text-base font-semibold">Research Brief</h2>
@@ -619,7 +724,76 @@ export default function SearchPage() {
                 <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
               ) : null}
             </div>
-            <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800">{displayBrief}</div>
+
+            {/* Deep mode section progress (shown during the silent parallel-section phase) */}
+            {briefPhase.phase === "sections" ? (
+              <div className="mb-3">
+                <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+                  <span>Analyzing sections ({briefPhase.done}/{briefPhase.total})</span>
+                </div>
+                <div className="h-1 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-blue-400 transition-all duration-500"
+                    style={{ width: `${Math.round((briefPhase.done / briefPhase.total) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ) : briefPhase.phase === "stitch" ? (
+              <p className="mb-2 text-xs text-slate-500">Composing final brief…</p>
+            ) : null}
+
+            {displayBrief ? (
+              <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+                {displayBrief}
+                {stream.status === "running" && briefAnimated && !stream.result ? (
+                  <span className="inline-block w-0.5 h-3.5 bg-blue-500 ml-0.5 animate-pulse align-middle" />
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">
+                {briefPhase.phase === "sections" ? "Draft brief generating in background…" : "Generating brief…"}
+              </p>
+            )}
+          </section>
+        ) : null}
+
+        {/* ── Agent Results (deep mode) ── */}
+        {Object.keys(agentResults).length > 0 ? (
+          <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="mb-4 text-base font-semibold">Agent Analysis</h2>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["evidence_mapper", "researcher", "methodologist", "scholar", "theorist", "critic", "gap_analyst", "verifier"] as const).map((agent) => {
+                const data = agentResults[agent];
+                if (!data) return null;
+                const label: Record<string, string> = {
+                  evidence_mapper: "Evidence Mapper",
+                  researcher: "Researcher",
+                  methodologist: "Methodologist",
+                  scholar: "Scholar",
+                  theorist: "Theorist",
+                  critic: "Critic",
+                  gap_analyst: "Gap Analyst",
+                  verifier: "Verifier",
+                };
+                const entries = Object.entries(data as Record<string, any>).filter(([, v]) => Array.isArray(v) ? v.length > 0 : Boolean(v));
+                if (!entries.length) return null;
+                return (
+                  <div key={agent} className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{label[agent] ?? agent}</div>
+                    <div className="space-y-1.5">
+                      {entries.slice(0, 4).map(([key, val]) => (
+                        <div key={key}>
+                          <span className="text-xs font-medium text-slate-700">{key.replace(/_/g, " ")}: </span>
+                          <span className="text-xs text-slate-600">
+                            {Array.isArray(val) ? val.slice(0, 3).join(", ") : String(val)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </section>
         ) : null}
 

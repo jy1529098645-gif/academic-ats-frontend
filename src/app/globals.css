@@ -24,28 +24,42 @@ body {
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
-/* Thin dark-themed scrollbar for the reserved panel */
-.thin-scrollbar::-webkit-scrollbar { width: 4px; }
-.thin-scrollbar::-webkit-scrollbar-track { background: transparent; }
-.thin-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.35);
-  border-radius: 9999px;
-}
-.thin-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.55);
+/* ── Unified scrollbar — single spec driven by --ats-scroll-* tokens ─────────
+   Applied to both .thin-scrollbar (vertical, inside panels) and
+   .thin-scrollbar-x (horizontal, history timeline). Change the tokens in the
+   theme block and every scrollbar in the app follows.                       */
+.thin-scrollbar,
+.thin-scrollbar-x { scrollbar-width: thin; scrollbar-color: var(--ats-scroll-thumb) transparent; }
+
+.thin-scrollbar::-webkit-scrollbar         { width: var(--ats-scroll-width); }
+.thin-scrollbar::-webkit-scrollbar-track   { background: transparent; }
+.thin-scrollbar::-webkit-scrollbar-thumb   { background: var(--ats-scroll-thumb); border-radius: 9999px; }
+.thin-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--ats-scroll-thumb-hover); }
+
+.thin-scrollbar-x::-webkit-scrollbar       { height: 3px; }
+.thin-scrollbar-x::-webkit-scrollbar-track { background: transparent; }
+.thin-scrollbar-x::-webkit-scrollbar-thumb { background: var(--ats-scroll-thumb); border-radius: 9999px; }
+.thin-scrollbar-x::-webkit-scrollbar-thumb:hover { background: var(--ats-scroll-thumb-hover); }
+
+/* ── Per-panel translucency ─────────────────────────────────────────────
+   User-controlled via the Settings → Appearance sliders. The alpha values
+   live on <main> as `--ats-alpha-<region>` and are folded into the panel
+   background via CSS relative-colour syntax so the text content stays
+   fully opaque. Fallback: browsers without rgb-from support keep the
+   solid bg-[var(--ats-bg-section)] they already have.                    */
+@supports (background-color: rgb(from red r g b / 0.5)) {
+  [data-region="workspace"].ats-panel { background-color: rgb(from var(--ats-bg-panel) r g b / var(--ats-alpha-workspace, 1)) !important; }
+  [data-region="synthesis"].ats-panel { background-color: rgb(from var(--ats-bg-panel) r g b / var(--ats-alpha-synthesis, 1)) !important; }
+  [data-region="lab"].ats-panel       { background-color: rgb(from var(--ats-bg-panel) r g b / var(--ats-alpha-lab, 1)) !important; }
 }
 
-/* Horizontal thin scrollbar (history timeline) */
-.thin-scrollbar-x::-webkit-scrollbar { height: 2px; }
-.thin-scrollbar-x::-webkit-scrollbar-track { background: transparent; }
-.thin-scrollbar-x::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.35);
-  border-radius: 9999px;
-}
-.thin-scrollbar-x::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.55);
-}
-.thin-scrollbar-x { scrollbar-width: thin; scrollbar-color: rgba(100,116,139,0.35) transparent; }
+/* Hair-thin scrollbar — for elements that must be thinner than the main panel
+   scrollbar (e.g. the Workspace textarea). 3px vs the panel's 6px.          */
+.hairline-scrollbar { scrollbar-width: thin; scrollbar-color: var(--ats-scroll-thumb) transparent; }
+.hairline-scrollbar::-webkit-scrollbar         { width: 3px; }
+.hairline-scrollbar::-webkit-scrollbar-track   { background: transparent; }
+.hairline-scrollbar::-webkit-scrollbar-thumb   { background: var(--ats-scroll-thumb); border-radius: 9999px; }
+.hairline-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--ats-scroll-thumb-hover); }
 
 /* Marquee ticker animation */
 @keyframes ticker {
@@ -86,21 +100,464 @@ body {
   background: rgba(100, 116, 139, 0.6);
 }
 
-/* ── Theme tokens ────────────────────────────────────────────── */
-:root, [data-theme="dark"] {
-  --ats-bg-base:    #040b19;
-  --ats-bg-section: #071224;
-  --ats-bg-panel:   #050e1d;
-  --ats-bg-emerald: #071a1c;
+/* ═══════════════════════════════════════════════════════════════
+   MODULAR THEME TOKENS
+   To add a new theme:
+     1. Add a `[data-theme="<name>"] { ... }` block redefining these.
+     2. That's it — every module below is driven by these tokens.
+   Token families:
+     Surfaces   → --ats-bg-page / -panel / -card / -input
+     Text       → --ats-fg-primary / -secondary / -muted / -accent
+     Borders    → --ats-border-subtle / -strong / -accent
+     Accents    → --ats-accent (brand), --ats-accent-soft, --ats-accent-fg
+     Signals    → --ats-success, --ats-danger
+     Shadow     → --ats-shadow-panel
+     Radius     → --ats-radius-sm / -md / -lg / -pill
+     Spacing    → --ats-gap-page / -section / -inner
+   ══════════════════════════════════════════════════════════════ */
+
+/* Radius, spacing, scrollbar width are theme-agnostic (stay constant). */
+:root {
+  --ats-radius-sm:  6px;
+  --ats-radius-md:  8px;
+  --ats-radius-lg:  10px;
+  --ats-radius-pill: 9999px;
+  --ats-gap-page:    24px;
+  --ats-gap-section: 16px;
+  --ats-gap-inner:   12px;
+  /* Frame spec — unified border thickness for every bordered surface. */
+  --ats-border-width: 1px;
+  /* Scrollbar spec */
+  --ats-scroll-width: 6px;
 }
 
-[data-theme="light"] {
-  /* Page canvas = near-white; each section = subtle gray so sections stand out */
-  --ats-bg-base:    #f5f6f8;
-  --ats-bg-section: #e8e9ec;
-  --ats-bg-panel:   #e2e4e8;
-  --ats-bg-emerald: #e3eeeb;
+:root, [data-theme="dark"] {
+  --ats-bg-page:       #040b19;
+  --ats-bg-panel:      #071224;
+  --ats-bg-card:       #0a1628;
+  --ats-bg-card-muted: rgba(5,14,29,0.6);
+  --ats-bg-input:      rgba(15,23,42,0.55);
+  --ats-bg-accent-soft: rgba(59,130,246,0.10);
+  --ats-bg-accent:     #3b82f6;
+  --ats-bg-emerald:    #071a1c;
+
+  --ats-fg-primary:    #f1f5f9;
+  --ats-fg-secondary:  #cbd5e1;
+  --ats-fg-muted:      #64748b;
+  --ats-fg-accent:     #93c5fd;
+  --ats-fg-on-accent:  #ffffff;
+
+  --ats-border-subtle: rgba(30,41,59,0.6);
+  --ats-border-strong: #334155;
+  --ats-border-accent: rgba(59,130,246,0.4);
+
+  --ats-success:       #10b981;
+  --ats-danger:        #ef4444;
+
+  --ats-ring-canvas:   #040b19;
+  --ats-shadow-panel:  0 2px 12px rgba(0,0,0,0.35);
+
+  /* Scrollbars */
+  --ats-scroll-thumb:       rgba(100,116,139,0.35);
+  --ats-scroll-thumb-hover: rgba(148,163,184,0.55);
+
+  /* Placeholder copy inside the Workspace textarea — dim enough to not compete
+     with the real text, bright enough to remain legible over the input bg. */
+  --ats-placeholder-fg: rgba(148,163,184,0.55);
+
+  /* Legacy aliases for code that still references the old names */
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
 }
+
+[data-theme="day-sand"] {
+  /* Warm Paper — warm sand canvas with umber accents.                */
+  --ats-bg-page:        #F2EBDA;
+  --ats-bg-panel:       #FBF6E8;
+  --ats-bg-card:        #F2EBDA;
+  --ats-bg-card-muted:  #F2EBDA;
+  --ats-bg-input:       #FBF6E8;
+  --ats-bg-accent-soft: rgba(180,83,9,0.10);
+  --ats-bg-accent:      #B45309;
+  --ats-bg-emerald:     #EAF4E4;
+
+  --ats-fg-primary:     #3F2A1C;
+  --ats-fg-secondary:   #5B3F2A;
+  --ats-fg-muted:       #8B7355;
+  --ats-fg-accent:      #7C2D12;
+  --ats-fg-on-accent:   #FBF6E8;
+
+  --ats-border-subtle:  #D8CBA8;
+  --ats-border-strong:  #B89F73;
+  --ats-border-accent:  rgba(180,83,9,0.45);
+
+  --ats-success:        #047857;
+  --ats-danger:         #B91C1C;
+
+  --ats-ring-canvas:    #F2EBDA;
+  --ats-shadow-panel:   0 6px 20px rgba(90,50,20,0.09), 0 1px 3px rgba(90,50,20,0.05),
+                        0 0 0 1px rgba(255,255,255,0.85), inset 0 1px 0 rgba(255,255,255,1);
+
+  --ats-scroll-thumb:       rgba(124,45,18,0.28);
+  --ats-scroll-thumb-hover: rgba(124,45,18,0.50);
+
+  --ats-placeholder-fg: rgba(63,42,28,0.82);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+[data-theme="day-mint"] {
+  /* Morning Mint — cool mint canvas with emerald accents.            */
+  --ats-bg-page:        #E4F1EA;
+  --ats-bg-panel:       #F5FAF6;
+  --ats-bg-card:        #E4F1EA;
+  --ats-bg-card-muted:  #E4F1EA;
+  --ats-bg-input:       #F5FAF6;
+  --ats-bg-accent-soft: rgba(4,120,87,0.08);
+  --ats-bg-accent:      #047857;
+  --ats-bg-emerald:     #E4F1EA;
+
+  --ats-fg-primary:     #0F2E25;
+  --ats-fg-secondary:   #274E42;
+  --ats-fg-muted:       #5B7A70;
+  --ats-fg-accent:      #065F46;
+  --ats-fg-on-accent:   #F5FAF6;
+
+  --ats-border-subtle:  #BFD9CD;
+  --ats-border-strong:  #93B9A8;
+  --ats-border-accent:  rgba(4,120,87,0.40);
+
+  --ats-success:        #047857;
+  --ats-danger:         #B91C1C;
+
+  --ats-ring-canvas:    #E4F1EA;
+  --ats-shadow-panel:   0 6px 20px rgba(15,46,37,0.09), 0 1px 3px rgba(15,46,37,0.05),
+                        0 0 0 1px rgba(255,255,255,0.85), inset 0 1px 0 rgba(255,255,255,1);
+
+  --ats-scroll-thumb:       rgba(6,95,70,0.28);
+  --ats-scroll-thumb-hover: rgba(6,95,70,0.50);
+
+  --ats-placeholder-fg: rgba(15,46,37,0.82);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+[data-theme="night-prism"] {
+  /* Aurora Prism — deep obsidian canvas with a shifting multi-hue accent.
+     The "accent" is the centre of the rainbow (cyan-violet midpoint);
+     the real colour work happens via the .ats-panel rim gradient below. */
+  --ats-bg-page:        #0A0818;
+  --ats-bg-panel:       #12102A;
+  --ats-bg-card:        #191538;
+  --ats-bg-card-muted:  rgba(25,21,56,0.7);
+  --ats-bg-input:       rgba(36,30,76,0.72);
+  --ats-bg-accent-soft: rgba(139,92,246,0.15);
+  --ats-bg-accent:      #A78BFA;
+  --ats-bg-emerald:     #112438;
+
+  --ats-fg-primary:     #E6E8FF;
+  --ats-fg-secondary:   #BDC3F0;
+  --ats-fg-muted:       #7C83B8;
+  --ats-fg-accent:      #C4B5FD;
+  --ats-fg-on-accent:   #0A0818;
+
+  --ats-border-subtle:  rgba(167,139,250,0.20);
+  --ats-border-strong:  rgba(167,139,250,0.40);
+  --ats-border-accent:  rgba(167,139,250,0.60);
+
+  --ats-success:        #34D399;
+  --ats-danger:         #FB7185;
+
+  --ats-ring-canvas:    #0A0818;
+  --ats-shadow-panel:   0 0 22px rgba(139,92,246,0.12), 0 6px 18px rgba(0,0,0,0.55);
+
+  --ats-scroll-thumb:       rgba(167,139,250,0.30);
+  --ats-scroll-thumb-hover: rgba(167,139,250,0.55);
+
+  --ats-placeholder-fg: rgba(196,181,253,0.55);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+/* Aurora Prism — iridescent rim around every .ats-panel via a conic
+   gradient on a ::before pseudo-element. Animation is slow so the rim
+   gently rotates without distracting from content.                    */
+@keyframes prism-rim-rotate {
+  from { --prism-angle: 0deg; }
+  to   { --prism-angle: 360deg; }
+}
+@property --prism-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+
+[data-theme="night-prism"] .ats-panel {
+  position: relative;
+}
+[data-theme="night-prism"] .ats-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--prism-angle, 0deg),
+    #F472B6, #A78BFA, #22D3EE, #34D399, #FBBF24, #FB7185, #F472B6
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.55;
+  animation: prism-rim-rotate 18s linear infinite;
+}
+
+[data-theme="night-rose"] {
+  /* Rose Quartz — deep plum canvas with rose accents.                */
+  --ats-bg-page:        #1A0F1C;
+  --ats-bg-panel:       #221528;
+  --ats-bg-card:        #2A1A32;
+  --ats-bg-card-muted:  rgba(34,21,40,0.7);
+  --ats-bg-input:       rgba(42,26,50,0.85);
+  --ats-bg-accent-soft: rgba(244,114,182,0.10);
+  --ats-bg-accent:      #F472B6;
+  --ats-bg-emerald:     #17222B;
+
+  --ats-fg-primary:     #F3DDE8;
+  --ats-fg-secondary:   #D4B6C9;
+  --ats-fg-muted:       #8F7788;
+  --ats-fg-accent:      #F472B6;
+  --ats-fg-on-accent:   #2A0F1F;
+
+  --ats-border-subtle:  rgba(244,114,182,0.14);
+  --ats-border-strong:  rgba(244,114,182,0.32);
+  --ats-border-accent:  rgba(244,114,182,0.50);
+
+  --ats-success:        #10B981;
+  --ats-danger:         #EF4444;
+
+  --ats-ring-canvas:    #1A0F1C;
+  --ats-shadow-panel:   0 6px 22px rgba(0,0,0,0.55), 0 1px 3px rgba(244,114,182,0.08);
+
+  --ats-scroll-thumb:       rgba(244,114,182,0.22);
+  --ats-scroll-thumb-hover: rgba(244,114,182,0.42);
+
+  --ats-placeholder-fg: rgba(244,114,182,0.55);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+/* ── Amber Noir: retint announcement gradient & any purple accents ───
+   The top-of-page announcement uses `from-blue-500/25 via-purple-500/20`,
+   which would read cool-blue even after the main tokens switch. Remap
+   those gradient stops to amber so the banner reads as part of the theme. */
+[data-theme="night-amber"] .from-blue-500\/25,
+[data-theme="night-amber"] .to-blue-500\/25      { --tw-gradient-from: rgba(245,165,36,0.20) !important; --tw-gradient-to: rgba(245,165,36,0.20) !important; }
+[data-theme="night-amber"] .via-purple-500\/20   { --tw-gradient-via: rgba(245,165,36,0.12) !important; }
+
+[data-theme="night-amber"] {
+  /* Amber Noir — warm black surfaces with amber as the sole accent.
+     Base neutrals lean slightly toward brown/amber so "black" feels
+     jewelled rather than cold. No cool-blue anywhere in the token set. */
+  --ats-bg-page:        #0B0906;
+  --ats-bg-panel:       #171310;
+  --ats-bg-card:        #1C1812;
+  --ats-bg-card-muted:  rgba(28,24,18,0.7);
+  --ats-bg-input:       rgba(36,30,22,0.85);
+  --ats-bg-accent-soft: rgba(245,165,36,0.12);
+  --ats-bg-accent:      #F5A524;
+  --ats-bg-emerald:     #0F1A14;
+
+  --ats-fg-primary:     #F4E5C3;
+  --ats-fg-secondary:   #D6C08B;
+  --ats-fg-muted:       #8A7A5C;
+  --ats-fg-accent:      #F5A524;
+  --ats-fg-on-accent:   #1A1208;
+
+  --ats-border-subtle:  rgba(245,165,36,0.15);
+  --ats-border-strong:  rgba(245,165,36,0.35);
+  --ats-border-accent:  rgba(245,165,36,0.55);
+
+  --ats-success:        #F5A524;
+  --ats-danger:         #EF4444;
+
+  --ats-ring-canvas:    #0A0A0A;
+  --ats-shadow-panel:   0 6px 24px rgba(0,0,0,0.75), 0 1px 2px rgba(245,165,36,0.08);
+
+  --ats-scroll-thumb:       rgba(245,165,36,0.25);
+  --ats-scroll-thumb-hover: rgba(245,165,36,0.45);
+
+  --ats-placeholder-fg: rgba(245,165,36,0.55);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+[data-tone="day"] {
+  --ats-bg-page:       #DEE8F1;   /* user-specified light canvas */
+  --ats-bg-panel:      #F4F8FB;   /* not pure white — tinted toward the canvas so panels feel cohesive */
+  /* Module cards on the light canvas tint back toward the canvas colour
+     so nothing reads as "pure gray" against the blue-gray page. */
+  --ats-bg-card:       #DEE8F1;
+  --ats-bg-card-muted: #DEE8F1;
+  --ats-bg-input:      #F4F8FB;
+  --ats-bg-accent-soft: rgba(59,130,246,0.08);
+  --ats-bg-accent:     #2563eb;
+  --ats-bg-emerald:    #f0f9f5;
+
+  --ats-fg-primary:    #0f172a;
+  --ats-fg-secondary:  #334155;
+  --ats-fg-muted:      #64748b;
+  --ats-fg-accent:     #1d4ed8;
+  --ats-fg-on-accent:  #ffffff;
+
+  --ats-border-subtle: #cfdbe7;
+  --ats-border-strong: #b9c7d6;
+  --ats-border-accent: rgba(59,130,246,0.4);
+
+  --ats-success:       #059669;
+  --ats-danger:        #dc2626;
+
+  --ats-ring-canvas:   #DEE8F1;
+  --ats-shadow-panel:  0 2px 10px rgba(0,0,0,0.06), 0 0 0 1px rgba(255,255,255,0.9);
+
+  --ats-scroll-thumb:       rgba(71,85,105,0.35);
+  --ats-scroll-thumb-hover: rgba(51,65,85,0.55);
+
+  /* Placeholder must stay readable on #F4F8FB even through `animate-pulse`
+     (which drops opacity to ~50% mid-cycle). Pushed darker + more opaque so
+     the faintest frame still has contrast > 3:1. */
+  --ats-placeholder-fg: rgba(30,41,59,0.85);
+
+  --ats-bg-base:    var(--ats-bg-page);
+  --ats-bg-section: var(--ats-bg-panel);
+}
+
+/* ── Standardised radius — override Tailwind utilities site-wide ── */
+/* Keeps visual hierarchy (xl < 2xl < 3xl) but trims down so corners read as crisp, not pillowy. */
+.rounded      { border-radius: var(--ats-radius-sm) !important; }
+.rounded-md   { border-radius: var(--ats-radius-sm) !important; }
+.rounded-lg   { border-radius: var(--ats-radius-sm) !important; }
+.rounded-xl   { border-radius: var(--ats-radius-md) !important; }
+.rounded-2xl  { border-radius: var(--ats-radius-md) !important; }
+.rounded-3xl  { border-radius: var(--ats-radius-lg) !important; }
+/* rounded-full stays pill for avatars, chevrons, dot indicators. */
+
+/* ── Unified frame utility ─────────────────────────────────────────
+   `.ats-card` = one look for every bordered inner module (same border
+   colour, thickness, radius, background). Swap a component's mixed
+   border/bg classes for `ats-card` to inherit the canonical spec.     */
+.ats-card {
+  border: var(--ats-border-width) solid var(--ats-border-subtle);
+  background-color: var(--ats-bg-card);
+  border-radius: var(--ats-radius-md);
+}
+
+/* ── Brand-accent tokenisation ─────────────────────────────────────
+   Most in-app "active" / "primary" elements were hard-coded to Tailwind
+   blue (the original brand colour). Re-point them at the theme accent
+   tokens so every theme's accent actually shows:
+     Midnight Blue → still blue
+     Amber Noir    → amber
+     Warm Paper    → umber
+     Morning Mint  → emerald
+     Rose Quartz   → rose
+   Components that want a LITERAL blue (regardless of theme) can still
+   opt out with an inline style.                                      */
+.bg-blue-500       { background-color: var(--ats-bg-accent) !important; }
+.bg-blue-600       { background-color: var(--ats-bg-accent) !important; filter: brightness(0.92); }
+/* Text on a filled accent button should always be the on-accent colour
+   (white in every current theme), regardless of the per-tone text overrides. */
+[data-tone="day"] .bg-blue-500,
+[data-tone="day"] .bg-blue-600,
+[data-tone="day"] .bg-blue-500 *,
+[data-tone="day"] .bg-blue-600 * { color: var(--ats-fg-on-accent) !important; }
+.hover\:bg-blue-500:hover,
+.hover\:bg-blue-600:hover { background-color: var(--ats-bg-accent) !important; filter: brightness(1.05); }
+.bg-blue-500\/10,
+.bg-blue-500\/8    { background-color: var(--ats-bg-accent-soft) !important; }
+.bg-blue-500\/15   { background-color: var(--ats-bg-accent-soft) !important; filter: brightness(1.2); }
+.bg-blue-500\/20   { background-color: var(--ats-bg-accent-soft) !important; filter: brightness(1.35); }
+
+.text-blue-300,
+.text-blue-400     { color: var(--ats-fg-accent) !important; }
+.text-blue-500     { color: var(--ats-bg-accent) !important; }
+
+.border-blue-500\/30,
+.border-blue-500\/40,
+.border-blue-500\/50,
+.border-blue-500\/60,
+.border-blue-500\/70 { border-color: var(--ats-border-accent) !important; }
+
+.hover\:border-blue-500\/40:hover,
+.hover\:border-blue-500\/50:hover,
+.hover\:border-blue-500\/60:hover { border-color: var(--ats-border-accent) !important; }
+
+/* Ring + focus states follow the accent too. */
+.focus\:border-blue-500:focus,
+.focus\:border-blue-500\/50:focus,
+.focus\:border-blue-500\/60:focus { border-color: var(--ats-border-accent) !important; }
+
+/* ── Unified select / dropdown skin ────────────────────────────────
+   All <select> elements in the app inherit the token palette and share
+   one border/background/radius treatment. Swap the tokens per theme to
+   recolour every dropdown at once.                                   */
+select {
+  background-color: var(--ats-bg-input) !important;
+  color: var(--ats-fg-primary) !important;
+  border: var(--ats-border-width) solid var(--ats-border-subtle) !important;
+  border-radius: var(--ats-radius-sm) !important;
+}
+select:focus {
+  border-color: var(--ats-border-accent) !important;
+  outline: none !important;
+}
+select option {
+  background-color: var(--ats-bg-input);
+  color: var(--ats-fg-primary);
+}
+
+/* ── Score chips — readable in BOTH themes ───────────────────────
+   Dark base is set inline via Tailwind (see scoreChip()).
+   Light mode darkens the text and deepens the border so the chip
+   reads clearly against the #F4F8FB panel.                        */
+[data-tone="day"] .score-chip-strong   { color: #047857 !important; border-color: rgba(5,150,105,0.40) !important; background-color: rgba(16,185,129,0.12) !important; }
+[data-tone="day"] .score-chip-good     { color: #1d4ed8 !important; border-color: rgba(37,99,235,0.40) !important; background-color: rgba(59,130,246,0.10) !important; }
+/* Moderate chip shares the amber-400 palette the "required" label uses.
+   In day mode the text is darkened to amber-600 so it reads on a light panel. */
+[data-tone="day"] .score-chip-moderate { color: #CA8A04 !important; border-color: rgba(202,138,4,0.45) !important; background-color: rgba(251,191,36,0.22) !important; }
+/* Day mode: same amber applied to the faint "required" helper label so the two
+   visually match (requested by the user). */
+[data-tone="day"] .text-amber-400,
+[data-tone="day"] .text-amber-400\/80 { color: #CA8A04 !important; }
+[data-tone="day"] .score-chip-weak     { color: #be123c !important; border-color: rgba(225,29,72,0.45) !important; background-color: rgba(244,63,94,0.12) !important; }
+
+/* ── Lab region (Synthesis Lab) — all frame fills share ONE token ──
+   Scopes these overrides to `<aside data-region="lab">` so only the Lab
+   re-tints; Workspace/Analytics keep their independent palettes.
+   Using --ats-bg-input means Lab cards visually match the Workspace
+   textarea — there is one "input surface" colour across the app. */
+[data-region="lab"] .bg-slate-950\/20,
+[data-region="lab"] .bg-slate-950\/40,
+[data-region="lab"] .bg-slate-950\/60,
+[data-region="lab"] .bg-slate-900\/20,
+[data-region="lab"] .bg-slate-900\/30,
+[data-region="lab"] .bg-slate-900\/40,
+[data-region="lab"] .bg-slate-900\/50,
+[data-region="lab"] .bg-slate-900\/60           { background-color: var(--ats-bg-input) !important; }
+/* All bordered elements inside the Lab get the same neutral stroke.
+   Attribute selector covers slate, blue, violet, amber, red — anything
+   that sets a border-color class — so the Lab reads as one consistent frame. */
+[data-tone="day"] [data-region="lab"] [class*="border-"] { border-color: #c9d1db !important; }
+/* Accent borders that denote ACTIVE state (selected source chip etc.) keep a
+   subtle blue tint so users can still tell an active element apart. */
+[data-tone="day"] [data-region="lab"] .border-blue-500\/40,
+[data-tone="day"] [data-region="lab"] .border-blue-500\/50,
+[data-tone="day"] [data-region="lab"] .border-blue-500\/60,
+[data-tone="day"] [data-region="lab"] .border-blue-500\/70        { border-color: rgba(59,130,246,0.45) !important; }
 
 /* ═══════════════════════════════════════════════════════════════
    LIGHT MODE — comprehensive colour overrides
@@ -114,97 +571,207 @@ body {
    ═══════════════════════════════════════════════════════════════ */
 
 /* ── Light: root colour — fixes ALL inherited text (headings, titles, etc.) ── */
-/* main IS the [data-theme="light"] element, so the descendant selector          */
-/* "[data-theme="light"] .text-slate-100" does NOT apply to main itself.          */
+/* main IS the [data-tone="day"] element, so the descendant selector          */
+/* "[data-tone="day"] .text-slate-100" does NOT apply to main itself.          */
 /* This compound selector targets main directly and re-darkens the baseline.      */
-main[data-theme="light"] { color: #0f172a !important; }
+main[data-tone="day"] { color: #0f172a !important; }
 
 /* ── Light: all Tailwind text utilities ──────────────────────── */
-[data-theme="light"] .text-slate-100 { color: #0f172a !important; }
-[data-theme="light"] .text-slate-200 { color: #1e293b !important; }
-[data-theme="light"] .text-slate-300 { color: #334155 !important; }
-[data-theme="light"] .text-slate-400 { color: #475569 !important; }
-[data-theme="light"] .text-slate-500 { color: #64748b !important; }
-[data-theme="light"] .text-slate-600 { color: #64748b !important; }
+[data-tone="day"] .text-slate-100 { color: #0f172a !important; }
+[data-tone="day"] .text-slate-200 { color: #1e293b !important; }
+[data-tone="day"] .text-slate-300 { color: #334155 !important; }
+[data-tone="day"] .text-slate-400 { color: #475569 !important; }
+[data-tone="day"] .text-slate-500 { color: #64748b !important; }
+[data-tone="day"] .text-slate-600 { color: #64748b !important; }
 /* text-white → near-black; buttons with colored bg (bg-blue-500) still read fine with dark text */
-[data-theme="light"] .text-white      { color: #0f172a !important; }
-[data-theme="light"] .text-blue-300   { color: #1d4ed8 !important; }
-[data-theme="light"] .text-blue-400   { color: #2563eb !important; }
-[data-theme="light"] .text-blue-500   { color: #2563eb !important; }
-[data-theme="light"] .text-emerald-400 { color: #059669 !important; }
-[data-theme="light"] .text-emerald-500 { color: #047857 !important; }
-[data-theme="light"] .text-red-200    { color: #dc2626 !important; }
-[data-theme="light"] .text-red-400    { color: #dc2626 !important; }
+[data-tone="day"] .text-white      { color: #0f172a !important; }
+[data-tone="day"] .text-blue-300   { color: #1d4ed8 !important; }
+[data-tone="day"] .text-blue-400   { color: #2563eb !important; }
+[data-tone="day"] .text-blue-500   { color: #2563eb !important; }
+[data-tone="day"] .text-emerald-400 { color: #059669 !important; }
+[data-tone="day"] .text-emerald-500 { color: #047857 !important; }
+[data-tone="day"] .text-red-200    { color: #dc2626 !important; }
+[data-tone="day"] .text-red-400    { color: #dc2626 !important; }
 /* Blue opacity variants used in the announcement area */
-[data-theme="light"] .text-blue-400\/70 { color: rgba(37,99,235,0.80) !important; }
+[data-tone="day"] .text-blue-400\/70 { color: rgba(37,99,235,0.80) !important; }
 
-/* ── Light: backgrounds ──────────────────────────────────────── */
-[data-theme="light"] .bg-slate-950\/20,
-[data-theme="light"] .bg-slate-950\/40,
-[data-theme="light"] .bg-slate-950\/60  { background-color: rgba(200,205,214,0.55) !important; }
-[data-theme="light"] .bg-slate-900\/20,
-[data-theme="light"] .bg-slate-900\/30,
-[data-theme="light"] .bg-slate-900\/40,
-[data-theme="light"] .bg-slate-900\/50,
-[data-theme="light"] .bg-slate-900\/60  { background-color: rgba(188,197,210,0.45) !important; }
-[data-theme="light"] .bg-blue-500\/8,
-[data-theme="light"] .bg-blue-500\/10   { background-color: rgba(59,130,246,0.08) !important; }
-[data-theme="light"] .bg-blue-500\/5    { background-color: rgba(59,130,246,0.05) !important; }
-[data-theme="light"] .bg-red-500\/10    { background-color: rgba(239,68,68,0.08) !important; }
-[data-theme="light"] .bg-emerald-500\/15 { background-color: rgba(16,185,129,0.10) !important; }
-/* Hardcoded dark-navy classes (progress/run block) → soft blue-gray */
-[data-theme="light"] .bg-\[\#0f1e35\]  { background-color: #dce8f5 !important; }
-[data-theme="light"] .bg-\[\#09162d\]  { background-color: #d8e4f2 !important; }
-[data-theme="light"] .bg-\[\#0a1a35\]  { background-color: #dde9f6 !important; }
-[data-theme="light"] .bg-slate-800     { background-color: #c5cdd9 !important; }
+/* ── Light: backgrounds — all interior "small module" surfaces use the page canvas
+   colour so nothing reads as generic gray against the blue-gray page.          */
+[data-tone="day"] .bg-slate-950\/20,
+[data-tone="day"] .bg-slate-950\/40,
+[data-tone="day"] .bg-slate-950\/60  { background-color: var(--ats-bg-page) !important; }
+[data-tone="day"] .bg-slate-900\/20,
+[data-tone="day"] .bg-slate-900\/30,
+[data-tone="day"] .bg-slate-900\/40,
+[data-tone="day"] .bg-slate-900\/50,
+[data-tone="day"] .bg-slate-900\/60  { background-color: var(--ats-bg-page) !important; }
+/* Active tab pill → solid blue so it stays readable */
+[data-tone="day"] .bg-slate-900\/70  { background-color: #2563eb !important; }
+/* Keep text white when sitting on the blue active-tab background */
+[data-tone="day"] .bg-slate-900\/70.text-slate-100 { color: #ffffff !important; }
+/* User dropdown + avatar button */
+[data-tone="day"] .bg-slate-900\/90  { background-color: rgba(255,255,255,0.97) !important; }
+[data-tone="day"] .bg-slate-900\/95  { background-color: rgba(255,255,255,0.98) !important; }
+/* History panel */
+[data-tone="day"] .bg-slate-950\/95  { background-color: rgba(255,255,255,0.98) !important; }
+/* Modal / panel solid background */
+[data-tone="day"] .bg-slate-900      { background-color: #ffffff !important; }
+/* Settings/account card rows */
+[data-tone="day"] .bg-slate-800\/40,
+[data-tone="day"] .bg-slate-800\/50  { background-color: rgba(226,232,240,0.55) !important; }
+[data-tone="day"] .bg-slate-800\/60  { background-color: rgba(226,232,240,0.65) !important; }
+/* Inline pill / avatar / small decorative */
+[data-tone="day"] .bg-slate-700      { background-color: #cbd5e1 !important; }
+[data-tone="day"] .bg-slate-700\/80  { background-color: rgba(203,213,225,0.85) !important; }
+[data-tone="day"] .bg-slate-700\/50  { background-color: rgba(203,213,225,0.55) !important; }
+[data-tone="day"] .bg-blue-500\/8,
+[data-tone="day"] .bg-blue-500\/10   { background-color: rgba(59,130,246,0.07) !important; }
+[data-tone="day"] .bg-blue-500\/5    { background-color: rgba(59,130,246,0.04) !important; }
+[data-tone="day"] .bg-red-500\/10    { background-color: rgba(239,68,68,0.06) !important; }
+[data-tone="day"] .bg-emerald-500\/15 { background-color: rgba(16,185,129,0.08) !important; }
+/* Hardcoded dark-navy classes (progress/run block) → clean light blue-gray */
+[data-tone="day"] .bg-\[\#0f1e35\]  { background-color: #eef4fc !important; }
+[data-tone="day"] .bg-\[\#09162d\]  { background-color: #e8f0fb !important; }
+[data-tone="day"] .bg-\[\#0a1a35\]  { background-color: #edf3fc !important; }
+[data-tone="day"] .bg-slate-800     { background-color: #f1f4f8 !important; }
 /* Announcement / panel transparent backgrounds */
-[data-theme="light"] .bg-slate-700\/30 { background-color: rgba(148,163,184,0.20) !important; }
+[data-tone="day"] .bg-slate-700\/30 { background-color: rgba(226,232,240,0.35) !important; }
 /* DividerScrollbar track */
-[data-theme="light"] .bg-white\/5               { background-color: rgba(0,0,0,0.05) !important; }
-[data-theme="light"] .hover\:bg-white\/10:hover { background-color: rgba(0,0,0,0.09) !important; }
-[data-theme="light"] .bg-slate-600\/60          { background-color: rgba(100,116,139,0.35) !important; }
+[data-tone="day"] .bg-white\/5               { background-color: rgba(0,0,0,0.03) !important; }
+[data-tone="day"] .hover\:bg-white\/10:hover { background-color: rgba(0,0,0,0.06) !important; }
+[data-tone="day"] .bg-slate-600\/60          { background-color: rgba(148,163,184,0.30) !important; }
 
 /* ── Light: hover overrides ──────────────────────────────────── */
-[data-theme="light"] .hover\:bg-slate-800:hover  { background-color: #bdc7d4 !important; }
-[data-theme="light"] .hover\:bg-red-500\/20:hover { background-color: rgba(239,68,68,0.12) !important; }
+[data-tone="day"] .hover\:bg-slate-800:hover      { background-color: #e8ecf2 !important; }
+[data-tone="day"] .hover\:bg-slate-800\/60:hover  { background-color: rgba(226,232,240,0.70) !important; }
+[data-tone="day"] .hover\:bg-red-500\/20:hover    { background-color: rgba(239,68,68,0.10) !important; }
 
 /* ── Light: inputs / textareas / selects ─────────────────────── */
-[data-theme="light"] input::placeholder,
-[data-theme="light"] textarea::placeholder { color: #94a3b8 !important; }
-[data-theme="light"] input,
-[data-theme="light"] textarea { color: #0f172a !important; }
-[data-theme="light"] select   { color: #0f172a !important; background-color: #e4e6ea !important; }
+[data-tone="day"] input::placeholder,
+[data-tone="day"] textarea::placeholder { color: #94a3b8 !important; }
+/* Day inputs default to the token panel colour rather than pure white so they
+   blend into whatever surface they sit on (Workspace textarea, announcement
+   ticker input, etc.). Inputs that explicitly opt out via `bg-transparent`
+   keep their transparent fill because Tailwind's class beats this cascade. */
+[data-tone="day"] input,
+[data-tone="day"] textarea { color: #0f172a !important; background-color: var(--ats-bg-panel); }
+/* bg-transparent stays transparent so announcement input inherits the banner fill. */
+[data-tone="day"] input.bg-transparent,
+[data-tone="day"] textarea.bg-transparent { background-color: transparent !important; }
+[data-tone="day"] select   { color: #0f172a !important; background-color: #f8fafc !important; }
 
 /* ── Light: borders ──────────────────────────────────────────── */
-[data-theme="light"] .border-slate-700           { border-color: #adb8c8 !important; }
-[data-theme="light"] .border-slate-700\/50,
-[data-theme="light"] .border-slate-700\/60       { border-color: rgba(173,184,200,0.6) !important; }
-[data-theme="light"] .border-slate-700\/40       { border-color: rgba(173,184,200,0.45) !important; }
-[data-theme="light"] .border-slate-800           { border-color: #bcc5d4 !important; }
-[data-theme="light"] .border-slate-800\/50       { border-color: rgba(188,197,212,0.5) !important; }
-[data-theme="light"] .border-blue-500\/15        { border-color: rgba(59,130,246,0.22) !important; }
-[data-theme="light"] .border-blue-500\/20        { border-color: rgba(59,130,246,0.28) !important; }
-[data-theme="light"] .border-blue-500\/30        { border-color: rgba(59,130,246,0.35) !important; }
-[data-theme="light"] .border-blue-500\/40        { border-color: rgba(59,130,246,0.45) !important; }
-[data-theme="light"] .border-red-500\/30         { border-color: rgba(239,68,68,0.35) !important; }
-[data-theme="light"] .border-emerald-500\/30     { border-color: rgba(16,185,129,0.35) !important; }
+[data-tone="day"] .border-slate-700           { border-color: #cbd5e1 !important; }
+[data-tone="day"] .border-slate-700\/50,
+[data-tone="day"] .border-slate-700\/60       { border-color: rgba(203,213,225,0.70) !important; }
+[data-tone="day"] .border-slate-700\/40       { border-color: rgba(203,213,225,0.55) !important; }
+[data-tone="day"] .border-slate-800           { border-color: #e2e8f0 !important; }
+[data-tone="day"] .border-slate-800\/50       { border-color: rgba(226,232,240,0.60) !important; }
+[data-tone="day"] .border-blue-500\/15        { border-color: rgba(59,130,246,0.18) !important; }
+[data-tone="day"] .border-blue-500\/20        { border-color: rgba(59,130,246,0.25) !important; }
+[data-tone="day"] .border-blue-500\/30        { border-color: rgba(59,130,246,0.32) !important; }
+[data-tone="day"] .border-blue-500\/40        { border-color: rgba(59,130,246,0.42) !important; }
+[data-tone="day"] .border-red-500\/30         { border-color: rgba(239,68,68,0.30) !important; }
+[data-tone="day"] .border-emerald-500\/30     { border-color: rgba(16,185,129,0.30) !important; }
+
+/* ── Light: ring colours ─────────────────────────────────────── */
+/* Timeline dot uses ring-slate-950 to mask the line behind it — swap to canvas colour */
+[data-tone="day"] .ring-slate-950   { --tw-ring-color: #eef2f8 !important; }
 
 /* ── Light: prose (Research Brief) — override prose-invert ──── */
 /* prose-invert sets text to white; these rules re-darken everything */
-[data-theme="light"] [class*="prose"]            { color: #1e293b !important; }
-[data-theme="light"] [class*="prose"] p,
-[data-theme="light"] [class*="prose"] li         { color: #1e293b !important; }
-[data-theme="light"] [class*="prose"] strong     { color: #0f172a !important; }
-[data-theme="light"] [class*="prose"] h2         { color: #1d4ed8 !important; border-color: #bcc5d4 !important; }
-[data-theme="light"] [class*="prose"] h3         { color: #2563eb !important; }
-[data-theme="light"] [class*="prose"] a          { color: #2563eb !important; }
-[data-theme="light"] [class*="prose"] code       { color: #1e293b !important; background: rgba(0,0,0,0.06) !important; }
-[data-theme="light"] [class*="prose"] blockquote { color: #334155 !important; border-color: #b0bcd0 !important; }
-[data-theme="light"] [class*="prose"] hr         { border-color: #c0cad8 !important; }
+[data-tone="day"] [class*="prose"]            { color: #1e293b !important; }
+[data-tone="day"] [class*="prose"] p,
+[data-tone="day"] [class*="prose"] li         { color: #1e293b !important; }
+[data-tone="day"] [class*="prose"] strong     { color: #0f172a !important; }
+[data-tone="day"] [class*="prose"] h2         { color: #1d4ed8 !important; border-color: #bcc5d4 !important; }
+[data-tone="day"] [class*="prose"] h3         { color: #2563eb !important; }
+[data-tone="day"] [class*="prose"] a          { color: #2563eb !important; }
+[data-tone="day"] [class*="prose"] code       { color: #1e293b !important; background: rgba(0,0,0,0.06) !important; }
+[data-tone="day"] [class*="prose"] blockquote { color: #334155 !important; border-color: #b0bcd0 !important; }
+[data-tone="day"] [class*="prose"] hr         { border-color: #c0cad8 !important; }
+
+/* ── Light: background gradient (bottom → top) ──────────────── */
+/* Gradient reads from --ats-bg-page (bottom) and --ats-bg-panel (top) so every
+   day theme (light, day-sand, day-mint, future ones) inherits the same fade
+   without needing its own selector.                                         */
+main[data-tone="day"],
+main[data-theme="day-sand"],
+main[data-theme="day-mint"] {
+  background: linear-gradient(to top, var(--ats-bg-page) 0%, var(--ats-bg-panel) 80%) !important;
+}
+
+/* ── Panel shadow — same spec in every theme, light has extra highlight strokes ── */
+.ats-panel {
+  box-shadow:
+    0 6px 18px rgba(15,23,42,0.10),
+    0 1px 3px rgba(15,23,42,0.06);
+}
+[data-tone="day"] .ats-panel {
+  box-shadow:
+    0 6px 20px rgba(15,23,42,0.10),
+    0 1px 3px rgba(15,23,42,0.06),
+    0 0 0 1px rgba(255,255,255,0.85),
+    inset 0 1px 0 rgba(255,255,255,1) !important;
+}
+
+/* ── Light: inner section cards ──────────────────────────────── */
+[data-tone="day"] .ats-card {
+  border: 1px solid rgba(218,226,238,0.9) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04), inset 0 1px 0 rgba(255,255,255,0.8) !important;
+}
+
+/* ── Light: violet → blue (Synthesis Lab accent) ────────────── */
+[data-tone="day"] .text-violet-400          { color: #2563eb !important; }
+[data-tone="day"] .text-violet-300          { color: #3b82f6 !important; }
+[data-tone="day"] .border-violet-500\/60    { border-color: rgba(59,130,246,0.50) !important; }
+[data-tone="day"] .border-violet-500\/50    { border-color: rgba(59,130,246,0.40) !important; }
+[data-tone="day"] .bg-violet-500\/20        { background-color: rgba(59,130,246,0.12) !important; }
+[data-tone="day"] .bg-violet-500\/15        { background-color: rgba(59,130,246,0.09) !important; }
+[data-tone="day"] .bg-violet-500\/10        { background-color: rgba(59,130,246,0.07) !important; }
+[data-tone="day"] .bg-violet-500\/5         { background-color: rgba(59,130,246,0.04) !important; }
+[data-tone="day"] .bg-violet-600            { background-color: #2563eb !important; }
+[data-tone="day"] .hover\:bg-violet-500:hover { background-color: #3b82f6 !important; }
+[data-tone="day"] .focus\:border-violet-500 { border-color: #3b82f6 !important; }
+[data-tone="day"] .accent-violet-500        { accent-color: #2563eb !important; }
+[data-tone="day"] .hover\:border-violet-500\/50:hover { border-color: rgba(59,130,246,0.40) !important; }
+[data-tone="day"] .hover\:text-violet-400:hover { color: #2563eb !important; }
 
 /* ── Light: charts ───────────────────────────────────────────── */
-[data-theme="light"] .chart-svg .chart-label     { fill: #475569 !important; }
-[data-theme="light"] .chart-svg .chart-grid      { stroke: #c4cdd9 !important; }
-[data-theme="light"] .chart-svg .chart-axis      { stroke: #94a3b8 !important; }
+[data-tone="day"] .chart-svg .chart-label     { fill: #475569 !important; }
+[data-tone="day"] .chart-svg .chart-grid      { stroke: #c4cdd9 !important; }
+[data-tone="day"] .chart-svg .chart-axis      { stroke: #94a3b8 !important; }
 /* Donut chart center number (fill="white" SVG attribute) */
-[data-theme="light"] .chart-svg .chart-center-num { fill: #0f172a !important; }
+[data-tone="day"] .chart-svg .chart-center-num { fill: #0f172a !important; }
+
+/* ── Global: violet / purple → blue in BOTH modes ─────────────── */
+/* User requirement: unify UI colour. Dark mode must not show purple/violet. */
+.text-violet-200, .text-violet-300, .text-violet-400         { color: #93c5fd !important; }
+.hover\:text-violet-200:hover,
+.hover\:text-violet-300:hover,
+.hover\:text-violet-400:hover                                { color: #bfdbfe !important; }
+
+.border-violet-500, .border-violet-500\/20, .border-violet-500\/30,
+.border-violet-500\/40, .border-violet-500\/50, .border-violet-500\/60 { border-color: rgba(59,130,246,0.45) !important; }
+.hover\:border-violet-500\/50:hover,
+.hover\:border-violet-500\/60:hover                          { border-color: rgba(59,130,246,0.55) !important; }
+
+.bg-violet-500, .bg-violet-600                               { background-color: #2563eb !important; }
+.bg-violet-500\/5                                            { background-color: rgba(59,130,246,0.05) !important; }
+.bg-violet-500\/10                                           { background-color: rgba(59,130,246,0.10) !important; }
+.bg-violet-500\/15                                           { background-color: rgba(59,130,246,0.15) !important; }
+.bg-violet-500\/20                                           { background-color: rgba(59,130,246,0.20) !important; }
+.hover\:bg-violet-500:hover,
+.hover\:bg-violet-500\/10:hover                              { background-color: rgba(59,130,246,0.20) !important; }
+
+.focus\:border-violet-500:focus                              { border-color: #3b82f6 !important; }
+.accent-violet-500                                           { accent-color: #3b82f6 !important; }
+
+.text-purple-300, .text-purple-400                           { color: #93c5fd !important; }
+.border-purple-500, .border-purple-500\/40, .border-purple-500\/50, .border-purple-500\/60 { border-color: rgba(59,130,246,0.45) !important; }
+.bg-purple-500\/10, .bg-purple-500\/15, .bg-purple-500\/20   { background-color: rgba(59,130,246,0.12) !important; }
+.focus\:border-purple-500\/50:focus                          { border-color: rgba(59,130,246,0.50) !important; }
+
+.from-purple-500\/20, .via-purple-500\/20, .to-purple-500\/20 { --tw-gradient-from: rgba(59,130,246,0.20) !important; --tw-gradient-via: rgba(59,130,246,0.20) !important; --tw-gradient-to: rgba(59,130,246,0.20) !important; }
+
+

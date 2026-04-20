@@ -23,7 +23,7 @@ export default function LoginPage() {
     setMessage('')
     const redirectTo = typeof window !== 'undefined'
       ? `${window.location.origin}/`
-      : 'http://localhost:3000/'
+      : 'https://academic-ats-frontend.vercel.app/'
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo },

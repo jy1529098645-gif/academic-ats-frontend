@@ -22,6 +22,11 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Page-level translation is re-enabled — Google Translate can freely translate
+  // static copy (titles, labels, sidebar, Settings panels, etc.). The volatile
+  // regions that React re-renders streaming tokens into (Research Brief, agent
+  // logs, Lab output, textarea overlay, history timeline) opt out individually
+  // via `translate="no"` + `notranslate` class to avoid the DOM-rewrite crash.
   return (
     <html
       lang="en"

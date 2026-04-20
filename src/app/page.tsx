@@ -1,10 +1,23 @@
 "use client";
 
 import ReactMarkdown from "react-markdown";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PaperCharts } from "./charts";
 import { supabase } from "@/lib/supabase/client";
+import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
+import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
+import { THEME_REGISTRY, THEME_STORAGE, themesByMode, defaultThemeFor, type ThemeMode } from "@/lib/themes";
+import {
+  FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
+  Zap, FlaskConical, SlidersHorizontal, BookOpen, Upload, FolderOpen,
+  PenLine, ListChecks, Ruler, Quote, Globe, Sparkles, Square, Play, Star,
+  ChevronRight, ChevronLeft, ChevronDown, Trash2, Download, ClipboardList,
+  X, Gem, Check, Mail, Moon, Sun, User, Settings, CreditCard, HelpCircle, Users,
+  Plus, Minus, ArrowRight, Megaphone, MessageSquare, Lightbulb, ExternalLink,
+  Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical
+} from "lucide-react";
 
 const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 const CONFIGURED_API_BASE = RAW_API_BASE.replace(/\/+$/, "");
@@ -57,7 +70,27 @@ function getApiBaseCandidates() {
   return candidates;
 }
 
-async function fetchWithApiFallback(path: string, init?: RequestInit, preferBlob = false) {
+/** Thrown when both the initial request and the one automatic retry failed
+ * with a network-level error (no HTTP response received). */
+class NetworkError extends Error {
+  constructor(message: string, public cause?: unknown) {
+    super(message);
+    this.name = "NetworkError";
+  }
+}
+
+/** Detect whether an error looks like a network/transport failure (no response
+ * came back at all). Used to decide whether an automatic retry makes sense. */
+function _isNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  // AbortError = user cancelled, never retry
+  if ((err as { name?: string }).name === "AbortError") return false;
+  if (err instanceof TypeError) return true;              // fetch network failure
+  const msg = (err as { message?: string }).message || "";
+  return /network|failed to fetch|load failed|ECONN|ETIMEDOUT|fetch failed/i.test(msg);
+}
+
+async function _tryFetchOnce(path: string, init?: RequestInit) {
   const candidates = getApiBaseCandidates();
   let lastResponse: Response | null = null;
   let lastError: unknown = null;
@@ -67,26 +100,53 @@ async function fetchWithApiFallback(path: string, init?: RequestInit, preferBlob
       const res = await fetch(buildApiUrl(path, candidate), init);
       if (res.ok) {
         runtimeApiBase = normalizeBase(candidate);
-        return res;
+        return { res };
       }
       lastResponse = res;
       if (res.status !== 404) {
-        return res;
+        return { res };                                    // non-404 HTTP error is not retry-worthy
       }
     } catch (error) {
       lastError = error;
-      // If a configured base is set and it throws a network error (backend
-      // is down / connection refused), surface that error immediately rather
-      // than silently falling through to other candidates that would return
-      // misleading responses (e.g. Next.js returning its own 404 page).
       if (CONFIGURED_API_BASE && candidate === normalizeBase(CONFIGURED_API_BASE)) {
-        throw lastError instanceof Error ? lastError : new Error("Request failed.");
+        // Configured base threw a transport error — bubble up so the retry
+        // layer can decide whether to try again.
+        throw lastError;
       }
     }
   }
+  if (lastResponse) return { res: lastResponse };
+  throw lastError ?? new Error("Request failed.");
+}
 
-  if (lastResponse) return lastResponse;
-  throw lastError instanceof Error ? lastError : new Error(preferBlob ? "Download failed." : "Request failed.");
+async function fetchWithApiFallback(path: string, init?: RequestInit, preferBlob = false) {
+  // One automatic retry on pure network failures (backend unreachable, DNS
+  // glitch, flaky tunnel). HTTP error statuses (4xx / 5xx) are returned as-is
+  // — the caller owns semantic error handling.
+  try {
+    const { res } = await _tryFetchOnce(path, init);
+    return res;
+  } catch (firstErr) {
+    // Don't retry if the caller aborted, or if the error isn't a transport problem.
+    if ((firstErr as { name?: string })?.name === "AbortError") throw firstErr;
+    if (!_isNetworkError(firstErr)) {
+      throw firstErr instanceof Error ? firstErr : new Error(preferBlob ? "Download failed." : "Request failed.");
+    }
+    // Brief pause so we don't hammer the server in the same tick — enough for
+    // a transient hiccup to clear but short enough to feel responsive.
+    await new Promise(r => setTimeout(r, 600));
+    try {
+      const { res } = await _tryFetchOnce(path, init);
+      return res;
+    } catch (secondErr) {
+      if ((secondErr as { name?: string })?.name === "AbortError") throw secondErr;
+      throw new NetworkError(
+        preferBlob ? "Download failed after one retry — the backend appears to be unreachable."
+                   : "Network error: the backend is unreachable (auto-retried once).",
+        secondErr,
+      );
+    }
+  }
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -152,6 +212,8 @@ const SORT_MODES = [
   "Balanced",
 ];
 
+// WORKSPACE_PLACEHOLDERS lives in src/lib/workspace-placeholders.ts — edit there to add phrases.
+
 type QueryOption = {
   label?: string;
   search_query?: string;
@@ -213,7 +275,9 @@ type SearchResponse = {
   strategy_summary?: AgentPayload;
   collaboration_trace?: WorkflowItem[];
   collaboration_metrics?: Record<string, unknown>;
+  evidence_mapper?: AgentPayload;
   researcher?: AgentPayload;
+  scholar?: AgentPayload;
   theorist?: AgentPayload;
   methodologist?: AgentPayload;
   critic?: AgentPayload;
@@ -330,17 +394,19 @@ type QueryDirectionsResponse = {
 
 function scoreChip(score: number | undefined | null): { label: string; cls: string } {
   const s = score ?? 0;
-  if (s >= 75) return { label: "Strong match", cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"  };
-  if (s >= 65) return { label: "Good match",   cls: "border-blue-400/50   bg-blue-400/10   text-blue-300"      };
-  if (s >= 40) return { label: "Moderate",     cls: "border-amber-700/50  bg-amber-900/20  text-amber-500/80"  };
-  return             { label: "Weak match",    cls: "border-rose-500/40   bg-rose-500/10   text-rose-300"      };
+  // Palette tuned to read clearly in BOTH themes: uses 400/500 shades
+  // that have explicit light-mode overrides in globals.css (see `score-chip-*`).
+  if (s >= 75) return { label: "Strong match", cls: "score-chip-strong border-emerald-500/40 bg-emerald-500/15 text-emerald-400"  };
+  if (s >= 65) return { label: "Good match",   cls: "score-chip-good border-blue-400/50   bg-blue-400/10   text-blue-400"       };
+  if (s >= 40) return { label: "Moderate",     cls: "score-chip-moderate border-amber-500/50  bg-amber-500/15  text-amber-500"      };
+  return             { label: "Weak match",    cls: "score-chip-weak border-rose-500/40   bg-rose-500/15   text-rose-400"       };
 }
 
 // ── Announcement marquee ticker ───────────────────────────────────────────────
 const TICKER_ITEMS = [
-  <>👋 Hi everyone! I&apos;m Zest, the developer. Together with my team β lyrea, we built Academic ATS to empower researchers.</>,
-  <>🎓 Our goal is to improve efficiency and output quality throughout the academic research process — from literature discovery to deep analysis.</>,
-  <>💌 Feedback is always welcome! Email <a href="mailto:jy1529098645@gmail.com" className="underline underline-offset-2 decoration-blue-400/60 text-blue-400 hover:text-blue-300 transition-colors">jy1529098645@gmail.com</a> or leave a message below. Thank you! 🙏</>,
+  <>👋 Hi everyone! I&apos;m Zest, the developer. Together with my team β lyrea, we built AcademiCats to empower researchers. 🐾</>,
+  <>🎯 Our goal is to improve efficiency and output quality throughout the academic research process — from literature discovery to deep analysis. 📚</>,
+  <>💌 Feedback is always welcome! Email <a href="mailto:jy1529098645@gmail.com" className="underline underline-offset-2 decoration-blue-400/60 text-blue-400 hover:text-blue-300 transition-colors">jy1529098645@gmail.com</a> or drop a note below. Thank you! 🙏</>,
 ];
 
 // Join ticker items with a separator for the continuous scroll
@@ -410,7 +476,7 @@ function AnnouncementBanner({
       <div className="h-full rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)] overflow-hidden flex flex-col">
         {/* Thin collapse bar — mirrors expanded layout: 📢 | line | ▼ button at right */}
         <div className="flex items-center gap-2 px-3 pr-10 shrink-0" style={{ height: "20px" }}>
-          <span className="shrink-0 text-[10px] text-blue-400/60">📢</span>
+          <Megaphone size={11} className="shrink-0 text-blue-400/60" />
           <div className="flex-1 h-px bg-gradient-to-r from-blue-500/25 via-purple-500/20 to-blue-500/25" />
           <button
             onClick={onExpand}
@@ -452,7 +518,7 @@ function AnnouncementBanner({
     <div className="h-full flex flex-col justify-between overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
       {/* Ticker row */}
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
-        <span className="shrink-0 text-[13px] text-blue-400/70">📢</span>
+        <Megaphone size={13} className="shrink-0 text-blue-400/70" />
         <div className="min-w-0 flex-1 overflow-hidden">
           <TickerTrack />
         </div>
@@ -477,7 +543,7 @@ function AnnouncementBanner({
         >
           {msgPublic ? "PUBLIC" : "PRIVATE"}
         </button>
-        <span className="shrink-0 text-[11px] text-slate-600">💬</span>
+        <MessageSquare size={11} className="shrink-0 text-slate-600" />
         <input
           type="text"
           value={msgInput}
@@ -495,7 +561,7 @@ function AnnouncementBanner({
               : "border-slate-700/50 text-slate-500 hover:border-blue-500/40 hover:text-blue-400"
           }`}
         >
-          {msgSentOk ? "✓ Sent" : msgSending ? "…" : "Send"}
+          {msgSentOk ? <span className="inline-flex items-center gap-1"><Check size={11} strokeWidth={3} />Sent</span> : msgSending ? "…" : "Send"}
         </button>
       </div>
     </div>
@@ -529,7 +595,7 @@ function AgentSection({ title, payload, running = false }: { title: string; payl
           </span>
         )}
         {hasData && (
-          <span className="ml-auto text-xs font-normal text-emerald-400">✓ done</span>
+          <span className="ml-auto inline-flex items-center gap-1 text-xs font-normal text-emerald-400"><Check size={11} strokeWidth={3} />done</span>
         )}
       </summary>
 
@@ -580,9 +646,11 @@ function AgentSection({ title, payload, running = false }: { title: string; payl
 // dragging the track background horizontally resizes the columns.
 function DividerScrollbar({
   onResizeStart,
+  onSnap,
   sectionRef,
 }: {
   onResizeStart: () => void;
+  onSnap?: () => void;
   sectionRef: { current: HTMLElement | null };
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -638,23 +706,45 @@ function DividerScrollbar({
     window.addEventListener("mouseup", onUp);
   };
 
+  // Scroll thumb intentionally suppressed — the only scrollbar in the app lives
+  // INSIDE each panel (`.thin-scrollbar`). This divider keeps just its resize affordance.
+  void thumbTop; void thumbHeight; void handleThumbMouseDown;
   return (
     <div
       ref={trackRef}
-      onMouseDown={onResizeStart}
-      className="relative self-stretch cursor-col-resize flex-none select-none"
-      style={{ width: "5px" }}
+      onMouseDown={(e) => {
+        // Track mousedown start so we can tell a click apart from a drag. Anything that
+        // moves less than 4 px before mouseup counts as a click → snap to the default ratio.
+        const startX = e.clientX;
+        const startY = e.clientY;
+        let moved = false;
+        const onMove = (me: MouseEvent) => {
+          if (Math.abs(me.clientX - startX) > 3 || Math.abs(me.clientY - startY) > 3) moved = true;
+        };
+        const onUp = () => {
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+          if (!moved) onSnap?.();
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        onResizeStart();
+      }}
+      className="group relative self-stretch cursor-col-resize flex-none select-none flex items-stretch justify-center"
+      style={{ width: "12px" }}
     >
-      {/* Track */}
-      <div className="absolute inset-0 rounded-full bg-white/5 transition-colors hover:bg-white/10" />
-      {/* Scroll thumb */}
-      {thumbHeight < 99 && (
-        <div
-          onMouseDown={handleThumbMouseDown}
-          className="absolute left-[1px] right-[1px] rounded-full bg-slate-600/60 transition-colors hover:bg-blue-500/70 cursor-ns-resize"
-          style={{ top: `${thumbTop}%`, height: `${thumbHeight}%` }}
-        />
-      )}
+      {/* Highlighted line — invisible by default, fades in when the cursor
+          approaches the background gap between panels. Colour tracks
+          --ats-border-accent so dark / light themes stay coherent. */}
+      <div className="w-[2px] h-full rounded-full bg-[var(--ats-border-accent)] opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
+      {/* Always-visible drag affordance at the vertical centre. Faint enough
+          to not compete with content, clearer on hover. */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-slate-400/40 group-hover:text-[var(--ats-fg-accent)] transition-colors"
+      >
+        <GripVertical size={12} />
+      </span>
     </div>
   );
 }
@@ -666,9 +756,128 @@ export default function HomePage() {
   const centerSectionRef = useRef<HTMLElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const labAbortRef = useRef<AbortController | null>(null);
+  const understandAbortRef = useRef<AbortController | null>(null);
 
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  // Theme model: a category (day/night) + a remembered theme inside each category.
+  // The header toggle flips only the category; the exact theme for each category
+  // is picked in Settings → Appearance. Persisted in localStorage per spec.
+  const [themeMode, setThemeMode] = useState<ThemeMode>("night");
+  const [dayThemeId, setDayThemeId] = useState<string>(defaultThemeFor("day").id);
+  const [nightThemeId, setNightThemeId] = useState<string>(defaultThemeFor("night").id);
+  const theme = themeMode === "day" ? dayThemeId : nightThemeId;
+  const setTheme = (next: string) => {
+    // Back-compat shim so the two legacy callers that do `setTheme("light"|"dark")`
+    // keep working — maps the value to (mode, theme-within-mode).
+    if (next === "light") { setThemeMode("day"); setDayThemeId("light"); return; }
+    if (next === "dark")  { setThemeMode("night"); setNightThemeId("dark"); return; }
+    // Otherwise assume a registered theme id and figure out its mode.
+    const desc = THEME_REGISTRY.find(t => t.id === next);
+    if (!desc) return;
+    setThemeMode(desc.mode);
+    if (desc.mode === "day") setDayThemeId(desc.id); else setNightThemeId(desc.id);
+  };
+  // Persist the three values to localStorage whenever they change — but gate writes
+  // behind a hydration ref so the write-effects that fire on mount don't clobber
+  // the user's saved theme with the React default before the hydrate effect runs.
+  const _themeHydratedRef = useRef(false);
+  useEffect(() => { if (!_themeHydratedRef.current) return; try { localStorage.setItem(THEME_STORAGE.mode, themeMode); } catch {} }, [themeMode]);
+  useEffect(() => { if (!_themeHydratedRef.current) return; try { localStorage.setItem(THEME_STORAGE.dayTheme, dayThemeId); } catch {} }, [dayThemeId]);
+  useEffect(() => { if (!_themeHydratedRef.current) return; try { localStorage.setItem(THEME_STORAGE.nightTheme, nightThemeId); } catch {} }, [nightThemeId]);
+  useEffect(() => {
+    // One-shot hydration from localStorage on mount — gated in an effect so SSR
+    // and first client render match (prevents hydration mismatch).
+    try {
+      const m = localStorage.getItem(THEME_STORAGE.mode);
+      if (m === "day" || m === "night") setThemeMode(m);
+      const d = localStorage.getItem(THEME_STORAGE.dayTheme);
+      if (d && THEME_REGISTRY.some(t => t.id === d && t.mode === "day")) setDayThemeId(d);
+      const n = localStorage.getItem(THEME_STORAGE.nightTheme);
+      if (n && THEME_REGISTRY.some(t => t.id === n && t.mode === "night")) setNightThemeId(n);
+    } catch {}
+    _themeHydratedRef.current = true;
+  }, []);
+
+  // Per-panel translucency (0.4–1.0). Applied to the three main panel backgrounds
+  // via `rgb(from <token> r g b / <alpha>)` — lets the page gradient bleed through
+  // without dimming the panel's text/content.
+  // Defaults: synthesis/lab panels at 0.85 so the page canvas tint peeks through,
+  // workspace at 0.40 so the main surface feels like a frosted window over the canvas.
+  const [panelAlpha, setPanelAlpha] = useState({ workspace: 0.4, synthesis: 0.85, lab: 0.85 });
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("ats-panel-alpha");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setPanelAlpha(prev => ({
+          workspace: Number.isFinite(parsed.workspace) ? Math.max(0.4, Math.min(1, parsed.workspace)) : prev.workspace,
+          synthesis: Number.isFinite(parsed.synthesis) ? Math.max(0.4, Math.min(1, parsed.synthesis)) : prev.synthesis,
+          lab:       Number.isFinite(parsed.lab)       ? Math.max(0.4, Math.min(1, parsed.lab))       : prev.lab,
+        }));
+      }
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("ats-panel-alpha", JSON.stringify(panelAlpha)); } catch {}
+  }, [panelAlpha]);
   const [query, setQuery] = useState("");
+  // Whether the main workspace textarea is currently focused — used to hide the
+  // decorative placeholder overlay and reveal the native caret the moment the user clicks in.
+  const [taFocused, setTaFocused] = useState(false);
+  // Rotating placeholder — start with index 0 so SSR and client render match,
+  // then shuffle to a real random on mount (and again whenever the query empties).
+  const [placeholderIdx, setPlaceholderIdx] = useState(0);
+  // Refs + adaptive sizing for the Workspace textarea:
+  // - taRef: used to imperatively set height so user's manual resize isn't overridden.
+  // - placeholderWrapperRef: observed to compute an ideal placeholder font size.
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const placeholderWrapperRef = useRef<HTMLDivElement>(null);
+  const [placeholderFontSize, setPlaceholderFontSize] = useState(48);
+  const _prevEmptyRef = useRef(true);
+  useEffect(() => {
+    // Randomise on first mount (client-only, avoids hydration mismatch).
+    setPlaceholderIdx(Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length));
+  }, []);
+  useEffect(() => {
+    const isEmpty = query.length === 0;
+    // Only re-shuffle on the non-empty → empty transition, not on initial mount.
+    if (isEmpty && !_prevEmptyRef.current) {
+      setPlaceholderIdx(i => {
+        if (WORKSPACE_PLACEHOLDERS.length < 2) return i;
+        let next = i;
+        while (next === i) next = Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length);
+        return next;
+      });
+    }
+    _prevEmptyRef.current = isEmpty;
+  }, [query]);
+
+  // Smoothly expand the textarea to ~half-screen while the decorative placeholder
+  // is showing, and compress to a compact 2-line box once the user focuses or types.
+  // We write height imperatively via useLayoutEffect (not through JSX `style.height`)
+  // so the user's manual drag-resize is not clobbered on every React render —
+  // only when placeholder visibility actually flips does the height snap back.
+  const _showPlaceholder = query.length === 0 && !taFocused;
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    // Placeholder state: expanded so the greeting has room with bottom edge at
+    // roughly two-thirds of the viewport. Measured from the textarea's own
+    // top so the computation is layout-independent.
+    if (_showPlaceholder) {
+      const top = ta.getBoundingClientRect().top;
+      const target = Math.max(window.innerHeight * (2 / 3) - top, 180);
+      ta.style.height = `${target}px`;
+    } else {
+      ta.style.height = "4.5rem";
+    }
+  }, [_showPlaceholder]);
+
+  // Adaptive placeholder font size is handled via CSS container-query units
+  // (`cqh` / `cqw`) on the wrapper below — no JS observer needed. The wrapper
+  // declares `container-type: size` so the overlay's `font-size: clamp(...)`
+  // scales with the user-resizable textarea height/width.
+  void placeholderFontSize; void setPlaceholderFontSize; void placeholderWrapperRef;
+
   const [queryOptionsData, setQueryOptionsData] = useState<QueryOptionsResponse | null>(null);
   const [selectedOptionIndex, setSelectedOptionIndex] = useState<number | null>(null);
   const [customQueryEnabled, setCustomQueryEnabled] = useState(false);
@@ -689,6 +898,40 @@ export default function HomePage() {
   const [yearStart, setYearStart] = useState(2018);
   const [yearEnd, setYearEnd] = useState(new Date().getFullYear());
 
+  // Persist every search-control preference to localStorage. Single consolidated
+  // key (`ats-search-prefs`) — on mount we hydrate, and any change below writes
+  // a debounced-by-rerender snapshot. Cloud sync can be layered on top by
+  // replacing the storage adapter later; semantics stay identical either way.
+  const _prefsHydratedRef = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("ats-search-prefs");
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (typeof p.fastMode === "boolean")          setFastMode(p.fastMode);
+        if (Number.isFinite(p.paperCount))            setPaperCount(Math.max(3, Math.min(500, Math.round(p.paperCount))));
+        if (typeof p.sortMode === "string")           setSortMode(p.sortMode);
+        if (typeof p.preferAbstracts === "boolean")   setPreferAbstracts(p.preferAbstracts);
+        if (typeof p.strictCoreOnly === "boolean")    setStrictCoreOnly(p.strictCoreOnly);
+        if (typeof p.openAccessOnly === "boolean")    setOpenAccessOnly(p.openAccessOnly);
+        if (Array.isArray(p.sourceFilters))           setSourceFilters(p.sourceFilters.filter((s: unknown) => typeof s === "string"));
+        if (typeof p.useYearRange === "boolean")      setUseYearRange(p.useYearRange);
+        if (Number.isFinite(p.yearStart))             setYearStart(p.yearStart);
+        if (Number.isFinite(p.yearEnd))               setYearEnd(p.yearEnd);
+      }
+    } catch {}
+    _prefsHydratedRef.current = true;
+  }, []);
+  useEffect(() => {
+    if (!_prefsHydratedRef.current) return;           // don't overwrite before hydration runs
+    try {
+      localStorage.setItem("ats-search-prefs", JSON.stringify({
+        fastMode, paperCount, sortMode, preferAbstracts, strictCoreOnly,
+        openAccessOnly, sourceFilters, useYearRange, yearStart, yearEnd,
+      }));
+    } catch {}
+  }, [fastMode, paperCount, sortMode, preferAbstracts, strictCoreOnly, openAccessOnly, sourceFilters, useYearRange, yearStart, yearEnd]);
+
   const [isUnderstanding, setIsUnderstanding] = useState(false);
   const [understandStatus, setUnderstandStatus] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -696,17 +939,31 @@ export default function HomePage() {
   const [candidateLimit, setCandidateLimit] = useState<number | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [briefStreamText, setBriefStreamText] = useState("");
+  const [briefStatus, setBriefStatus] = useState<"draft" | "final" | null>(null);
   const [streamPapers, setStreamPapers] = useState<Paper[]>([]);
   const [streamAgents, setStreamAgents] = useState<Record<string, AgentPayload>>({});
   const [startedAgents, setStartedAgents] = useState<Set<string>>(new Set());
+  const [plannerThinking, setPlannerThinking] = useState<{planner_summary?: string; search_focus?: string; query_type?: string; agents_planned?: string[]} | null>(null);
   const [rawProgressMsg, setRawProgressMsg] = useState("");
   const [uiError, setUiError] = useState("");
   const [nowMs, setNowMs] = useState(Date.now());
 
-  const [leftPct, setLeftPct] = useState(29);
-  const [centerPct, setCenterPct] = useState(53);
+  // Initial layout is 1 : 5 : 1 (≈ 14.3 / 71.4 / 14.3) to give the Workspace the most breathing room on mount.
+  // A single click on either divider snaps to the classic 1 : 3 : 1 (20 / 60 / 20) working layout.
+  // After that, the user can drag freely from whichever ratio they just landed on.
+  const [leftPct, setLeftPct] = useState(14.3);
+  const [centerPct, setCenterPct] = useState(71.4);
   const rightPct = Math.max(100 - leftPct - centerPct, 12);
+  const snapDividerToDefault = useCallback(() => {
+    setLeftPct(20);
+    setCenterPct(60);
+  }, []);
   const [analyticsVisible, setAnalyticsVisible] = useState(true);
+  const [leftVisible, setLeftVisible] = useState(true);
+  const [gridLeftCollapsed, setGridLeftCollapsed] = useState(false);
+
+  // ── Left panel tabs: Research Brief | Analytics ────────────────────────────
+  const [leftTab, setLeftTab] = useState<"brief" | "analytics">("brief");
 
   // ── Announcement / messaging state ─────────────────────────────────────────
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
@@ -719,8 +976,6 @@ export default function HomePage() {
   // ── Workspace collapsible panel state ─────────────────────────────────────
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // ── Right panel tabs: Analytics | Synthesis Lab ────────────────────────────
-  const [rightTab, setRightTab] = useState<"analytics" | "lab">("analytics");
   // Delay grid expansion until the aside slide-out finishes → eliminates the
   // fr→px interpolation artefact that wobbled the workspace left edge.
   const [gridRightCollapsed, setGridRightCollapsed] = useState(false);
@@ -729,19 +984,49 @@ export default function HomePage() {
   const [labRefs,       setLabRefs]       = useState<{ key: string; paper: Paper }[]>([]);
   const [labCoreArg,    setLabCoreArg]    = useState("");
   const [labPoints,     setLabPoints]     = useState<string[]>([""]);
+  // Per-output-type extras — keys match LabExtraField.key from lib/lab-fields.ts.
+  // Single-value fields live in labExtras; multi-entry fields live in labExtrasMulti
+  // as arrays. Both get folded into the `extras` payload when Generate is clicked.
+  const [labExtras, setLabExtras] = useState<Record<string, string>>({});
+  const [labExtrasMulti, setLabExtrasMulti] = useState<Record<string, string[]>>({});
   const [labOutputType,     setLabOutputType]     = useState("literature_review");
   const [labCitationFormat, setLabCitationFormat] = useState("APA 7th Edition");
   const [labLanguage,       setLabLanguage]       = useState("English");
   const [labTargetPages,    setLabTargetPages]    = useState(2);
   const [labGenerating, setLabGenerating] = useState(false);
   const [labResult,     setLabResult]     = useState("");
+  // Ephemeral "Copied" flag — flips true on successful Copy-to-clipboard and
+  // auto-resets after 1.5 s; used only by the Generated Text header button.
+  const [labCopied,     setLabCopied]     = useState(false);
+  // Translate-and-download selection for the generated text. Kept separate from
+  // the normal download-format selector above so the user can pick both a
+  // target language AND a file extension without confusing the two flows.
+  const [labTranslateLang,   setLabTranslateLang]   = useState("Chinese (Simplified)");
+  const [labTranslateFormat, setLabTranslateFormat] = useState<"pdf"|"md"|"txt">("pdf");
+  const [labTranslating,     setLabTranslating]     = useState(false);
+  // AbortController held across renders so a second click on the button can
+  // cancel the in-flight translation request.
+  const labTranslateAbortRef = useRef<AbortController | null>(null);
   const [labStatus,     setLabStatus]     = useState("");
   const [labError,      setLabError]      = useState("");
   const [labAgentLog,   setLabAgentLog]   = useState<{name: string; msg: string; done: boolean; error: boolean; revision: boolean}[]>([]);
   const [labDownloadFormat, setLabDownloadFormat] = useState<"pdf"|"html"|"txt"|"md">("pdf");
   const [briefDownloadFmt, setBriefDownloadFmt]   = useState<"pdf"|"html"|"txt"|"md">("pdf");
   const [labAgentLogOpen,   setLabAgentLogOpen]   = useState(true);
-  const [labReviewerNotes,  setLabReviewerNotes]  = useState<{citation_gaps:string[];data_suggestions:string[];argument_suggestions:string[];supporting_points:string[]} | null>(null);
+  const [labReviewerNotes,  setLabReviewerNotes]  = useState<{
+    missing_inputs?: string[];
+    citation_gaps?: string[];
+    data_suggestions?: string[];
+    argument_suggestions?: string[];
+    supporting_points?: string[];
+    completeness?: { missing?: string[]; thin?: string[] };
+    paper_usage?: {
+      used?:       Array<{ index: number; note?: string }>;
+      unused?:     Array<{ index: number; reason?: string }>;
+      unreadable?: Array<{ index: number; reason?: string }>;
+      total?:      number;
+    };
+  } | null>(null);
   const [labNotesOpen,      setLabNotesOpen]      = useState(true);
   const [labUserFiles,      setLabUserFiles]      = useState<File[]>([]);
   const [labWritingModel,   setLabWritingModel]   = useState("gpt-4o-mini");
@@ -760,7 +1045,7 @@ export default function HomePage() {
   const [authUser, setAuthUser] = useState<{ email?: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | null>(null);
+  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | null>(null);
 
   // ── Role & multi-account management ───────────────────────────────────────
   // Single source of truth for developer emails — used for role checks everywhere.
@@ -791,7 +1076,7 @@ export default function HomePage() {
   const removeSavedAccount = (email: string) => persistAccounts(savedAccounts.filter(a => a.email !== email));
 
   const handleGoogleLogin = async () => {
-    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/` : 'http://localhost:3000/';
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/` : 'https://academic-ats-frontend.vercel.app/';
     await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } });
   };
 
@@ -816,7 +1101,7 @@ export default function HomePage() {
   };
   const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
   const [historyPanelHeight, setHistoryPanelHeight] = useState(150);
-  type HistoryEntry = { id: string; title: string; updated_at: string; result?: SearchResponse | null; directionData?: QueryDirectionsResponse | null; entryType?: "understand" | "search"; usedUnderstand?: boolean };
+  type HistoryEntry = { id: string; title: string; updated_at: string; result?: SearchResponse | null; directionData?: QueryDirectionsResponse | null; entryType?: "understand" | "search"; usedUnderstand?: boolean; isFast?: boolean };
   const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
   const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
   const [favoritedIds, setFavoritedIds] = useState<Set<string>>(new Set());
@@ -835,19 +1120,44 @@ export default function HomePage() {
     });
   }, []);
 
-  const clearAllHistory = useCallback(() => {
-    if (authUser?.email) localStorage.removeItem(_hKey(authUser.email));
+  const clearAllHistory = useCallback(async () => {
+    // Optimistic local clear for instant UI feedback.
     setHistoryList([]);
     setActiveHistoryId(null);
+    // Drop legacy per-account localStorage cache so a refresh can't resurrect rows.
+    if (authUser?.email) {
+      try { localStorage.removeItem(_hKey(authUser.email)); } catch { /* ignore */ }
+    }
+    // Cloud is source-of-truth — issue the authoritative delete + cache wipe.
+    try {
+      const token = await getAuthToken();
+      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      await fetchWithApiFallback("/api/history", { method: "DELETE", headers });
+    } catch (e) {
+      console.warn("[history] cloud clear failed:", e);
+    }
+    try { await fetchWithApiFallback("/api/cache/clear", { method: "POST" }); } catch { /* best-effort */ }
   }, [authUser?.email]);
 
   const deleteHistoryEntry = useCallback((id: string) => {
-    setHistoryList(prev => {
-      const next = prev.filter(e => e.id !== id);
-      if (authUser?.email) localStorage.setItem(_hKey(authUser.email), JSON.stringify(next));
-      return next;
-    });
-  }, []);
+    // Optimistic local removal; the authoritative delete happens on the server.
+    setHistoryList(prev => prev.filter(e => e.id !== id));
+    if (authUser?.email) {
+      try {
+        const raw = localStorage.getItem(_hKey(authUser.email));
+        if (raw) localStorage.removeItem(_hKey(authUser.email));  // cloud-only now
+      } catch { /* ignore */ }
+    }
+    (async () => {
+      try {
+        const token = await getAuthToken();
+        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+        await fetchWithApiFallback(`/api/history/${encodeURIComponent(id)}`, { method: "DELETE", headers });
+      } catch (e) {
+        console.warn("[history] cloud delete failed:", e);
+      }
+    })();
+  }, [authUser?.email]);
 
   const restoreHistory = useCallback((item: HistoryEntry) => {
     setQuery(item.title);
@@ -867,12 +1177,14 @@ export default function HomePage() {
       setBriefStreamText(item.result.brief || "");
       setStreamPapers(item.result.papers || []);
       setIsSubmitting(false);
-      setJob({ status: "done", progress: 100, result: item.result, finished_at: Date.now() / 1000, message: "✅ Finished.", workflow: [] } as any);
+      setJob({ status: "done", progress: 100, result: item.result, finished_at: Date.now() / 1000, message: "Finished.", workflow: [] } as any);
     }
   }, []);
   const authTokenRef = useRef<string | null>(null);
   const briefTextRef = useRef("");          // mirrors briefStreamText for use inside closures
-  const briefClearedRef = useRef(false);    // guards: clear old brief only on first chunk of new search
+  const briefQueueRef = useRef<string[]>([]); // RAF queue: tokens enqueued here, dequeued 3/frame
+  const briefVersionRef = useRef(0);        // current SSE version accepted (0 = none received)
+  const briefFlushGenRef = useRef(0);       // increments on version upgrade; RAF uses to discard stale batches
   const router = useRouter();
 
 
@@ -909,53 +1221,57 @@ export default function HomePage() {
   const _hKey = (email: string) => `ats-search-history::${email}`;
   const _fKey = (email: string) => `ats-history-favorites::${email}`;
 
-  // Load / reload history + favorites whenever the logged-in user changes
+  // Mirror historyList into localStorage so a reload shows the timeline instantly
+  // and optimistic entries survive until the cloud catches up. Delete / clear
+  // actions already overwrite this mirror explicitly.
+  useEffect(() => {
+    const email = authUser?.email;
+    if (!email) return;
+    try { localStorage.setItem(_hKey(email), JSON.stringify(historyList.slice(0, 50))); } catch { /* quota — ignore */ }
+  }, [historyList, authUser?.email]);
+
+  // Load / reload history whenever the logged-in user changes.
+  // Cloud is the authoritative source but we KEEP a small local-storage mirror so
+  // new entries are visible even if the backend hasn't finished writing, and so
+  // the timeline survives a refresh while the cloud fetch is still in flight.
+  // Delete/clear paths explicitly wipe both.
   useEffect(() => {
     const email = authUser?.email;
     if (!email) { setHistoryList([]); setFavoritedIds(new Set()); return; }
 
-    // One-time migration: move legacy unscoped data → dev01's bucket
-    const LEGACY_H = "ats-search-history";
-    const LEGACY_F = "ats-history-favorites";
-    const DEV01 = "dev01@academicats.com";
-    if (email === DEV01) {
-      const legacy = localStorage.getItem(LEGACY_H);
-      if (legacy) { if (!localStorage.getItem(_hKey(DEV01))) localStorage.setItem(_hKey(DEV01), legacy); localStorage.removeItem(LEGACY_H); }
-      const legacyF = localStorage.getItem(LEGACY_F);
-      if (legacyF) { if (!localStorage.getItem(_fKey(DEV01))) localStorage.setItem(_fKey(DEV01), legacyF); localStorage.removeItem(LEGACY_F); }
-    }
+    // Hydrate immediately from local mirror so the panel isn't blank for a second.
+    try {
+      const raw = localStorage.getItem(_hKey(email));
+      if (raw) {
+        const cached: HistoryEntry[] = JSON.parse(raw);
+        if (Array.isArray(cached)) {
+          setHistoryList(cached.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()));
+        }
+      }
+    } catch { /* ignore */ }
 
-    // Always load localStorage first for instant display
-    let localItems: HistoryEntry[] = [];
-    try { localItems = JSON.parse(localStorage.getItem(_hKey(email)) || "[]"); } catch { /* ignore */ }
-    setHistoryList(localItems);
-
-    // Favorites
+    // Favorites stay local — they are a UI preference, not content.
     try { setFavoritedIds(new Set(JSON.parse(localStorage.getItem(_fKey(email)) || "[]"))); } catch { setFavoritedIds(new Set()); }
 
-    // If user has a real Supabase token, also fetch from cloud and merge
     const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
     getAuthToken().then(token => {
-      console.log("[history] getAuthToken →", token ? `✓ (${token.slice(0, 20)}…)` : "✗ no token — skip cloud fetch");
-      if (!token) return;
-      console.log("[history] fetching /api/history with Bearer token");
+      if (!token) return;        // keep whatever we hydrated from local cache
       fetch(`${API}/api/history?limit=50`, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => { console.log("[history] /api/history response status:", r.status); return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
         .then((cloudItems: HistoryEntry[]) => {
-          console.log("[history] cloud items received:", cloudItems.length);
-          // Merge: local items take precedence (have more data like directionData/usedUnderstand)
-          // Cloud items fill in anything not already in local by id
-          const localIds = new Set(localItems.map(e => e.id));
-          const merged = [
-            ...localItems,
-            ...cloudItems.filter(c => !localIds.has(c.id)),
-          ].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-            .slice(0, 50);
-          setHistoryList(merged);
-          // Persist merged list locally so next load is fast
-          try { localStorage.setItem(_hKey(email), JSON.stringify(merged)); } catch { /* ignore */ }
+          // Merge cloud + any pending local rows (cloud takes precedence on id match).
+          let localItems: HistoryEntry[] = [];
+          try { localItems = JSON.parse(localStorage.getItem(_hKey(email)) || "[]"); } catch {}
+          const cloudIds = new Set(cloudItems.map(c => c.id));
+          const pending = localItems.filter(l => !cloudIds.has(l.id) && String(l.id).startsWith("pending-"));
+          const sorted = [...cloudItems, ...pending].sort(
+            (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+          );
+          setHistoryList(sorted);
+          // Refresh the local mirror with the merged list so the next load is fast AND correct.
+          try { localStorage.setItem(_hKey(email), JSON.stringify(sorted)); } catch {}
         })
-        .catch((err) => { console.warn("[history] cloud fetch failed:", err, "— falling back to local"); });
+        .catch((err) => { console.warn("[history] cloud fetch failed:", err); setHistoryList([]); });
     });
   }, [authUser?.email]);
 
@@ -1021,20 +1337,22 @@ export default function HomePage() {
       const x = event.clientX - rect.left;
       const pct = (x / rect.width) * 100;
 
+      // Generous clamps — the floor sits below the 1:5:1 initial layout (leftPct≈14.3)
+      // so dragging immediately expands the left panel instead of snapping to a wider
+      // minimum. The ceiling gives each panel enough headroom to dominate the screen.
       if (dragRef.current === "left") {
-        const newLeft = clamp(pct, 18, 55);
+        const newLeft = clamp(pct, 8, 72);
         const remainingForCenterAndRight = 100 - newLeft;
-        const adjustedCenter = clamp(centerPct, 22, remainingForCenterAndRight - 12);
+        const adjustedCenter = clamp(centerPct, 14, remainingForCenterAndRight - 8);
         setLeftPct(newLeft);
         setCenterPct(adjustedCenter);
       }
 
       if (dragRef.current === "center") {
-        // No hard restriction on analytics width — only enforce minimum workspace size
-        const minBoundary = leftPct + 22;
-        const newBoundary = clamp(pct, minBoundary, 88);
+        const minBoundary = leftPct + 14;                  // workspace can shrink to 14%
+        const newBoundary = clamp(pct, minBoundary, 92);   // right panel can grow to ~86%
         const newCenter = newBoundary - leftPct;
-        setCenterPct(clamp(newCenter, 22, 65));
+        setCenterPct(clamp(newCenter, 14, 84));
       }
     };
 
@@ -1052,10 +1370,7 @@ export default function HomePage() {
     };
   }, [leftPct, centerPct]);
 
-  // ── Grid animation: decouple grid-template from the aside slide animation ──
-  // When hiding: wait 370 ms (slide-out duration) before collapsing the column.
-  // When showing: restore the column immediately so workspace snaps before slide-in.
-  // This prevents the fr ↔ px unit-mismatch wobble on the workspace left edge.
+  // ── Grid animation: decouple grid-template from panel slide animations ──
   useEffect(() => {
     if (!analyticsVisible) {
       const t = setTimeout(() => setGridRightCollapsed(true), 370);
@@ -1065,16 +1380,45 @@ export default function HomePage() {
     }
   }, [analyticsVisible]);
 
+  useEffect(() => {
+    if (!leftVisible) {
+      const t = setTimeout(() => setGridLeftCollapsed(true), 370);
+      return () => clearTimeout(t);
+    } else {
+      setGridLeftCollapsed(false);
+    }
+  }, [leftVisible]);
+
+  // RAF flush loop: dequeues briefQueueRef 3 tokens per animation frame.
+  // Even if all tokens arrive in one TCP packet, they render gradually (~60fps).
+  // briefFlushGenRef captures the generation at splice time; if a version upgrade
+  // incremented it before the functional update runs, the batch is silently discarded.
+  useEffect(() => {
+    let rafId: number;
+    const flush = () => {
+      const q = briefQueueRef.current;
+      if (q.length > 0) {
+        const capturedGen = briefFlushGenRef.current;
+        const batch = q.splice(0, Math.min(q.length, 3));
+        setBriefStreamText(prev => {
+          if (briefFlushGenRef.current !== capturedGen) return prev;
+          return prev + batch.join("");
+        });
+      }
+      rafId = requestAnimationFrame(flush);
+    };
+    rafId = requestAnimationFrame(flush);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+
   // Cascade agent "started" state based on which agents have completed.
-  // Wave 1 (researcher/theorist/methodologist) is triggered from the "papers" SSE event.
-  // Wave 2 (critic) starts when all wave-1 agents have results.
-  // Wave 3 (gap_analyst/verifier) starts when critic has results.
+  // Wave 1 (evidence_mapper + scholar) is triggered from the "papers" SSE event.
+  // Wave 2 (gap_analyst/verifier) starts when scholar has results.
   useEffect(() => {
     if (fastMode || !isSubmitting) return;
     setStartedAgents(prev => {
       const s = new Set(prev);
-      if (["researcher", "theorist", "methodologist"].every(a => a in streamAgents)) s.add("critic");
-      if ("critic" in streamAgents) { s.add("gap_analyst"); s.add("verifier"); }
+      if ("scholar" in streamAgents) { s.add("gap_analyst"); s.add("verifier"); }
       return s;
     });
   }, [streamAgents, fastMode, isSubmitting]);
@@ -1084,13 +1428,24 @@ export default function HomePage() {
   const effectiveSelectedIndex = selectedOptionIndex !== null ? selectedOptionIndex : options.length > 0 ? recommendedIndex : null;
 
   const selectedOption = useMemo((): QueryOption | null => {
-    if (directionData?.directions?.length) {
-      const dirIdx = selectedDirIndex ?? (directionData.recommended_direction ?? 0);
-      const dir = directionData.directions[dirIdx];
-      if (dir?.sub_options?.length) {
-        const subIdx = selectedSubIndex ?? (selectedDirIndex === null ? (directionData.recommended_sub ?? 0) : 0);
-        const sub = dir.sub_options[subIdx] ?? dir.sub_options[0];
-        if (sub) return { label: sub.label, search_query: sub.search_query, reason: sub.reason, intent_profile: sub.intent_profile };
+    // User must explicitly choose a direction; no auto-recommend fallback here.
+    // If a direction is chosen but no sub, fall back to the direction's label
+    // as the search query (broad-mode). If neither, return null so the query
+    // resolver uses the raw textarea value.
+    if (directionData?.directions?.length && selectedDirIndex !== null) {
+      const dir = directionData.directions[selectedDirIndex];
+      if (dir) {
+        if (selectedSubIndex !== null && dir.sub_options?.[selectedSubIndex]) {
+          const sub = dir.sub_options[selectedSubIndex];
+          return { label: sub.label, search_query: sub.search_query, reason: sub.reason, intent_profile: sub.intent_profile };
+        }
+        // Direction chosen, no sub → search the direction's label directly.
+        return {
+          label: dir.label,
+          search_query: dir.label,
+          reason: dir.description ?? "",
+          intent_profile: {},
+        };
       }
     }
     if (effectiveSelectedIndex !== null && options[effectiveSelectedIndex]) return options[effectiveSelectedIndex];
@@ -1176,18 +1531,34 @@ export default function HomePage() {
   }
 
   const isStreamingBrief = isSubmitting && briefStreamText.length > 0;
-  const researchBriefMarkdown = formatBriefAsMarkdown(briefStreamText || result?.brief || "");
+  // Once SSE brief chunks arrive (version > 0), trust only the streamed text.
+  // result?.brief is only a valid fallback for history restores (briefVersionRef stays 0).
+  const researchBriefMarkdown = formatBriefAsMarkdown(
+    briefStreamText || (briefVersionRef.current === 0 ? result?.brief : "") || ""
+  );
 
   // Stable ReactMarkdown component map — empty deps array means this object is created ONCE
   // and never replaced, so ReactMarkdown never unmounts/remounts its subtree when other state
   // changes (that was the root cause of the post-SSE "twitch").
   // New DOM nodes added during streaming still play fade-in on first mount. ✓
   const mdComponents = useMemo(() => ({
+    h1: ({ children }: { children?: React.ReactNode }) => (
+      <h1 className="fade-in mt-6 mb-3 pb-1.5 text-[1.15rem] font-black tracking-tight text-blue-300 border-b-2 border-blue-500/40 not-italic">{children}</h1>
+    ),
     h2: ({ children }: { children?: React.ReactNode }) => (
-      <h2 className="fade-in mt-5 mb-2 pb-1 text-[0.78rem] font-extrabold tracking-wider uppercase text-blue-400 border-b border-blue-500/25 not-italic">{children}</h2>
+      <h2 className="fade-in mt-5 mb-2 pb-1 text-[1rem] font-extrabold tracking-wide uppercase text-blue-400 border-b border-blue-500/30 not-italic">{children}</h2>
     ),
     h3: ({ children }: { children?: React.ReactNode }) => (
-      <h3 className="fade-in mt-3 mb-1 text-[0.72rem] font-bold text-sky-300">{children}</h3>
+      <h3 className="fade-in mt-4 mb-1.5 text-[0.88rem] font-bold text-sky-300 not-italic">{children}</h3>
+    ),
+    h4: ({ children }: { children?: React.ReactNode }) => (
+      <h4 className="fade-in mt-3 mb-1 text-[0.78rem] font-semibold text-cyan-300 not-italic">{children}</h4>
+    ),
+    h5: ({ children }: { children?: React.ReactNode }) => (
+      <h5 className="fade-in mt-2 mb-1 text-[0.72rem] font-semibold uppercase tracking-wider text-teal-300 not-italic">{children}</h5>
+    ),
+    h6: ({ children }: { children?: React.ReactNode }) => (
+      <h6 className="fade-in mt-2 mb-1 text-[0.7rem] font-semibold text-slate-300 not-italic">{children}</h6>
     ),
     p:  ({ children }: { children?: React.ReactNode }) => <p  className="fade-in">{children}</p>,
     li: ({ children }: { children?: React.ReactNode }) => <li className="fade-in">{children}</li>,
@@ -1213,12 +1584,10 @@ export default function HomePage() {
 
   // Agents: merge streamed results with final result (stream takes live priority)
   const agentData = {
-    researcher:    (streamAgents.researcher    ?? result?.researcher)    as AgentPayload | undefined,
-    theorist:      (streamAgents.theorist      ?? result?.theorist)      as AgentPayload | undefined,
-    methodologist: (streamAgents.methodologist ?? result?.methodologist) as AgentPayload | undefined,
-    critic:        (streamAgents.critic        ?? result?.critic)        as AgentPayload | undefined,
-    gap_analyst:   (streamAgents.gap_analyst   ?? result?.gap_analyst)   as AgentPayload | undefined,
-    verifier:      (streamAgents.verifier      ?? result?.verifier)      as AgentPayload | undefined,
+    evidence_mapper: (streamAgents.evidence_mapper ?? result?.evidence_mapper) as AgentPayload | undefined,
+    scholar:         (streamAgents.scholar         ?? result?.scholar)         as AgentPayload | undefined,
+    gap_analyst:     (streamAgents.gap_analyst     ?? result?.gap_analyst)     as AgentPayload | undefined,
+    verifier:        (streamAgents.verifier        ?? result?.verifier)        as AgentPayload | undefined,
   };
 
   const toBackendPaper = (paper: Paper) => (paper.raw && typeof paper.raw === "object" ? paper.raw : paper);
@@ -1341,35 +1710,68 @@ ${html}
     URL.revokeObjectURL(url);
   }
 
+  function cancelUnderstand() {
+    understandAbortRef.current?.abort();
+    understandAbortRef.current = null;
+    setIsUnderstanding(false);
+    setUnderstandStatus("");
+  }
+
   async function handleUnderstand() {
     if (!authUser) { router.push("/login"); return; }
     const trimmed = query.trim();
-    if (!trimmed || isUnderstanding) return;
+    if (!trimmed) return;
+    if (isUnderstanding) { cancelUnderstand(); return; }
     setUiError("");
     setUnderstandStatus("Searching preview results\u2026");
     setIsUnderstanding(true);
     setDirectionData(null);
     setSelectedDirIndex(null);
     setSelectedSubIndex(null);
+    understandAbortRef.current = new AbortController();
+    const signal = understandAbortRef.current.signal;
 
     const applyResult = (data: QueryDirectionsResponse) => {
       setDirectionData(data);
       setUnderstandOpen(true);
-      setSelectedDirIndex(data.recommended_direction ?? 0);
-      setSelectedSubIndex(data.recommended_sub ?? 0);
+      // Per spec: default to NO selection — the user opts in by clicking. The
+      // recommended_direction / recommended_sub are still highlighted visually
+      // (star icon on the recommended card) but not pre-chosen.
+      setSelectedDirIndex(null);
+      setSelectedSubIndex(null);
       setCustomQueryEnabled(false);
       setCustomQueryValue("");
-      // Save understand result to history
-      try {
-        const _id = `u-${Date.now()}`;
-        const _entry: HistoryEntry = { id: _id, title: trimmed, updated_at: new Date().toISOString(), entryType: "understand", directionData: data };
-        const _key = authUser?.email ? _hKey(authUser.email) : null;
-        const _prev: HistoryEntry[] = JSON.parse((_key && localStorage.getItem(_key)) || "[]");
-        const _next = [_entry, ..._prev].slice(0, 20);
-        if (_key) localStorage.setItem(_key, JSON.stringify(_next));
-        setHistoryList(_next);
-        setActiveHistoryId(_id);
-      } catch { /* ignore */ }
+      // Persist the understand-only entry to the cloud (history is cloud-authoritative).
+      // Optimistically insert a provisional row so the timeline updates immediately,
+      // then swap in the real server id once the POST returns.
+      const provisional: HistoryEntry = {
+        id: `pending-${Date.now()}`,
+        title: trimmed,
+        updated_at: new Date().toISOString(),
+        entryType: "understand",
+        directionData: data,
+      };
+      setHistoryList(prev => [provisional, ...prev].slice(0, 50));
+      setActiveHistoryId(provisional.id);
+      (async () => {
+        try {
+          const token = await getAuthToken();
+          if (!token) return;
+          const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+          const res = await fetchWithApiFallback("/api/history/understand", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ query: trimmed, direction_data: data }),
+          });
+          if (!res.ok) return;
+          const { id } = await res.json() as { id?: string };
+          if (!id) return;
+          setHistoryList(prev => prev.map(e => e.id === provisional.id ? { ...e, id } : e));
+          setActiveHistoryId(cur => cur === provisional.id ? id : cur);
+        } catch (e) {
+          console.warn("[history] understand save failed:", e);
+        }
+      })();
     };
 
     try {
@@ -1379,6 +1781,7 @@ ${html}
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: trimmed }),
+        signal,
       });
 
       if (res.status === 404) {
@@ -1388,6 +1791,7 @@ ${html}
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: trimmed }),
+          signal,
         });
         if (!res2.ok) throw new Error(`Failed to understand query: ${res2.status}`);
         const data: QueryDirectionsResponse = await res2.json();
@@ -1423,7 +1827,14 @@ ${html}
                   applyResult(obj as QueryDirectionsResponse);
                   break outer;
                 } else if (sseEvent === "error") {
-                  setUiError(String(obj.error ?? "Query understanding failed."));
+                  // Backend now embeds a deterministic fallback directions list alongside
+                  // any error payload — apply it silently so the user always gets a result.
+                  const directionsArr = (obj as { directions?: unknown }).directions;
+                  if (Array.isArray(directionsArr) && directionsArr.length > 0) {
+                    applyResult(obj as QueryDirectionsResponse);
+                  } else {
+                    console.warn("[understand] backend error:", obj.error);
+                  }
                   break outer;
                 }
               } catch { /* ignore malformed */ }
@@ -1436,10 +1847,14 @@ ${html}
         reader.cancel().catch(() => {});
       }
     } catch (error) {
-      setUiError(explainFetchError(error));
+      // Silent abort when the user stops mid-analysis
+      if ((error as { name?: string })?.name !== "AbortError") {
+        setUiError(explainFetchError(error));
+      }
     } finally {
       setIsUnderstanding(false);
       setUnderstandStatus("");
+      understandAbortRef.current = null;
     }
   }
 
@@ -1457,10 +1872,15 @@ ${html}
     setIsSubmitting(true);
     setUiError("");
     setJob(null);
-    briefClearedRef.current = false;  // will clear on first brief_chunk of the new search
+    briefVersionRef.current = 0;       // reset: no SSE version received yet for this search
+    briefFlushGenRef.current += 1;     // invalidate any stale RAF batches from previous search
+    briefTextRef.current = "";
+    briefQueueRef.current = [];
+    setBriefStatus(null);
     setStreamPapers([]);
     setStreamAgents({});
     setStartedAgents(new Set());
+    setPlannerThinking(null);
     setDeepReadResults({});
     setDeepReadErrors({});
     setOriginalErrors({});
@@ -1496,6 +1916,10 @@ ${html}
       open_access_only: openAccessOnly,
       source_filters: sourceFilters,
       year_range: useYearRange ? [yearStart, yearEnd] : null,
+      // Carry the Query Understanding context so it is persisted with the search history
+      direction_data: directionData || null,
+      selected_direction_index: selectedDirIndex ?? null,
+      selected_sub_index: customQueryEnabled ? null : (selectedSubIndex ?? null),
     };
 
     try {
@@ -1512,7 +1936,7 @@ ${html}
       }
 
       // Seed a running job state immediately so progress renders
-      setJob({ status: "running", progress: 0, message: "⚙️ Initializing...", workflow: [], started_at: Date.now() / 1000, finished_at: null });
+      setJob({ status: "running", progress: 0, message: "Initializing...", workflow: [], started_at: Date.now() / 1000, finished_at: null });
 
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
@@ -1544,23 +1968,42 @@ ${html}
                 : (prev?.workflow ?? []),
             }));
           } else if (sseEvent === "brief_chunk") {
-            if (!briefClearedRef.current) {
-              briefClearedRef.current = true;
-              briefTextRef.current = "";
-              setBriefStreamText("");
+            const incomingVersion = (data.version as number) ?? 1;
+            const incomingStatus = (data.status as "draft" | "final") ?? "final";
+            const chunk = (data.chunk as string) ?? "";
+
+            if (incomingVersion < briefVersionRef.current) {
+              // Stale chunk from a superseded phase — discard silently
+            } else if (incomingVersion === briefVersionRef.current) {
+              // Same version: append to RAF queue
+              briefTextRef.current += chunk;
+              briefQueueRef.current.push(chunk);
+            } else {
+              // Higher version: upgrade — clear display and start fresh
+              const isFirstEver = briefVersionRef.current === 0;
+              briefFlushGenRef.current += 1;     // invalidate any in-flight RAF batches
+              briefVersionRef.current = incomingVersion;
+              briefTextRef.current = chunk;
+              briefQueueRef.current.length = 0;  // truncate in-place so RAF's captured ref also sees empty
+              briefQueueRef.current.push(chunk);
+              setBriefStatus(incomingStatus);
+              setBriefStreamText("");            // clear display; RAF will fill from fresh queue
+              if (isFirstEver) setLeftTab("brief");
             }
-            const chunk = data.text ?? "";
-            briefTextRef.current += chunk;
-            setBriefStreamText((prev) => prev + chunk);
+          } else if (sseEvent === "thinking") {
+            setPlannerThinking(data as {planner_summary?: string; search_focus?: string; query_type?: string; agents_planned?: string[]});
           } else if (sseEvent === "papers") {
             if (Array.isArray(data.papers)) {
               setStreamPapers(data.papers);
+              // Sync counter to actual paper count so label matches the full bar
+              setRetrievalCount(data.papers.length);
+              setCandidateLimit(data.papers.length);
               // All analysis agents start as soon as papers are retrieved
               if (!fastMode) {
                 setStartedAgents(prev => {
                   const s = new Set(prev);
-                  s.add("researcher"); s.add("theorist"); s.add("methodologist");
-                  s.add("critic"); s.add("gap_analyst"); s.add("verifier");
+                  s.add("evidence_mapper"); s.add("scholar");
+                  s.add("gap_analyst"); s.add("verifier");
                   return s;
                 });
               }
@@ -1575,6 +2018,7 @@ ${html}
             if (briefFallback) {
               setBriefStreamText((prev) => prev || String(briefFallback));
             }
+            setPlannerThinking(null);
             setJob((prev) => ({
               ...prev,
               status: "done",
@@ -1582,25 +2026,53 @@ ${html}
               result: data.result ?? null,
               finished_at: Date.now() / 1000,
             }));
-            // ── Auto-save to local history ──────────────────────────────────
+            // ── Optimistic timeline insert; cloud is authoritative ─────────
+            // The search endpoint writes its own history row server-side via
+            // _write_history(); we just show immediate UI feedback and then refetch
+            // to swap the optimistic entry for the authoritative cloud row.
             const _slim = data.result ? {
               ...data.result,
-              // Prefer streamed brief (briefTextRef) over result.brief — they should match,
-              // but the streamed version is guaranteed to be complete even if backend omits it from result.
               brief: data.result.brief || briefTextRef.current || undefined,
               papers: (data.result.papers || []).map((p: Paper) => { const { raw: _r, ...rest } = p as any; return rest; }),
             } : null;
             const _histTitle = _slim?.final_search_query || _slim?.original_query || query.trim();
-            const _histId = `${Date.now()}`;
-            const _histEntry: HistoryEntry = { id: _histId, title: _histTitle, updated_at: new Date().toISOString(), entryType: "search", usedUnderstand: _usedUnderstand, result: _slim };
-            try {
-              const _key = authUser?.email ? _hKey(authUser.email) : null;
-              const _prev: HistoryEntry[] = JSON.parse((_key && localStorage.getItem(_key)) || "[]");
-              const _next = [_histEntry, ..._prev].slice(0, 20);
-              if (_key) localStorage.setItem(_key, JSON.stringify(_next));
-              setHistoryList(_next);
-              setActiveHistoryId(_histId);
-            } catch { /* ignore */ }
+            const _histId = `pending-${Date.now()}`;
+            const _histEntry: HistoryEntry = { id: _histId, title: _histTitle, updated_at: new Date().toISOString(), entryType: "search", usedUnderstand: _usedUnderstand, isFast: fastMode, result: _slim, directionData: directionData || undefined };
+            setHistoryList(prev => [_histEntry, ...prev.filter(e => !String(e.id).startsWith("pending-"))].slice(0, 50));
+            setActiveHistoryId(_histId);
+            // Authoritative refetch — backend writes history via `_write_history()`
+            // just after this SSE "result" event, which means the row is not
+            // guaranteed to exist on the very next request. Retry with a gentle
+            // back-off until we see a cloud entry matching our title, then swap
+            // the pending row out. If nothing matches after a few seconds we
+            // keep the pending entry so the user still sees their search.
+            (async () => {
+              const token = await getAuthToken();
+              if (!token) return;
+              const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+              const delays = [500, 1200, 2500, 4000];
+              for (const d of delays) {
+                await new Promise(r => setTimeout(r, d));
+                try {
+                  const r = await fetch(`${API}/api/history?limit=50`, { headers: { Authorization: `Bearer ${token}` } });
+                  if (!r.ok) continue;
+                  const cloudItems: HistoryEntry[] = await r.json();
+                  const matched = cloudItems.some(ci => {
+                    const t = (ci.title ?? "").trim();
+                    const u = new Date(ci.updated_at).getTime();
+                    return t === _histTitle.trim() && Date.now() - u < 120_000;
+                  });
+                  if (matched) {
+                    const sorted = cloudItems.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+                    setHistoryList(sorted);
+                    // Point the active-history indicator at the real row so re-clicks hit the server copy.
+                    const cur = sorted.find(ci => (ci.title ?? "").trim() === _histTitle.trim());
+                    if (cur?.id) setActiveHistoryId(cur.id);
+                    return;
+                  }
+                } catch { /* keep retrying */ }
+              }
+            })();
           } else if (sseEvent === "error") {
             setJob((prev) => ({
               ...prev,
@@ -1668,7 +2140,6 @@ ${html}
   // ── Synthesis Lab helpers ─────────────────────────────────────────────────
   const addToLab = useCallback((paper: Paper, key: string) => {
     setLabRefs(prev => prev.some(r => r.key === key) ? prev : [...prev, { key, paper }]);
-    setRightTab("lab");
     setAnalyticsVisible(true);
   }, []);
 
@@ -1696,16 +2167,32 @@ ${html}
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ac.signal,
-        body: JSON.stringify({
+        body: (() => {
+          // Only send extras declared by the current spec — avoid leaking stale keys
+          // from a previous output-type selection. Multi-entry fields are emitted as arrays.
+          const _spec = labFieldSpec(labOutputType);
+          const _extras: Record<string, string | string[]> = {};
+          for (const f of (_spec.extras ?? [])) {
+            if (f.multi) {
+              const arr = (labExtrasMulti[f.key] ?? []).map(s => s.trim()).filter(Boolean);
+              if (arr.length) _extras[f.key] = arr;
+            } else {
+              const v = (labExtras[f.key] ?? "").trim();
+              if (v) _extras[f.key] = v;
+            }
+          }
+          return JSON.stringify({
           papers:            labRefs.map(r => toBackendPaper(r.paper)),
           core_argument:     labCoreArg,
           supporting_points: labPoints.filter(p => p.trim()),
+          extras:            _extras,
           output_type:       labOutputType,
           citation_format:   labCitationFormat,
           language:          labLanguage,
           target_pages:      labTargetPages,
           writing_model:     labWritingModel,
-        }),
+        });
+        })(),
       });
       if (!res.ok) throw new Error(await readErrorMessage(res, `Synthesis failed: ${res.status}`));
       const reader  = res.body!.getReader();
@@ -1790,18 +2277,26 @@ ${html}
   }
 
   return (
-    <main data-theme={theme} className="h-screen overflow-hidden flex flex-col bg-[var(--ats-bg-base)] text-slate-100 transition-colors duration-300">
-      {/* Theme toggle */}
+    <main
+      data-theme={theme}
+      data-tone={themeMode}
+      className="h-screen overflow-hidden flex flex-col bg-[var(--ats-bg-base)] text-slate-100"
+      style={{
+        // Per-panel alpha exposed as CSS vars — the panel rules in globals.css
+        // read them via `rgb(from var(--ats-bg-panel) r g b / var(--ats-alpha-*))`.
+        ["--ats-alpha-workspace" as any]: panelAlpha.workspace,
+        ["--ats-alpha-synthesis" as any]: panelAlpha.synthesis,
+        ["--ats-alpha-lab" as any]:       panelAlpha.lab,
+      }}
+    >
+      {/* Day / Night category toggle — the specific theme within each category
+          is chosen in Settings → Appearance. */}
       <button
-        onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
-        title={theme === "dark" ? "Switch to Light mode" : "Switch to Dark mode"}
-        className={`fixed top-4 right-4 z-50 flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:shadow-blue-500/20 ${
-          theme === "dark"
-            ? "border-slate-700/60 bg-slate-900/80 text-slate-300 hover:border-blue-500/50 hover:text-blue-400"
-            : "border-slate-300/70 bg-white/90 text-slate-600 hover:border-blue-400/60 hover:text-blue-500"
-        }`}
+        onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
+        title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
+        className={`fixed top-4 right-4 z-50 flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:shadow-[0_0_12px_var(--ats-border-accent)] border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-[var(--ats-fg-secondary)] hover:text-[var(--ats-fg-accent)]`}
       >
-        {theme === "dark" ? (
+        {themeMode === "night" ? (
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
           </svg>
@@ -1812,7 +2307,7 @@ ${html}
         )}
       </button>
 
-      <div className="flex flex-col flex-1 min-h-0 px-3 pt-3 pb-2 gap-2">
+      <div className="flex flex-col flex-1 min-h-0 px-5 pt-5 pb-4 gap-4">
         {/* ── Top bar: title + announcement side-by-side ── */}
         <div className="flex-none flex items-stretch gap-4">
           {/* Title block */}
@@ -1821,7 +2316,7 @@ ${html}
               <span className="text-slate-100">Academi</span>
               <span className="text-blue-500">Cats</span>
             </div>
-            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.5.0-Alpha</span></p>
+            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.6.0-Alpha</span></p>
           </div>
           {/* Announcement banner – fills remaining width */}
           <div className="min-w-0 flex-1">
@@ -1855,165 +2350,386 @@ ${html}
           ref={gridRef}
           className="relative grid flex-1 min-h-0"
           style={{
-            // Grid expands/collapses as a SNAP — decoupled from the aside slide-out
-            // (which handles its own 0.35 s CSS transition).  Removing the fr↔px
-            // mixed-unit grid-template transition eliminates the left-edge wobble.
-            gridTemplateColumns: gridRightCollapsed
-              ? `${leftPct}fr 5px ${centerPct + rightPct}fr 0px 6px`
-              : `${leftPct}fr 5px ${centerPct}fr 5px ${rightPct}fr`,
+            // Grid expands/collapses as a SNAP — decoupled from the panel slide
+            // animations (which handle their own 0.35s CSS transitions).
+            gridTemplateColumns: (() => {
+              // Collapsed tracks reserve enough width for the floating expand button.
+              const leftCol = gridLeftCollapsed ? "36px" : `${leftPct}fr`;
+              const leftDiv = gridLeftCollapsed ? "0px" : "12px";
+              const midFr = (gridLeftCollapsed ? leftPct : 0) + centerPct + (gridRightCollapsed ? rightPct : 0);
+              const rightDiv = gridRightCollapsed ? "0px" : "12px";
+              const rightCol = gridRightCollapsed ? "36px" : `${rightPct}fr`;
+              return `${leftCol} ${leftDiv} ${midFr}fr ${rightDiv} ${rightCol}`;
+            })(),
             columnGap: 0,
             rowGap: 0,
           }}
         >
-          <section ref={leftSectionRef} className="min-w-0 h-full overflow-y-auto no-scrollbar rounded-xl bg-[var(--ats-bg-section)] p-5 transition-[width] duration-200">
-            <div className="mb-5 text-2xl font-bold flex items-baseline gap-2 flex-wrap">
-              📄 {!fastMode && isSubmitting && !result ? "Preliminary Research Brief" : "Research Brief"}
-              {!fastMode && isSubmitting && !result && researchBriefMarkdown && (
-                <span className="text-xs font-normal text-amber-400/80">· preliminary · updates after deep analysis</span>
-              )}
-            </div>
+          {/* Left panel — Research Brief | Analytics (collapsible) */}
+          <div className="relative min-w-0 h-full overflow-hidden rounded-xl">
+            {/* Expand button — sits at tab-bar height on the left edge, square (not circular)
+                so it reads as a panel toggle rather than a "next" arrow. */}
+            <button
+              onClick={() => setLeftVisible(true)}
+              title="Show panel"
+              style={{
+                opacity: leftVisible ? 0 : 1,
+                pointerEvents: leftVisible ? "none" : "auto",
+                transition: "opacity 0.15s 0.15s ease",
+              }}
+              className="absolute top-[11px] left-2 z-20 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
+            ><PanelLeftOpen size={15} /></button>
 
-            {/* Brief — writing indicator before first token arrives */}
-            {isSubmitting && !researchBriefMarkdown && (
-              <div className="mb-4 flex items-center gap-2 rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm font-medium text-blue-300 animate-pulse shadow-[0_0_16px_rgba(59,130,246,0.25)]">
-                <span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-400" />
-                Writing research brief…
+            <section
+              data-region="synthesis"
+              className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] ats-panel overflow-hidden"
+              style={{
+                transform: leftVisible ? "translateX(0)" : "translateX(-105%)",
+                transition: "transform 0.35s cubic-bezier(0.4,0,0.2,1)",
+              }}
+            >
+              {/* Collapse button — aligned with tab bar, square. */}
+              <button
+                onClick={() => setLeftVisible(false)}
+                title="Hide panel"
+                className="absolute top-[11px] left-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
+              ><PanelLeftClose size={15} /></button>
+              {/* Tab bar — leading padding reserves space for the absolute collapse button. */}
+              <div className="shrink-0 flex items-center gap-1.5 pl-12 pr-3 py-2.5 border-b border-slate-800/60">
+                <button
+                  onClick={() => setLeftTab("brief")}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                    leftTab === "brief"
+                      ? "bg-slate-900/70 text-slate-100"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                ><ClipboardList size={14} /><span>Synthesis</span></button>
+                <button
+                  onClick={() => setLeftTab("analytics")}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                    leftTab === "analytics"
+                      ? "bg-slate-900/70 text-slate-100"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                ><BarChart2 size={14} /><span>Analytics</span></button>
+                {/* Collapse action moved to the fold-side edge — see absolute button above. */}
               </div>
-            )}
 
-            {researchBriefMarkdown ? (
-              <>
-                <div className="fade-in prose prose-invert max-w-none break-words
-                  prose-p:text-[0.63rem] prose-p:leading-[1.55] prose-p:my-0.5 prose-p:text-slate-300
-                  prose-strong:text-slate-100 prose-strong:font-semibold
-                  prose-li:text-[0.63rem] prose-li:text-slate-300 prose-li:my-0
-                  prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4">
-                  <ReactMarkdown components={mdComponents}>{researchBriefMarkdown}</ReactMarkdown>
-                  {isStreamingBrief && (
-                    <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
-                  )}
+              {/* ── Research Brief content ── */}
+              <div ref={leftSectionRef as React.RefObject<HTMLDivElement>} className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5 ${leftTab === "brief" ? "" : "hidden"}`}>
+                {/* Research Brief section header */}
+                <div className="mb-3 flex items-center gap-2 text-base font-bold">
+                  <FileText size={16} /><span>Research Brief</span>
                 </div>
-                {!isStreamingBrief && result?.brief && (
-                  <div className="mt-6 flex items-center gap-2 flex-wrap">
-                    {/* Quick copy */}
-                    <button
-                      onClick={() => void navigator.clipboard.writeText(result?.brief || "")}
-                      className="rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
-                    >📋 Copy Brief</button>
-                    {/* Format download */}
-                    <div className="flex items-center gap-1.5">
-                      <select
-                        value={briefDownloadFmt}
-                        onChange={e => setBriefDownloadFmt(e.target.value as "pdf"|"html"|"txt"|"md")}
-                        className="rounded-lg border border-slate-600 bg-slate-900 px-2 py-2 text-sm text-slate-400 focus:outline-none focus:border-blue-500/60"
-                      >
-                        <option value="pdf">PDF</option>
-                        <option value="html">HTML</option>
-                        <option value="md">Markdown</option>
-                        <option value="txt">TXT</option>
-                      </select>
-                      <button
-                        onClick={() => {
-                          const slug = (result?.original_query || query || "brief").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
-                          if (briefDownloadFmt === "pdf") {
-                            void triggerDownload(buildApiUrl("/api/brief/download"), {
-                              brief_text: result?.brief || "",
-                              original_query: result?.original_query || query,
-                              final_search_query: result?.final_search_query || query,
-                            }, `research_brief_${slug}.pdf`, "brief-download");
-                          } else {
-                            downloadTextAs(result?.brief || "", `research_brief_${slug}`, briefDownloadFmt as "html"|"txt"|"md");
-                          }
-                        }}
-                        className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 transition-colors"
-                      >⬇ Download Brief</button>
+                {researchBriefMarkdown && (briefStatus === "draft" || briefStatus === "final") && (
+                  <div className="mb-3">
+                    {briefStatus === "draft" && isSubmitting && (
+                      <span className="text-xs font-normal text-amber-400/80">· draft · refining with agent analysis…</span>
+                    )}
+                    {briefStatus === "final" && isSubmitting && (
+                      <span className="text-xs font-normal text-emerald-400/80">· final · refined with deep analysis</span>
+                    )}
+                  </div>
+                )}
+
+                {/* Brief — writing indicator before first token arrives */}
+                {isSubmitting && !researchBriefMarkdown && (
+                  <div className="mb-4 flex items-center gap-2 rounded-2xl border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm font-medium text-blue-300 animate-pulse shadow-[0_0_16px_rgba(59,130,246,0.25)]">
+                    <span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-400" />
+                    Writing research brief…
+                  </div>
+                )}
+
+                {researchBriefMarkdown ? (
+                  <>
+                    {/* translate="no" — Google Translate rewrites text nodes, which collides
+                        with the streamed markdown diff and crashes the page mid-generation. */}
+                    <div translate="no" className="notranslate fade-in prose prose-invert max-w-none break-words
+                      prose-p:text-[0.63rem] prose-p:leading-[1.55] prose-p:my-0.5 prose-p:text-slate-300
+                      prose-strong:text-slate-100 prose-strong:font-semibold
+                      prose-li:text-[0.63rem] prose-li:text-slate-300 prose-li:my-0
+                      prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4">
+                      <ReactMarkdown components={mdComponents}>{researchBriefMarkdown}</ReactMarkdown>
+                      {isStreamingBrief && (
+                        <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
+                      )}
+                    </div>
+                    {!isStreamingBrief && result?.brief && (
+                      <div className="mt-6 flex flex-nowrap items-center gap-2 overflow-hidden">
+                        <button
+                          onClick={() => void navigator.clipboard.writeText(result?.brief || "")}
+                          className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
+                        ><ClipboardList size={13} className="shrink-0" /><span className="truncate">Copy Brief</span></button>
+                        <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
+                          <select
+                            value={briefDownloadFmt}
+                            onChange={e => setBriefDownloadFmt(e.target.value as "pdf"|"html"|"txt"|"md")}
+                            className="shrink-0 rounded-lg border border-slate-600 bg-slate-900 px-2 py-2 text-sm text-slate-400 focus:outline-none focus:border-blue-500/60"
+                          >
+                            <option value="pdf">PDF</option>
+                            <option value="html">HTML</option>
+                            <option value="md">Markdown</option>
+                            <option value="txt">TXT</option>
+                          </select>
+                          <button
+                            onClick={() => {
+                              const slug = (result?.original_query || query || "brief").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
+                              if (briefDownloadFmt === "pdf") {
+                                void triggerDownload(buildApiUrl("/api/brief/download"), {
+                                  brief_text: result?.brief || "",
+                                  original_query: result?.original_query || query,
+                                  final_search_query: result?.final_search_query || query,
+                                }, `research_brief_${slug}.pdf`, "brief-download");
+                              } else {
+                                downloadTextAs(result?.brief || "", `research_brief_${slug}`, briefDownloadFmt as "html"|"txt"|"md");
+                              }
+                            }}
+                            className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 transition-colors"
+                          ><Download size={14} className="shrink-0" /><span className="truncate">Download Brief</span></button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : !isSubmitting ? (
+                  <div className="flex min-h-[20rem] items-center justify-center px-6 text-center">
+                    <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
+                      Run Search &amp; Analysis first —<br />
+                      your final Research Brief will appear here once the pipeline completes.
                     </div>
                   </div>
-                )}
-              </>
-            ) : !isSubmitting ? (
-              <div className="rounded-2xl bg-slate-900/40 p-4 text-sm text-slate-400">
-                Run Search & Analysis to see the final Research Brief here.
-              </div>
-            ) : null}
+                ) : null}
 
-            <div className="mt-6 space-y-4">
-              <div className="rounded-3xl bg-slate-950/40 p-4">
-                <div className="mb-2 text-2xl font-bold">🧠 Analytical Trace</div>
-                <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
-                <div className="space-y-3">
-                  <AgentSection title="Query Planner" payload={result?.query_planner ? Object.fromEntries(Object.entries(result.query_planner).filter(([k]) => !["query_type","search_focus","theorist_needed","critic_needed","verifier_needed"].includes(k))) as AgentPayload : undefined} />
-                  <AgentSection title="🔬 Researcher"    payload={agentData.researcher}    running={isSubmitting && !fastMode && startedAgents.has("researcher")} />
-                  <AgentSection title="💡 Theorist"      payload={agentData.theorist}      running={isSubmitting && !fastMode && startedAgents.has("theorist")} />
-                  <AgentSection title="🔧 Methodologist" payload={agentData.methodologist} running={isSubmitting && !fastMode && startedAgents.has("methodologist")} />
-                  <AgentSection title="⚠️ Critic"        payload={agentData.critic}        running={isSubmitting && !fastMode && startedAgents.has("critic")} />
-                  <AgentSection title="🕳️ Gap Analyst"   payload={agentData.gap_analyst}   running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
-                  <AgentSection title="✅ Verifier"      payload={agentData.verifier}      running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
+                <div className="mt-6 space-y-4">
+                  <div className="ats-card rounded-3xl bg-slate-950/40 p-4">
+                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
+                    <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
+                    <div className="space-y-3">
+                      <AgentSection title="Evidence Mapper" payload={agentData.evidence_mapper} running={isSubmitting && !fastMode && startedAgents.has("evidence_mapper")} />
+                      <AgentSection title="Scholar"         payload={agentData.scholar}        running={isSubmitting && !fastMode && startedAgents.has("scholar")} />
+                      <AgentSection title="Gap Analyst"     payload={agentData.gap_analyst}    running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
+                      <AgentSection title="Verifier"        payload={agentData.verifier}       running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
+                    </div>
+                  </div>
+
+                  <div className="ats-card rounded-3xl bg-[var(--ats-bg-emerald)] p-4">
+                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Compass size={16} /><span>Retrieval Strategy Summary</span></div>
+                    <p className="mb-4 text-sm text-slate-400">How the search was run, screened, and selected.</p>
+                    {result?.strategy_summary ? (
+                      <div className="space-y-2 text-xs text-slate-300">
+                        {Array.isArray(result.strategy_summary.strategy_points) &&
+                          result.strategy_summary.strategy_points.map((item: any, idx: number) => (
+                            <div key={idx} className="break-words">• {String(item)}</div>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">
+                        Run Search & Analysis to see the retrieval strategy summary here.
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="rounded-3xl bg-[var(--ats-bg-emerald)] p-4">
-                <div className="mb-2 text-2xl font-bold">🧭 Retrieval Strategy Summary</div>
-                <p className="mb-4 text-sm text-slate-400">How the search was run, screened, and selected.</p>
-                {result?.strategy_summary ? (
-                  <div className="space-y-2 text-xs text-slate-300">
-                    {Array.isArray(result.strategy_summary.strategy_points) &&
-                      result.strategy_summary.strategy_points.map((item: any, idx: number) => (
-                        <div key={idx} className="break-words">• {String(item)}</div>
-                      ))}
+              {/* ── Analytics content ── */}
+              <div className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar ${leftTab === "analytics" ? "" : "hidden"}`}>
+                {displayedPapers.length === 0 ? (
+                  // Mirrors the Lab empty-state spec so left/right panels read the same when idle.
+                  <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
+                    <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
+                      Run a search first —<br />
+                      charts populate once retrieved papers are available.
+                    </div>
                   </div>
                 ) : (
-                  <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">
-                    Run Search & Analysis to see the retrieval strategy summary here.
+                  <>
+                    <div className="px-4 pt-3 pb-1">
+                      <div className="text-xs text-slate-500">
+                        {displayedPapers.length} paper{displayedPapers.length !== 1 ? "s" : ""} · {fastMode ? "Fast" : "Deep"} mode
+                      </div>
+                    </div>
+                    <div className="px-4 pb-4">
+                      <PaperCharts papers={displayedPapers} wide={false} />
+                    </div>
+                  </>
+                )}
+              </div>
+            </section>
+          </div>
+
+          <DividerScrollbar onResizeStart={() => startDrag("left")} onSnap={snapDividerToDefault} sectionRef={leftSectionRef} />
+
+          <section data-region="workspace" className="min-w-0 h-full rounded-xl bg-[var(--ats-bg-section)] ats-panel flex flex-col overflow-hidden transition-[width] duration-200">
+            <div ref={centerSectionRef as React.RefObject<HTMLDivElement>} className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5">
+            <div className="mb-4 flex items-center gap-2 text-xl font-bold"><LayoutGrid size={18} /><span>Workspace</span></div>
+
+            {/* Unified workspace card — textarea + action row live inside one bordered container */}
+            <div className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
+              <div ref={placeholderWrapperRef} translate="no" className="notranslate relative" style={{ containerType: "inline-size" }}>
+                <textarea
+                  ref={taRef}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onFocus={() => setTaFocused(true)}
+                  onBlur={(e) => {
+                    setTaFocused(false);
+                    // If the user left the box empty, shuffle to a fresh random phrase
+                    // so the overlay that re-appears is different from the one they just dismissed.
+                    if (e.target.value.length === 0 && WORKSPACE_PLACEHOLDERS.length > 1) {
+                      setPlaceholderIdx(i => {
+                        let next = i;
+                        while (next === i) next = Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length);
+                        return next;
+                      });
+                    }
+                  }}
+                  // bg-transparent so the decorative placeholder overlay sitting at z-0
+                  // is actually visible behind the textarea surface — the wrapper div
+                  // carries `bg-[var(--ats-bg-input)]` for the filled look.
+                  // resize-none: no user drag handle; long content scrolls via the
+                  // hair-thin scrollbar (thinner than the panel's own scrollbar).
+                  className="relative z-10 block w-full resize-none bg-transparent px-5 py-6 text-center text-lg leading-relaxed text-slate-100 outline-none hairline-scrollbar transition-[height] duration-300 ease-out"
+                />
+                {/* Rotating greeting — shown only when textarea is empty AND not focused.
+                    On click, focus fires → overlay hides → native caret takes over.
+                    The fake cursor sits at the END of the second line so it reads
+                    as "ready to append" rather than "type from the start".
+                    `animate-pulse` gives both the text and the bar the same breathing rhythm. */}
+                {query.length === 0 && !taFocused && (
+                  <div
+                    className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center px-6 text-center font-bold leading-[1.2] text-[var(--ats-placeholder-fg)] select-none animate-pulse"
+                    // Font scales with the container width (`cqw` = 1% of the wrapper's
+                    // inline size). Upper bound goes beyond the product logo (text-5xl ≈ 3rem)
+                    // so the greeting fills the expanded textarea at wide widths.
+                    style={{ fontSize: "clamp(1.25rem, 11cqw, 4.25rem)" }}
+                  >
+                    {/* Render the phrase as a single string so the browser wraps naturally.
+                        Greedy wrap is top-heavy by default — line 1 fills first, line 2
+                        gets the remainder — matching the spec "more on top, less below". */}
+                    <span className="max-w-full">
+                      {WORKSPACE_PLACEHOLDERS[placeholderIdx]}
+                      <span aria-hidden className="inline-block w-[2px] h-[0.9em] ml-1 bg-current align-[-2px]" />
+                    </span>
                   </div>
                 )}
               </div>
+              {/* Single-line responsive row: every control gets `min-w-0` + labels truncate,
+                  so compressing the panel shrinks buttons instead of wrapping them downward. */}
+              <div className="flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden">
+                {/* Search Controls */}
+                <button
+                  onClick={() => setSettingsOpen(o => !o)}
+                  className="shrink min-w-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm font-semibold text-slate-200 hover:border-blue-500/40 transition-colors"
+                >
+                  <SlidersHorizontal size={14} className="shrink-0" />
+                  <span className="truncate">Search Controls</span>
+                  <ChevronDown size={12} className={`shrink-0 ${settingsOpen ? "rotate-180 transition-transform duration-200" : "transition-transform duration-200"}`} />
+                </button>
+
+                {/* Textarea hint — first thing to collapse; fully hidden if still too tight. */}
+                <span className="hidden md:block flex-1 min-w-0 truncate text-[11px] leading-snug text-slate-500">
+                  Drop a research topic, a question, or a rough idea.
+                </span>
+
+                {/* Right-aligned group — no wrapping: each button collapses width /
+                    truncates its label before the row breaks into multiple lines. */}
+                <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
+                  {/* Query Understanding — click again during analysis to cancel.
+                      min-w locks the width so the label toggle (Understand ↔ Cancel) doesn't resize the button. */}
+                  <button
+                    onClick={() => {
+                      if (isUnderstanding) { cancelUnderstand(); return; }
+                      void handleUnderstand();
+                      setUnderstandOpen(true);
+                    }}
+                    disabled={!query.trim()}
+                    title={isUnderstanding ? "Click to cancel analysis" : "Analyse the query into 6 research directions"}
+                    className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-semibold transition-colors disabled:opacity-60 ${isUnderstanding ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-slate-700 bg-slate-900/50 text-slate-200 hover:border-blue-500/40"}`}
+                  >
+                    {isUnderstanding
+                      ? <><Square size={12} fill="currentColor" className="shrink-0" /><span className="truncate">Cancel analysis</span></>
+                      : <><Search size={14} className="shrink-0" /><span className="truncate">Query Understanding</span><ChevronRight size={12} className="shrink-0 hidden sm:inline-block" /></>}
+                  </button>
+
+                  {/* Fast / Curated mode toggle */}
+                  <div className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setFastMode(true)}
+                      disabled={isSubmitting}
+                      aria-pressed={fastMode}
+                      className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
+                    ><Zap size={14} className="shrink-0" /><span className="truncate">Quick Search</span></button>
+                    <button
+                      type="button"
+                      onClick={() => setFastMode(false)}
+                      disabled={isSubmitting}
+                      aria-pressed={!fastMode}
+                      className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${!fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
+                    ><FlaskConical size={14} className="shrink-0" /><span className="truncate">Curated Analysis</span></button>
+                  </div>
+
+                  {/* Start / Stop — compact circular action */}
+                  {isSubmitting ? (
+                    <button
+                      onClick={handleStop}
+                      title="Stop search"
+                      className="flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                    >
+                      <Square size={13} fill="currentColor" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => void handleSearch()}
+                      disabled={!query.trim()}
+                      title="Start search"
+                      className="flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <ArrowRight size={15} />
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
-          </section>
 
-          <DividerScrollbar onResizeStart={() => startDrag("left")} sectionRef={leftSectionRef} />
+            {/* Mode description — sits directly under the Start button (right group),
+                text centred within its own column so it visually lines up under Start. */}
+            <div className="mt-2 flex justify-end pr-1">
+              <p className="max-w-[22rem] text-center text-[11px] leading-snug text-slate-500">
+                {fastMode
+                  ? "Seconds-fast results with smart ranking. Great for rapid literature scanning."
+                  : "Deep AI curation with adversarial screening and 6-agent analysis. Best for thorough research."}
+              </p>
+            </div>
 
-          <section ref={centerSectionRef} className={`min-w-0 h-full overflow-y-auto ${analyticsVisible ? "no-scrollbar" : "thin-scrollbar"} rounded-xl bg-[var(--ats-bg-section)] p-5 transition-[width] duration-200`}>
-            <div className="mb-4 text-2xl font-bold">🧠 Workspace</div>
-
-            <textarea
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Enter your research topic..."
-              rows={1}
-              className="w-full resize-y rounded-xl border border-blue-500/15 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500"
-            />
-
-            {/* Selected search query — shown above buttons once a direction is chosen */}
+            {/* Selected search query — shown below the card once a direction is chosen */}
             {selectedSearchQuery && (
-              <div className="mt-2 flex items-center gap-2 rounded-xl border border-blue-500/30 bg-blue-500/8 px-3 py-1.5">
-                <span className="shrink-0 text-[10px] font-bold uppercase tracking-widest text-blue-400">Query</span>
-                <span className="flex-1 min-w-0 text-xs font-semibold text-slate-100 break-words leading-snug">{selectedSearchQuery}</span>
+              <div className="mt-3 rounded-xl border border-blue-500/30 bg-blue-500/8 px-3 py-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="shrink-0 text-[10px] font-bold uppercase tracking-widest text-blue-400">Query</span>
+                  <span className="flex-1 min-w-0 text-xs font-semibold text-slate-100 break-words leading-snug">{selectedSearchQuery}</span>
+                </div>
               </div>
             )}
 
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              <button onClick={() => void handleUnderstand()} disabled={!query.trim() || isUnderstanding} className="rounded-xl border border-blue-500/20 bg-slate-900/30 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
-                {isUnderstanding ? (
-                  <span className="flex items-center gap-1.5">
-                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
-                    {understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing") || understandStatus.toLowerCase().includes("found")
-                      ? "Analysing directions\u2026"
-                      : "Thinking\u2026"}
-                  </span>
-                ) : "🔍 Understand Query"}
-              </button>
-              {isSubmitting ? (
-                <button onClick={handleStop} className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-400 transition hover:bg-red-500/20">
-                  ⏹ Stop Run
-                </button>
-              ) : (
-                <button onClick={() => void handleSearch()} disabled={!query.trim() || isSubmitting} className="rounded-xl bg-blue-500 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60">
-                  🚀 Run Search
-                </button>
-              )}
-            </div>
+            {/* Inline query analysis — small lighter text while a deep search is running */}
+            {plannerThinking && isSubmitting && !result && (
+              <div className="mt-1.5 px-1 text-[10px] leading-snug text-slate-500/90">
+                {plannerThinking.planner_summary && (
+                  <div className="italic">{plannerThinking.planner_summary}</div>
+                )}
+                {(plannerThinking.search_focus || plannerThinking.query_type || (plannerThinking.agents_planned?.length ?? 0) > 0) && (
+                  <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[9.5px] text-slate-500/70">
+                    {plannerThinking.search_focus && <span><span className="text-slate-600/80">Focus:</span> {plannerThinking.search_focus}</span>}
+                    {plannerThinking.query_type && <span><span className="text-slate-600/80">Type:</span> {plannerThinking.query_type}</span>}
+                    {plannerThinking.agents_planned && plannerThinking.agents_planned.length > 0 && (
+                      <span><span className="text-slate-600/80">Agents:</span> {plannerThinking.agents_planned.join(", ")}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
+            {/* Understanding progress bar */}
             {isUnderstanding && (() => {
               const pct = understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing")
                 ? 75
@@ -2022,40 +2738,17 @@ ${html}
                   : 15;
               return (
                 <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                  <div
-                    className="h-full rounded-full bg-blue-500 transition-all duration-700"
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div className="h-full rounded-full bg-blue-500 transition-all duration-700" style={{ width: `${pct}%` }} />
                 </div>
               );
             })()}
 
-            <div className="mt-2 flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-900/60 p-1">
-              <button
-                onClick={() => setFastMode(true)}
-                className={`flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition ${fastMode ? "bg-blue-500 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
-              >
-                ⚡ Quick Search
-              </button>
-              <button
-                onClick={() => setFastMode(false)}
-                className={`flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition ${!fastMode ? "bg-blue-500 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
-              >
-                🧠 Curated Analysis
-              </button>
-            </div>
-            <p className="mt-1 px-1 text-xs text-slate-500">
-              {fastMode
-                ? "Get results in seconds with smart ranking. Great for rapid literature scanning."
-                : "Deep AI curation with adversarial screening and 6-agent analysis. Best for thorough research."}
-            </p>
-
-            <details
+            {/* Settings panel — controlled */}
+            {settingsOpen && (
+            <div
               className="mt-4 rounded-2xl bg-slate-950/40 px-4 py-3"
-              open={settingsOpen}
-              onToggle={(e) => setSettingsOpen((e.currentTarget as HTMLDetailsElement).open)}
             >
-              <summary className="cursor-pointer select-none text-sm font-semibold text-slate-200">⚙️ Settings & Controls</summary>
+              <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-2" onClick={() => setSettingsOpen(false)}><SlidersHorizontal size={14} /><span>Settings & Controls</span><ChevronDown size={12} className="ml-auto rotate-180" /></div>
               <div className="mt-2 space-y-2.5">
                 {/* Row 1: count + sort */}
                 <div className="grid grid-cols-2 gap-2">
@@ -2105,44 +2798,82 @@ ${html}
                       catch { setUiError("Failed to clear cache."); }
                     }}
                     className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-1 text-xs font-semibold text-slate-400 transition hover:border-red-500/40 hover:text-red-400 hover:bg-red-500/5"
-                  >🗑 Clear Cache</button>
+                  ><span className="flex items-center gap-1.5"><Trash2 size={12} />Clear Cache</span></button>
                   <span className="text-xs text-slate-600">Clears in-memory backend cache</span>
                 </div>
               </div>
-            </details>
+            </div>
+            )}
 
-            <details className="mt-3 rounded-2xl bg-slate-950/40 px-3 py-2.5" open={Boolean(directionData?.directions?.length) && understandOpen} onToggle={e => setUnderstandOpen((e.currentTarget as HTMLDetailsElement).open)}>
-              <summary className="cursor-pointer select-none text-sm font-semibold text-slate-200">🔍 Query Understanding</summary>
+            {/* Query Understanding section — hidden until the user actually runs the analysis
+                (or has run it previously). Stays out of the way on a fresh workspace. */}
+            {(isUnderstanding || Boolean(directionData?.directions?.length)) && (
+            <div className="mt-5 rounded-xl bg-[var(--ats-bg-card-muted)] px-3 py-2.5">
+              <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-1" onClick={() => setUnderstandOpen(o => !o)}>
+                <Search size={14} /><span>Query Understanding</span>
+                <ChevronDown size={12} className={`ml-auto transition-transform duration-200 ${understandOpen ? "" : "rotate-180"}`} />
+              </div>
+              {understandOpen && (
               <div className="mt-3">
                 {directionData?.directions?.length ? (
                   <>
-                    {/* 6 direction cards — 2-column grid */}
-                    <div className="grid grid-cols-2 gap-2">
+                    {/* 6 direction cards — fixed 2-column × 3-row grid; sub-options expand inside the selected card */}
+                    <div className="grid grid-cols-2 gap-2 items-start">
                       {directionData.directions.map((dir, di) => {
-                        const isSelDir = (selectedDirIndex ?? directionData.recommended_direction ?? 0) === di;
+                        // Selection is strictly user-driven; no recommended-as-default so the
+                        // user can pick a main direction without committing to a sub-option.
+                        const isSelDir = selectedDirIndex === di;
                         return (
-                          <div key={di} className={`rounded-xl border p-2 cursor-pointer transition-all ${isSelDir ? "border-blue-500/50 bg-blue-500/8 col-span-2" : "border-slate-800 bg-slate-900/30 hover:border-slate-700"}`}
-                            onClick={() => { setSelectedDirIndex(di); setSelectedSubIndex(0); setCustomQueryEnabled(false); }}>
-                            <div className={`text-xs font-semibold leading-snug ${isSelDir ? "text-blue-300" : "text-slate-300"}`}>
-                              {di === (directionData.recommended_direction ?? 0) && <span className="mr-1 text-amber-400">⭐</span>}
-                              {dir.label}
+                          <div key={di} className={`rounded-xl border p-2 cursor-pointer transition-all ${isSelDir ? "border-blue-500/50 bg-blue-500/8" : "border-slate-800 bg-slate-900/30 hover:border-slate-700"}`}
+                            onClick={() => {
+                              // Clicking an already-selected direction toggles it off.
+                              if (isSelDir) {
+                                setSelectedDirIndex(null);
+                                setSelectedSubIndex(null);
+                              } else {
+                                setSelectedDirIndex(di);
+                                setSelectedSubIndex(null);          // sub is opt-in too
+                                setCustomQueryEnabled(false);
+                              }
+                            }}>
+                            <div className={`flex items-start gap-1.5 text-xs font-semibold leading-snug ${isSelDir ? "text-blue-300" : "text-slate-300"}`}>
+                              <span className={`shrink-0 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-md px-1 text-[10px] font-bold tabular-nums ${isSelDir ? "bg-blue-500/20 text-blue-300" : "bg-slate-800 text-slate-400"}`}>{di + 1}</span>
+                              {di === (directionData.recommended_direction ?? 0) && <Star size={10} className="shrink-0 mt-0.5 fill-amber-400 text-amber-400" />}
+                              <span className="min-w-0">{dir.label}</span>
                             </div>
                             {dir.description && <div className="mt-0.5 text-[10px] leading-tight text-slate-500 line-clamp-2">{dir.description}</div>}
-                            {/* Sub-options — only visible when this direction is selected */}
+                            {/* Sub-options — visible only when this direction is selected. A sub is optional;
+                                re-clicking the same one cancels it. */}
                             {isSelDir && dir.sub_options?.length > 0 && (
                               <div className="mt-2 space-y-1">
                                 {dir.sub_options.map((sub, si) => {
-                                  const isSelSub = (selectedSubIndex ?? 0) === si && !customQueryEnabled;
+                                  const isSelSub = selectedSubIndex === si && !customQueryEnabled;
+                                  const toggleSub = (e: React.SyntheticEvent) => {
+                                    // Stop propagation so the parent direction card's onClick doesn't
+                                    // fire and toggle the direction itself off.
+                                    e.stopPropagation();
+                                    setSelectedSubIndex(prev => (prev === si ? null : si));
+                                    setCustomQueryEnabled(false);
+                                  };
                                   return (
-                                    <label key={si}
-                                      className={`flex items-start gap-1.5 rounded-lg border px-2 py-1 cursor-pointer transition-all ${isSelSub ? "border-blue-400/40 bg-blue-400/10" : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"}`}
-                                      onClick={(e) => { e.stopPropagation(); setSelectedSubIndex(si); setCustomQueryEnabled(false); }}>
-                                      <input type="radio" name="sub-option" checked={isSelSub} onChange={() => { setSelectedSubIndex(si); setCustomQueryEnabled(false); }} className="mt-0.5 shrink-0" />
+                                    // Plain <div> (not <label>) so clicking anywhere in the row goes
+                                    // through one handler. <label> + <input radio> previously fired
+                                    // twice on click (input onClick + label onClick), toggling the
+                                    // selection to-and-back and making the row look unresponsive.
+                                    <div key={si}
+                                      role="radio"
+                                      aria-checked={isSelSub}
+                                      tabIndex={0}
+                                      className={`flex items-start gap-1.5 rounded-lg border px-2 py-1 cursor-pointer transition-all ${isSelSub ? "border-blue-500/60 bg-blue-500/15" : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"}`}
+                                      onClick={toggleSub}
+                                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSub(e); } }}>
+                                      {/* Decorative radio disc — visual only, click is handled by the row. */}
+                                      <span aria-hidden className={`mt-1 shrink-0 h-3 w-3 rounded-full border ${isSelSub ? "border-blue-400 bg-blue-500" : "border-slate-600 bg-transparent"}`} />
                                       <div className="min-w-0">
-                                        <div className={`text-[11px] font-semibold leading-snug ${isSelSub ? "text-blue-200" : "text-slate-300"}`}>{sub.label}</div>
+                                        <div className={`text-[11px] font-semibold leading-snug ${isSelSub ? "text-blue-300" : "text-slate-300"}`}>{sub.label}</div>
                                         {sub.reason && <div className="mt-0.5 text-[10px] leading-tight text-slate-500">{sub.reason}</div>}
                                       </div>
-                                    </label>
+                                    </div>
                                   );
                                 })}
                               </div>
@@ -2161,12 +2892,22 @@ ${html}
                     </label>
                   </>
                 ) : (
-                  <div className="text-xs text-slate-500">Click &ldquo;Understand Query&rdquo; to explore 6 research directions before searching.</div>
+                  <div className="text-xs text-slate-500">Run Query Understanding to see the query here.</div>
                 )}
               </div>
-            </details>
+              )}
+            </div>
+            )}
 
-            <div className={`mt-3 rounded-3xl border p-5 transition-colors duration-300 ${isSubmitting ? "border-blue-500/40 bg-[#0a1a35]" : "border-blue-500/20 bg-[#09162d]"}`}>
+            {/* Divider between the action area and retrieved results — hidden alongside the
+                Current Run block when idle, so the space below action row stays clean. */}
+            {(isSubmitting || job?.status === "done" || job?.status === "error") && (
+              <hr className="mt-5 border-slate-700/40" />
+            )}
+
+            {/* Current run status — only rendered while a search is in flight or just completed */}
+            {(isSubmitting || job?.status === "done" || job?.status === "error") && (
+            <div className={`ats-card mt-4 p-5 ${isSubmitting ? "border-blue-500/40 bg-[var(--ats-bg-accent-soft)]" : "border-blue-500/20 bg-[var(--ats-bg-card)]"}`}>
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] ${job?.status === "error" ? "text-red-400" : "text-blue-400"}`}>
@@ -2176,7 +2917,7 @@ ${html}
                     {job?.status === "done" ? "Search complete" : job?.status === "error" ? "Search failed" : "Current run"}
                   </div>
                   <div className={`mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm text-slate-100 ${isSubmitting ? "animate-pulse" : ""}`}>
-                    <span>{job?.message || "Waiting for backend…"}</span>
+                    <span>{job?.message || (isSubmitting ? "Connecting…" : "Awaiting input")}</span>
                     {isSubmitting && retrievalCount !== null && (
                       <span className="text-xs text-blue-300 font-semibold shrink-0">
                         · {retrievalCount}{candidateLimit ? `/${candidateLimit}` : ""} papers
@@ -2189,9 +2930,10 @@ ${html}
                   {isSubmitting && (
                     <button
                       onClick={handleStop}
-                      className="shrink-0 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition hover:bg-red-500/20"
+                      className="shrink-0 flex items-center gap-1.5 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition hover:bg-red-500/20"
                     >
-                      ⏹ Stop
+                      <Square size={12} fill="currentColor" />
+                      <span>Stop</span>
                     </button>
                   )}
                   <div className="text-right text-sm text-slate-300">
@@ -2210,28 +2952,31 @@ ${html}
 
               {/* Deep mode: completed agents badges only (no brief indicator here) */}
               {!fastMode && isSubmitting && (() => {
-                const completedAgents = (["researcher","theorist","methodologist","critic","gap_analyst","verifier"] as const)
+                const completedAgents = (["evidence_mapper","scholar","gap_analyst","verifier"] as const)
                   .filter(k => agentData[k]);
                 if (completedAgents.length === 0) return null;
                 const agentLabels: Record<string,string> = {
-                  researcher:"Researcher", theorist:"Theorist", methodologist:"Methodologist",
-                  critic:"Critic", gap_analyst:"Gap Analyst", verifier:"Verifier"
+                  evidence_mapper:"Evidence Mapper", scholar:"Scholar",
+                  gap_analyst:"Gap Analyst", verifier:"Verifier"
                 };
                 return (
                   <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 px-0.5">
                     {completedAgents.map(key => (
                       <span key={key} className="flex items-center gap-1 text-[10px] text-emerald-400">
-                        <span>✓</span><span>{agentLabels[key]}</span>
+                        <Check size={10} strokeWidth={3} /><span>{agentLabels[key]}</span>
                       </span>
                     ))}
                   </div>
                 );
               })()}
             </div>
+            )}
+
+            {/* Planner thinking is rendered inline under the Query box above — no separate panel */}
 
             <div className="mt-6 border-t border-slate-800 pt-6">
               <div className="mb-3 flex items-center gap-3">
-                <span className="text-3xl font-black">📚 Retrieved Papers</span>
+                <span className="flex items-center gap-2 text-xl font-black"><BookOpen size={18} /><span>Retrieved Papers</span></span>
                 {papersAreStreaming && (
                   <span className="flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-xs font-semibold text-blue-400">
                     <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
@@ -2284,12 +3029,15 @@ ${html}
                               <button
                                 onClick={() => inLab ? removeFromLab(paperKey) : addToLab(paper, paperKey)}
                                 title={inLab ? "Remove from Synthesis Lab" : "Add to Synthesis Lab"}
-                                className={`shrink-0 mt-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all ${
+                                className={`shrink-0 mt-1 flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all ${
                                   inLab
-                                    ? "border-violet-500/50 bg-violet-500/10 text-violet-400 hover:border-rose-500/50 hover:text-rose-400 hover:bg-rose-500/10"
-                                    : "border-slate-700 bg-slate-900/50 text-slate-500 hover:border-violet-500/50 hover:text-violet-400 hover:bg-violet-500/10"
+                                    ? "border-blue-500/50 bg-blue-500/10 text-blue-300 hover:border-rose-500/50 hover:text-rose-400 hover:bg-rose-500/10"
+                                    : "border-slate-700 bg-slate-900/50 text-slate-500 hover:border-blue-500/50 hover:text-blue-400 hover:bg-blue-500/10"
                                 }`}
-                              ><span key={inLab ? "in" : "out"}>{inLab ? "✓ Lab" : "+ Lab"}</span></button>
+                              >
+                                {inLab ? <Check size={11} strokeWidth={3} /> : <Plus size={11} strokeWidth={3} />}
+                                <span>Lab</span>
+                              </button>
                             );
                           })()}
                         </div>
@@ -2321,6 +3069,29 @@ ${html}
                           <span><span className="font-semibold text-slate-300">Authors:</span> {paper.authors || "Unknown authors"}</span>
                           <span><span className="font-semibold text-slate-300">Year:</span> {paper.year || "Unknown year"}</span>
                           <span><span className="font-semibold text-slate-300">Source:</span> {paper.source || "Unknown source"}</span>
+                          {(() => {
+                            const raw = paper.citation_count;
+                            // Backend returns null/undefined when the source API did not expose a citation count.
+                            // Surface that explicitly instead of hiding the field so readers can tell
+                            // "undisclosed" apart from "zero citations".
+                            if (raw === null || raw === undefined || raw === "") {
+                              return (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-slate-600/50 bg-slate-700/30 px-2 py-0.5 text-[11px] font-medium text-slate-400" title="The source API did not publish a citation count for this paper.">
+                                  <Quote size={10} />
+                                  <span>Citations undisclosed</span>
+                                </span>
+                              );
+                            }
+                            const cn = Number(raw);
+                            if (!Number.isFinite(cn) || cn < 0) return null;
+                            const compact = cn >= 1000 ? `${(cn / 1000).toFixed(cn >= 10000 ? 0 : 1)}k` : String(cn);
+                            return (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[11px] font-semibold text-blue-300" title={`${cn} citations`}>
+                                <Quote size={10} />
+                                <span className="tabular-nums">{compact}</span>
+                              </span>
+                            );
+                          })()}
                           <span><span className="font-semibold text-slate-300">OA:</span> {String(Boolean(paper.is_oa))}</span>
                           {paper.paper_type_label && paper.paper_type_label !== "theory/other" && (
                             <span><span className="font-semibold text-slate-300">Type:</span> {paper.paper_type_label}</span>
@@ -2332,60 +3103,62 @@ ${html}
 
                         {/* One-line Insight */}
                         {paper.recommendation_reason && (
-                          <div className="mt-1.5 border-l-2 border-slate-700 pl-3 text-xs text-slate-400 break-words leading-[1.35]">
-                            💡 {paper.recommendation_reason}
+                          <div className="mt-1.5 flex items-start gap-1.5 border-l-2 border-slate-700 pl-3 text-xs text-slate-400 break-words leading-[1.35]">
+                            <Lightbulb size={11} className="shrink-0 mt-0.5 text-amber-400/80" />
+                            <span>{paper.recommendation_reason}</span>
                           </div>
                         )}
 
-                        {/* Action buttons */}
-                        <div className="mt-3 flex flex-wrap gap-2">
+                        {/* Action buttons — single horizontal row; each shrinks + truncates
+                            instead of reflowing to a second row as the panel narrows. */}
+                        <div className="mt-3 flex flex-nowrap items-center gap-2 overflow-hidden">
                           {/* Open Paper */}
                           {paper.url && (
                             <a href={paper.url} target="_blank" rel="noreferrer"
-                               className="rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 transition-all">
-                              🔗 Open Paper
+                               className="shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 transition-all">
+                              <ExternalLink size={12} className="shrink-0" /><span className="truncate">Open Paper</span>
                             </a>
                           )}
                           {/* Deep Read */}
                           <button
                             onClick={() => void runDeepRead(paper, paperKey)}
                             disabled={!hasDownloadSource(paper) || deepReadLoading[paperKey]}
-                            className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                            className={`shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
                               deepReadLoading[paperKey]
                                 ? "border-blue-500/60 bg-blue-500/15 text-blue-300 animate-pulse"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
                             }`}
                           >
-                            {deepReadLoading[paperKey] ? "🔬 Running…" : "🔬 Deep Read"}
+                            <Microscope size={12} className="shrink-0" /><span className="truncate">{deepReadLoading[paperKey] ? "Running…" : "Deep Read"}</span>
                           </button>
                           {/* Download PDF */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/download-original"), { paper: toBackendPaper(paper) }, `${paper.title || "paper"}.pdf`, `${paperKey}-original`)}
                             disabled={!hasDownloadSource(paper) || originalLoading[`${paperKey}-original`]}
-                            className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                            className={`shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
                               originalLoading[`${paperKey}-original`]
                                 ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-300 animate-pulse"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
                             }`}
                           >
-                            {originalLoading[`${paperKey}-original`] ? "⬇ Downloading…" : "⬇ Download PDF"}
+                            <Download size={12} className="shrink-0" /><span className="truncate">{originalLoading[`${paperKey}-original`] ? "Downloading…" : "Download PDF"}</span>
                           </button>
                           {/* Translate PDF + inline language selector */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/translate-pdf"), { paper: toBackendPaper(paper), target_languages: langs }, `${paper.title || "paper"}_${(langs[0] || "translated").replace(/\s*\(.*?\)/g, "").trim()}.pdf`, `${paperKey}-translate`)}
                             disabled={!hasDownloadSource(paper) || translateLoading[`${paperKey}-translate`]}
-                            className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                            className={`shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
                               translateLoading[`${paperKey}-translate`]
                                 ? "border-purple-500/60 bg-purple-500/10 text-purple-300 animate-pulse"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
                             }`}
                           >
-                            {translateLoading[`${paperKey}-translate`] ? "🌐 Translating…" : "🌐 Translate PDF"}
+                            <Globe size={12} className="shrink-0" /><span className="truncate">{translateLoading[`${paperKey}-translate`] ? "Translating…" : "Translate PDF"}</span>
                           </button>
                           <select
                             value={langs[0] ?? "Chinese (Simplified)"}
                             onChange={(e) => setTranslationLanguages((prev) => ({ ...prev, [paperKey]: [e.target.value] }))}
-                            className="rounded-xl border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-400 outline-none focus:border-purple-500/50 cursor-pointer"
+                            className="shrink min-w-0 max-w-[9rem] rounded-xl border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-400 outline-none focus:border-purple-500/50 cursor-pointer truncate"
                           >
                             {["Chinese (Simplified)","Chinese (Traditional)","English","Japanese","Korean","Spanish","French","German","Indonesian"].map((lang) => (
                               <option key={lang} value={lang}>{lang}</option>
@@ -2410,7 +3183,7 @@ ${html}
                         {/* Deep Reading result — collapsible */}
                         {deepRead && (
                           <details className="mt-3 rounded-xl bg-blue-500/5" open>
-                            <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-bold text-slate-200 hover:text-white transition-colors">🔬 Deep Reading Report</summary>
+                            <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-bold text-slate-200 hover:text-white transition-colors inline-flex items-center gap-2"><Microscope size={14} />Deep Reading Report</summary>
                             <div className="px-4 pb-4 pt-1">
                               {deepRead.academic_summary && <div className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-300">{deepRead.academic_summary}</div>}
                               {Array.isArray(deepRead.key_findings) && deepRead.key_findings.length > 0 && (
@@ -2422,7 +3195,7 @@ ${html}
                                 </div>
                               )}
                               {/* Download deep read report */}
-                              <div className="mt-3 flex items-center gap-1.5 flex-wrap">
+                              <div className="mt-3 flex flex-nowrap items-center gap-1.5 overflow-hidden">
                                 <button
                                   onClick={() => {
                                     const text = [
@@ -2433,12 +3206,12 @@ ${html}
                                     ].join("\n");
                                     void navigator.clipboard.writeText(text);
                                   }}
-                                  className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-blue-400 hover:border-blue-500/50 transition-colors"
-                                >📋 Copy</button>
+                                  className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-blue-400 hover:border-blue-500/50 transition-colors"
+                                ><ClipboardList size={11} className="shrink-0" /><span className="truncate">Copy</span></button>
                                 <select
                                   id={`deepread-fmt-${paperKey}`}
                                   defaultValue="html"
-                                  className="rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-slate-400 focus:outline-none"
+                                  className="shrink-0 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-slate-400 focus:outline-none"
                                 >
                                   <option value="html">HTML</option>
                                   <option value="txt">TXT</option>
@@ -2457,8 +3230,8 @@ ${html}
                                     const slug = (paper.title || "deep_read").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 50);
                                     downloadTextAs(text, `DeepRead_${slug}`, fmt);
                                   }}
-                                  className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 transition-colors"
-                                >⬇ Download</button>
+                                  className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 transition-colors"
+                                ><span aria-hidden className="shrink-0">⬇</span><span className="truncate">Download</span></button>
                               </div>
                             </div>
                           </details>
@@ -2481,93 +3254,88 @@ ${html}
                 <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">No papers returned yet.</div>
               )}
             </div>
+            </div>
           </section>
 
-          <DividerScrollbar onResizeStart={() => startDrag("center")} sectionRef={centerSectionRef} />
+          <DividerScrollbar onResizeStart={() => startDrag("center")} onSnap={snapDividerToDefault} sectionRef={centerSectionRef} />
 
           {/* Analytics column — slides in/out to the right */}
           <div className="relative min-w-0 h-full overflow-hidden rounded-xl">
-            {/* Re-open strip — fills the entire 16 px column when analytics is hidden */}
+            {/* Expand button — at header height on the right edge, square. */}
             <button
               onClick={() => setAnalyticsVisible(true)}
-              title="Show Analytics"
+              title="Show Synthesis Lab"
               style={{
                 opacity: analyticsVisible ? 0 : 1,
                 pointerEvents: analyticsVisible ? "none" : "auto",
                 transition: "opacity 0.15s 0.15s ease",
               }}
-              className="absolute inset-0 z-20 flex items-center justify-center rounded-xl border border-slate-700/60 bg-[var(--ats-bg-section)] text-[10px] text-slate-500 hover:text-blue-400 hover:border-blue-500/50 transition-colors"
-            >‹</button>
-            {/* ── Right panel: Analytics | Synthesis Lab ── */}
+              className="absolute top-[11px] right-2 z-20 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
+            ><PanelRightOpen size={15} /></button>
+            {/* ── Right panel: Synthesis Lab ── */}
             <aside
-              className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] overflow-hidden"
+              data-region="lab"
+              className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] ats-panel overflow-hidden"
               style={{
                 transform: analyticsVisible ? "translateX(0)" : "translateX(105%)",
                 transition: "transform 0.35s cubic-bezier(0.4,0,0.2,1)",
               }}
             >
-              {/* Tab bar */}
-              <div className="shrink-0 flex items-center gap-1 border-b border-slate-800/80 px-3 pt-3">
-                <button
-                  onClick={() => setRightTab("analytics")}
-                  className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-2xl font-bold transition-colors ${
-                    rightTab === "analytics"
-                      ? "bg-slate-900/70 text-slate-100 border-b-2 border-blue-500 -mb-px"
-                      : "text-slate-500 hover:text-slate-300"
-                  }`}
-                >📊 Analytics</button>
-                <button
-                  onClick={() => setRightTab("lab")}
-                  className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-2xl font-bold transition-colors ${
-                    rightTab === "lab"
-                      ? "bg-slate-900/70 text-slate-100 border-b-2 border-violet-500 -mb-px"
-                      : "text-slate-500 hover:text-slate-300"
-                  }`}
-                >
-                  ✍️ Synthesis Lab
+              {/* Collapse button — aligned with header, square. */}
+              <button
+                onClick={() => setAnalyticsVisible(false)}
+                title="Hide panel"
+                className="absolute top-[11px] right-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
+              ><PanelRightClose size={15} /></button>
+              {/* Header bar — trailing padding reserves space for the absolute collapse button. */}
+              <div className="shrink-0 flex items-center gap-1 border-b border-slate-800/60 pl-4 pr-12 py-2.5">
+                <span className="flex items-center gap-2 text-base font-bold text-slate-100">
+                  <PenLine size={16} /><span>Synthesis Lab</span>
                   {labRefs.length > 0 && (
-                    <span className="ml-1 rounded-full bg-violet-500/20 px-2 py-0.5 text-xs text-violet-400 font-bold">{labRefs.length}</span>
+                    <span className="ml-1 rounded-full bg-blue-500/20 px-2 py-0.5 text-xs text-blue-400 font-bold">{labRefs.length}</span>
                   )}
-                </button>
-                <button
-                  onClick={() => setAnalyticsVisible(false)}
-                  title="Hide panel"
-                  className="ml-auto mb-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-700/60 bg-slate-900/40 text-xs text-slate-500 hover:border-blue-500/50 hover:text-blue-400 transition-all"
-                >›</button>
+                </span>
               </div>
 
-              {/* ── Analytics content ── */}
-              <div className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar ${rightTab === "analytics" ? "" : "hidden"}`}>
-                <div className="px-4 pt-3 pb-1">
-                  <div className="text-xs text-slate-500">
-                    {displayedPapers.length > 0
-                      ? `${displayedPapers.length} paper${displayedPapers.length !== 1 ? "s" : ""} · ${fastMode ? "Fast" : "Deep"} mode`
-                      : "Run a search to populate charts"}
+              {/* ── Synthesis Lab content — gated only when nothing has happened yet.
+                  Once the user has added papers, typed core argument, added points,
+                  uploaded files, or generated output, the Lab stays open even if
+                  the current search has no results — their in-progress work is preserved. */}
+              <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
+                {(() => {
+                  const hasLabState =
+                    labRefs.length > 0 ||
+                    labUserFiles.length > 0 ||
+                    labCoreArg.trim().length > 0 ||
+                    labPoints.some(p => p.trim().length > 0) ||
+                    !!labResult ||
+                    labGenerating;
+                  const shouldGate = displayedPapers.length === 0 && !hasLabState;
+                  return shouldGate;
+                })() ? (
+                  <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
+                    <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
+                      Run a search first —<br />
+                      the Synthesis Lab unlocks once retrieved papers are available.
+                    </div>
                   </div>
-                </div>
-                <div className="px-4 pb-4">
-                  <PaperCharts papers={displayedPapers} wide={rightPct > 50} />
-                </div>
-              </div>
-
-              {/* ── Synthesis Lab content ── */}
-              <div className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar ${rightTab === "lab" ? "" : "hidden"}`}>
+                ) : (
                 <div className="px-4 py-4 space-y-4">
 
-                  {/* References */}
+                  {/* References — compact header + tighter empty state for a denser top of Lab. */}
                   <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="text-sm font-semibold text-slate-200">📚 References</span>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><BookOpen size={14} /><span>References</span></span>
                       <span className="text-xs text-slate-500">{labRefs.length} added</span>
                     </div>
                     {labRefs.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-700 py-4 text-center text-xs text-slate-600 leading-6">
-                        Click <span className="text-violet-400 font-semibold">+ Lab</span> on any<br/>paper in the list to add it
+                      <div className="rounded-xl border border-dashed border-slate-700 py-2.5 text-center text-xs text-slate-600 leading-5">
+                        Click <span className="text-violet-400 font-semibold">+ Lab</span> on any paper to add it
                       </div>
                     ) : (
                       <div className="space-y-1.5">
                         {labRefs.map(({ key, paper }) => (
-                          <div key={key} className="flex items-start gap-2 rounded-lg border border-slate-800/60 bg-slate-900/50 px-3 py-2">
+                          <div key={key} className="flex items-start gap-2 rounded-lg border border-slate-800/60 bg-slate-900/50 px-3 py-1.5">
                             <span className="flex-1 text-xs text-slate-300 leading-5 break-words line-clamp-2">{paper.title}</span>
                             <button onClick={() => removeFromLab(key)} className="shrink-0 mt-0.5 text-slate-600 hover:text-rose-400 transition-colors text-xs">✕</button>
                           </div>
@@ -2578,12 +3346,12 @@ ${html}
 
                   <div className="h-px bg-slate-800" />
 
-                  {/* User file upload */}
+                  {/* User file upload — compact dropzone so the top of the Lab stays dense. */}
                   <div>
-                    <label className="text-sm font-semibold text-slate-200">📎 Upload Your Files</label>
-                    <p className="mt-0.5 text-xs text-slate-500">PDF, TXT, MD — drag & drop or click</p>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Upload size={14} /><span>Upload Your Files</span></label>
+                    <p className="mt-0.5 text-[11px] text-slate-500">PDF, TXT, MD — drag & drop or click</p>
                     <label
-                      className="mt-2 flex cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 px-3 py-4 text-xs text-slate-500 transition hover:border-violet-500/50 hover:text-violet-400"
+                      className="mt-1.5 flex cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 px-3 py-2.5 text-xs text-slate-500 transition hover:border-violet-500/50 hover:text-violet-400"
                       onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("border-violet-500/60", "bg-violet-500/5"); }}
                       onDragLeave={(e) => { e.currentTarget.classList.remove("border-violet-500/60", "bg-violet-500/5"); }}
                       onDrop={(e) => {
@@ -2596,7 +3364,7 @@ ${html}
                         });
                       }}
                     >
-                      <span className="text-lg">📂</span>
+                      <FolderOpen size={18} className="text-slate-400" />
                       <span>Drop files here or click to choose</span>
                       <input
                         type="file"
@@ -2625,46 +3393,10 @@ ${html}
                     )}
                   </div>
 
-                  <div className="h-px bg-slate-800" />
-
-                  {/* Core argument */}
+                  {/* Output Type — placed right after Upload so the spec-specific fields
+                      below already reflect the type the user just picked. */}
                   <div>
-                    <label className="text-sm font-semibold text-slate-200">✏️ Core Argument</label>
-                    <textarea
-                      value={labCoreArg}
-                      onChange={e => setLabCoreArg(e.target.value)}
-                      placeholder="State your main thesis or research question…"
-                      rows={3}
-                      className="mt-2 w-full resize-y rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
-                    />
-                  </div>
-
-                  {/* Supporting points */}
-                  <div>
-                    <label className="text-sm font-semibold text-slate-200">📌 Supporting Points</label>
-                    <div className="mt-2 space-y-2">
-                      {labPoints.map((pt, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <input
-                            value={pt}
-                            onChange={e => setLabPoints(prev => prev.map((p, j) => j === i ? e.target.value : p))}
-                            placeholder={`Point ${i + 1}…`}
-                            className="flex-1 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
-                          />
-                          {labPoints.length > 1 && (
-                            <button onClick={() => setLabPoints(prev => prev.filter((_, j) => j !== i))} className="shrink-0 text-slate-600 hover:text-rose-400 transition-colors">✕</button>
-                          )}
-                        </div>
-                      ))}
-                      <button onClick={() => setLabPoints(prev => [...prev, ""])} className="text-xs text-slate-500 hover:text-violet-400 transition-colors">+ Add Point</button>
-                    </div>
-                  </div>
-
-                  <div className="h-px bg-slate-800" />
-
-                  {/* Output type */}
-                  <div>
-                    <label className="text-sm font-semibold text-slate-200">📄 Output Type</label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><FileText size={14} /><span>Output Type</span></label>
                     <select
                       value={labOutputType}
                       onChange={e => setLabOutputType(e.target.value)}
@@ -2681,9 +3413,161 @@ ${html}
                     </select>
                   </div>
 
+                  <div className="h-px bg-slate-800" />
+
+                  {/* Fields below rerender whenever labOutputType changes.
+                      Spec lives in src/lib/lab-fields.ts — edit there to change a type's inputs. */}
+                  {(() => {
+                    const spec = labFieldSpec(labOutputType);
+                    const pointsPh = labPointsPlaceholder(spec);
+                    const hasPoints = spec.pointsLabel !== null && spec.pointsLabel !== undefined;
+                    // Subdued inline label — a small word rather than a chip,
+                    // so the required/optional hint reads as meta-data next to
+                    // the field name instead of a button.
+                    const requiredBadge = (req: boolean) => (
+                      <span className={`ml-1.5 shrink-0 text-[10px] font-normal italic ${req ? "text-amber-400/80" : "text-slate-500/70"}`}>
+                        {req ? "required" : "optional"}
+                      </span>
+                    );
+                    return (
+                      <>
+                        {/* Type blurb — tells the user what the output is */}
+                        {spec.blurb && (
+                          <p className="-mt-2 text-[11px] italic text-slate-500">{spec.blurb}</p>
+                        )}
+
+                        {/* Core argument (label + description + required flag adapt per type) */}
+                        <div>
+                          <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200">
+                            <PenLine size={14} />
+                            <span>{spec.coreLabel}</span>
+                            {requiredBadge(spec.coreRequired)}
+                          </label>
+                          <p className="mt-0.5 text-[11px] leading-snug text-slate-500">{spec.coreDescription}</p>
+                          <textarea
+                            value={labCoreArg}
+                            onChange={e => setLabCoreArg(e.target.value)}
+                            placeholder={spec.corePlaceholder}
+                            rows={spec.coreRows ?? 3}
+                            className="mt-2 w-full resize-y hairline-scrollbar rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
+                          />
+                        </div>
+
+                        {/* Points list — multi-entry by design */}
+                        {hasPoints && (
+                          <div>
+                            <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200">
+                              <ListChecks size={14} />
+                              <span>{spec.pointsLabel}</span>
+                              {requiredBadge(!!spec.pointsRequired)}
+                            </label>
+                            {spec.pointsDescription && (
+                              <p className="mt-0.5 text-[11px] leading-snug text-slate-500">{spec.pointsDescription}</p>
+                            )}
+                            <div className="mt-2 space-y-2">
+                              {labPoints.map((pt, i) => (
+                                <div key={i} className="flex items-center gap-2">
+                                  <input
+                                    value={pt}
+                                    onChange={e => setLabPoints(prev => prev.map((p, j) => j === i ? e.target.value : p))}
+                                    placeholder={pointsPh(i)}
+                                    className="flex-1 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
+                                  />
+                                  {labPoints.length > 1 && (
+                                    <button onClick={() => setLabPoints(prev => prev.filter((_, j) => j !== i))} className="shrink-0 text-slate-600 hover:text-rose-400 transition-colors">✕</button>
+                                  )}
+                                </div>
+                              ))}
+                              <button onClick={() => setLabPoints(prev => [...prev, ""])} className="text-xs text-slate-500 hover:text-violet-400 transition-colors">{spec.pointsAddLabel ?? "+ Add Point"}</button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Spec-specific extras — single or multi depending on field.multi */}
+                        {(spec.extras ?? []).map(field => (
+                          <div key={field.key}>
+                            <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200">
+                              <PenLine size={14} />
+                              <span>{field.label}</span>
+                              {requiredBadge(field.required)}
+                            </label>
+                            <p className="mt-0.5 text-[11px] leading-snug text-slate-500">{field.description}</p>
+                            {field.multi ? (
+                              <div className="mt-2 space-y-2">
+                                {((labExtrasMulti[field.key] ?? [""]).length === 0 ? [""] : (labExtrasMulti[field.key] ?? [""])).map((val, i) => (
+                                  <div key={i} className="flex items-start gap-2">
+                                    {field.rows ? (
+                                      <textarea
+                                        value={val}
+                                        onChange={e => setLabExtrasMulti(prev => {
+                                          const arr = [...(prev[field.key] ?? [""])];
+                                          arr[i] = e.target.value;
+                                          return { ...prev, [field.key]: arr };
+                                        })}
+                                        placeholder={field.placeholder}
+                                        rows={field.rows}
+                                        className="flex-1 resize-y rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
+                                      />
+                                    ) : (
+                                      <input
+                                        value={val}
+                                        onChange={e => setLabExtrasMulti(prev => {
+                                          const arr = [...(prev[field.key] ?? [""])];
+                                          arr[i] = e.target.value;
+                                          return { ...prev, [field.key]: arr };
+                                        })}
+                                        placeholder={field.placeholder}
+                                        className="flex-1 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
+                                      />
+                                    )}
+                                    {((labExtrasMulti[field.key] ?? [""]).length > 1) && (
+                                      <button
+                                        onClick={() => setLabExtrasMulti(prev => ({
+                                          ...prev,
+                                          [field.key]: (prev[field.key] ?? []).filter((_, j) => j !== i),
+                                        }))}
+                                        className="shrink-0 mt-1 text-slate-600 hover:text-rose-400 transition-colors"
+                                      >✕</button>
+                                    )}
+                                  </div>
+                                ))}
+                                <button
+                                  onClick={() => setLabExtrasMulti(prev => ({
+                                    ...prev,
+                                    [field.key]: [...(prev[field.key] ?? [""]), ""],
+                                  }))}
+                                  className="text-xs text-slate-500 hover:text-violet-400 transition-colors"
+                                >{field.addLabel ?? "+ Add"}</button>
+                              </div>
+                            ) : field.rows ? (
+                              <textarea
+                                value={labExtras[field.key] ?? ""}
+                                onChange={e => setLabExtras(prev => ({ ...prev, [field.key]: e.target.value }))}
+                                placeholder={field.placeholder}
+                                rows={field.rows}
+                                className="mt-2 w-full resize-y hairline-scrollbar rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
+                              />
+                            ) : (
+                              <input
+                                value={labExtras[field.key] ?? ""}
+                                onChange={e => setLabExtras(prev => ({ ...prev, [field.key]: e.target.value }))}
+                                placeholder={field.placeholder}
+                                className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500 placeholder:text-slate-600"
+                              />
+                            )}
+                          </div>
+                        ))}
+                      </>
+                    );
+                  })()}
+
+                  <div className="h-px bg-slate-800" />
+
+                  {/* Output Type moved up — placed right after Upload Your Files. */}
+
                   {/* Target pages */}
                   <div>
-                    <label className="text-sm font-semibold text-slate-200">📏 Target Length</label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Ruler size={14} /><span>Target Length</span></label>
                     <div className="mt-2 flex items-center gap-3">
                       <input
                         type="range" min={1} max={15} step={1}
@@ -2698,9 +3582,10 @@ ${html}
                     <p className="mt-1 text-xs text-slate-600">≈ {labTargetPages * 450} words · {Math.min(labTargetPages + 1, 8)} sections</p>
                   </div>
 
-                  {/* Citation format */}
+                  {/* Citation Format — sits directly above Output Language so the two
+                      output-format controls live next to each other in one block. */}
                   <div>
-                    <label className="text-sm font-semibold text-slate-200">📑 Citation Format</label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Quote size={14} /><span>Citation Format</span></label>
                     <select
                       value={labCitationFormat}
                       onChange={e => setLabCitationFormat(e.target.value)}
@@ -2719,7 +3604,7 @@ ${html}
 
                   {/* Output language */}
                   <div>
-                    <label className="text-sm font-semibold text-slate-200">🌐 Output Language</label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Globe size={14} /><span>Output Language</span></label>
                     <select
                       value={labLanguage}
                       onChange={e => setLabLanguage(e.target.value)}
@@ -2748,13 +3633,13 @@ ${html}
                           ? "border border-violet-500/40 bg-violet-500/10 text-violet-300 animate-pulse"
                           : "bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-40"
                       }`}
-                    >{labGenerating ? "🔮 Composing…" : "🔮 Generate Academic Text"}</button>
+                    >{labGenerating ? <span className="flex items-center justify-center gap-1.5"><Sparkles size={14} />Composing…</span> : <span className="flex items-center justify-center gap-1.5"><Sparkles size={14} />Generate Academic Text</span>}</button>
                     {labGenerating && (
                       <button
                         onClick={handleLabStop}
                         className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-3 text-sm font-bold text-red-400 hover:bg-red-500/20 hover:text-red-300 transition-all"
                         title="Stop generation"
-                      >⏹ Stop</button>
+                      ><span className="flex items-center gap-1.5"><Square size={14} />Stop</span></button>
                     )}
                   </div>
 
@@ -2768,7 +3653,7 @@ ${html}
                       <span>Writing model: <span className="text-violet-400 font-semibold">{labWritingModel === "claude" ? "Claude Sonnet" : labWritingModel}</span></span>
                     </button>
                     {labModelOpen && (
-                      <div className="mt-2 flex flex-wrap gap-2">
+                      <div className="mt-2 flex flex-nowrap items-center gap-2 overflow-hidden">
                         {[
                           { id: "gpt-4o-mini", label: "GPT-4o mini", desc: "Fast · default" },
                           { id: "gpt-4o",      label: "GPT-4o",      desc: "Powerful · slower" },
@@ -2777,10 +3662,10 @@ ${html}
                           <button
                             key={m.id}
                             onClick={() => setLabWritingModel(m.id)}
-                            className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${labWritingModel === m.id ? "border-violet-500/60 bg-violet-500/15 text-violet-300" : "border-slate-700 bg-slate-900/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"}`}
+                            className={`shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${labWritingModel === m.id ? "border-violet-500/60 bg-violet-500/15 text-violet-300" : "border-slate-700 bg-slate-900/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"}`}
                           >
-                            {m.label}
-                            <span className="ml-1 font-normal text-slate-500">{m.desc}</span>
+                            <span className="truncate">{m.label}</span>
+                            <span className="truncate font-normal text-slate-500">{m.desc}</span>
                           </button>
                         ))}
                       </div>
@@ -2816,8 +3701,9 @@ ${html}
                           onClick={() => setLabAgentLogOpen(o => !o)}
                           className="flex items-center gap-1.5 text-xs font-bold text-violet-400 hover:text-violet-300 transition-colors"
                         >
-                          <span>{labAgentLogOpen ? "▾" : "▸"}</span>
-                          🤖 Agent Activity
+                          {labAgentLogOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                          <Bot size={12} />
+                          <span>Agent Activity</span>
                           {!labAgentLogOpen && labAgentLog.length > 0 && (
                             <span className="text-slate-500 font-normal">({labAgentLog.length} agents)</span>
                           )}
@@ -2881,19 +3767,27 @@ ${html}
                   {/* Result */}
                   {labResult && (
                     <div>
-                      <div className="flex items-center gap-2 mb-2 flex-wrap">
-                        <span className="text-sm font-semibold text-slate-200">Generated Text</span>
-                        <div className="ml-auto flex items-center gap-1.5 flex-wrap">
-                          {/* Quick copy */}
+                      <div className="flex flex-nowrap items-center gap-2 mb-2 overflow-hidden">
+                        <span className="shrink min-w-0 truncate text-sm font-semibold text-slate-200">Generated Text</span>
+                        <div className="ml-auto flex flex-nowrap items-center gap-1.5 min-w-0">
+                          {/* Quick copy — flips to a "Copied" confirmation for 1.5s after click. */}
                           <button
-                            onClick={() => void navigator.clipboard.writeText(labResult)}
-                            className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-blue-400 hover:border-blue-500/50 transition-colors"
-                          >📋 Copy</button>
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(labResult);
+                                setLabCopied(true);
+                                window.setTimeout(() => setLabCopied(false), 1500);
+                              } catch { /* clipboard may be blocked — silently fail */ }
+                            }}
+                            className={`shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors ${labCopied ? "border-emerald-500/50 text-emerald-400" : "border-slate-700 text-slate-500 hover:text-blue-400 hover:border-blue-500/50"}`}
+                          >
+                            {labCopied ? <><Check size={11} strokeWidth={3} className="shrink-0" /><span className="truncate">Copied</span></> : <><ClipboardList size={11} className="shrink-0" /><span className="truncate">Copy</span></>}
+                          </button>
                           {/* Format selector */}
                           <select
                             value={labDownloadFormat}
                             onChange={e => setLabDownloadFormat(e.target.value as "pdf"|"html"|"txt"|"md")}
-                            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-400 focus:outline-none focus:border-emerald-500/60"
+                            className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-400 focus:outline-none focus:border-emerald-500/60"
                           >
                             <option value="pdf">PDF</option>
                             <option value="html">HTML</option>
@@ -2925,15 +3819,93 @@ ${html}
                                   downloadTextAs(labResult, filename, labDownloadFormat as "html"|"txt"|"md");
                                 }
                               }}
-                              className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 transition-colors"
-                            >⬇ Download</button>
+                              className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 transition-colors"
+                            ><span aria-hidden className="shrink-0">⬇</span><span className="truncate">Download</span></button>
                           )}
                         </div>
                       </div>
-                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
+                      <div translate="no" className="notranslate rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
                         {labResult}
                         {labGenerating && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
+
+                      {/* Translated download — picks a target language + file format
+                          and hits /api/text/translate-export. Kept as a separate row
+                          so the plain-language download controls above remain clear. */}
+                      {!labGenerating && (
+                        <div className="mt-2 flex flex-nowrap items-center gap-1.5 overflow-hidden text-xs">
+                          <span className="shrink min-w-0 truncate text-slate-500">Translate &amp; download:</span>
+                          <select
+                            value={labTranslateLang}
+                            onChange={e => setLabTranslateLang(e.target.value)}
+                            className="shrink min-w-0 max-w-[9rem] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60 truncate"
+                          >
+                            {["Chinese (Simplified)", "Chinese (Traditional)", "English", "Japanese", "Korean", "Spanish", "French", "German", "Indonesian", "Arabic"].map(l => (
+                              <option key={l} value={l}>{l}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={labTranslateFormat}
+                            onChange={e => setLabTranslateFormat(e.target.value as "pdf"|"md"|"txt")}
+                            className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60"
+                          >
+                            <option value="pdf">PDF</option>
+                            <option value="md">Markdown</option>
+                            <option value="txt">TXT</option>
+                          </select>
+                          <button
+                            onClick={async () => {
+                              // Second click cancels the in-flight request.
+                              if (labTranslating) {
+                                labTranslateAbortRef.current?.abort();
+                                labTranslateAbortRef.current = null;
+                                setLabTranslating(false);
+                                return;
+                              }
+                              const controller = new AbortController();
+                              labTranslateAbortRef.current = controller;
+                              try {
+                                setLabTranslating(true);
+                                const title = ({
+                                  literature_review:     "Literature Review",
+                                  theoretical_framework: "Theoretical Framework",
+                                  research_proposal:     "Research Proposal",
+                                  discussion:            "Discussion",
+                                  introduction:          "Introduction",
+                                  conclusion:            "Conclusion",
+                                  abstract:              "Abstract",
+                                  argumentative_essay:   "Academic Essay",
+                                } as Record<string,string>)[labOutputType] ?? "Lab Output";
+                                const res = await fetchWithApiFallback("/api/text/translate-export", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ text: labResult, target_language: labTranslateLang, title, file_format: labTranslateFormat }),
+                                  signal: controller.signal,
+                                }, true);
+                                if (!res.ok) throw new Error(`Translate failed: ${res.status}`);
+                                const blob = await res.blob();
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url;
+                                const ext = labTranslateFormat;
+                                a.download = `${title.replace(/\s+/g, "_")}_${labTranslateLang.replace(/[()\s]/g, "")}.${ext}`;
+                                a.click();
+                                URL.revokeObjectURL(url);
+                              } catch (err) {
+                                if ((err as { name?: string })?.name !== "AbortError") {
+                                  console.warn("[translate-export] failed:", err);
+                                }
+                              } finally {
+                                setLabTranslating(false);
+                                labTranslateAbortRef.current = null;
+                              }
+                            }}
+                            className={`shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors ${labTranslating ? "border-red-500/40 bg-red-500/10 text-red-300 animate-pulse" : "border-slate-700 text-slate-300 hover:border-emerald-500/50 hover:text-emerald-400"}`}
+                          >
+                            {labTranslating ? <><Square size={11} fill="currentColor" className="shrink-0" /><span className="truncate">Cancel</span></> : <><Globe size={11} className="shrink-0" /><span className="truncate">Download translation</span></>}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -2945,47 +3917,109 @@ ${html}
                         className="w-full flex items-center gap-2 px-3 py-2.5 text-xs font-bold text-amber-400 hover:text-amber-300 transition-colors"
                       >
                         <span>{labNotesOpen ? "▾" : "▸"}</span>
-                        💡 Reviewer Improvement Notes
+                        <Lightbulb size={12} />
+                        <span>Reviewer Improvement Notes</span>
                         {!labNotesOpen && <span className="text-slate-500 font-normal">(click to expand)</span>}
                       </button>
                       {labNotesOpen && (
                         <div className="px-3 pb-3 space-y-2.5">
-                          {labReviewerNotes.citation_gaps?.length > 0 && (
+                          {/* Input-completeness block — surfaces which fields from the Lab spec were
+                              left blank (deterministic audit from the backend) plus any LLM-written
+                              suggestions on how fuller input would have improved the draft. */}
+                          {((labReviewerNotes.completeness?.missing?.length ?? 0) > 0 ||
+                            (labReviewerNotes.completeness?.thin?.length ?? 0) > 0 ||
+                            (labReviewerNotes.missing_inputs?.length ?? 0) > 0) && (
                             <div>
-                              <div className="text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1">📌 Citation Gaps</div>
+                              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1"><Lightbulb size={10} />Missing / Improvable Input</div>
                               <ul className="space-y-1">
-                                {labReviewerNotes.citation_gaps.map((note, i) => (
+                                {(labReviewerNotes.completeness?.missing ?? []).map((m, i) => (
+                                  <li key={`m-${i}`} className="text-xs text-slate-400 flex gap-1.5">
+                                    <span className="text-rose-400/80 shrink-0">✕</span>
+                                    <span><span className="text-rose-300">Not provided:</span> {m}</span>
+                                  </li>
+                                ))}
+                                {(labReviewerNotes.completeness?.thin ?? []).map((t, i) => (
+                                  <li key={`t-${i}`} className="text-xs text-slate-400 flex gap-1.5">
+                                    <span className="text-amber-400/80 shrink-0">~</span>
+                                    <span>{t}</span>
+                                  </li>
+                                ))}
+                                {(labReviewerNotes.missing_inputs ?? []).map((m, i) => (
+                                  <li key={`ai-${i}`} className="text-xs text-slate-400 flex gap-1.5">
+                                    <span className="text-amber-500 shrink-0">·</span>{m}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {(labReviewerNotes.citation_gaps?.length ?? 0) > 0 && (
+                            <div>
+                              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1"><Pin size={10} />Citation Gaps</div>
+                              <ul className="space-y-1">
+                                {(labReviewerNotes.citation_gaps ?? []).map((note, i) => (
                                   <li key={i} className="text-xs text-slate-400 flex gap-1.5"><span className="text-amber-500 shrink-0">·</span>{note}</li>
                                 ))}
                               </ul>
                             </div>
                           )}
-                          {labReviewerNotes.data_suggestions?.length > 0 && (
+                          {(labReviewerNotes.data_suggestions?.length ?? 0) > 0 && (
                             <div>
-                              <div className="text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1">📊 Data &amp; Evidence</div>
+                              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1"><BarChartIcon size={10} />Data &amp; Evidence</div>
                               <ul className="space-y-1">
-                                {labReviewerNotes.data_suggestions.map((note, i) => (
+                                {(labReviewerNotes.data_suggestions ?? []).map((note, i) => (
                                   <li key={i} className="text-xs text-slate-400 flex gap-1.5"><span className="text-amber-500 shrink-0">·</span>{note}</li>
                                 ))}
                               </ul>
                             </div>
                           )}
-                          {labReviewerNotes.argument_suggestions?.length > 0 && (
+                          {(labReviewerNotes.argument_suggestions?.length ?? 0) > 0 && (
                             <div>
-                              <div className="text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1">🎯 Core Argument</div>
+                              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1"><Target size={10} />Core Argument</div>
                               <ul className="space-y-1">
-                                {labReviewerNotes.argument_suggestions.map((note, i) => (
+                                {(labReviewerNotes.argument_suggestions ?? []).map((note, i) => (
                                   <li key={i} className="text-xs text-slate-400 flex gap-1.5"><span className="text-amber-500 shrink-0">·</span>{note}</li>
                                 ))}
                               </ul>
                             </div>
                           )}
-                          {labReviewerNotes.supporting_points?.length > 0 && (
+                          {(labReviewerNotes.supporting_points?.length ?? 0) > 0 && (
                             <div>
-                              <div className="text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1">➕ Suggested Supporting Points</div>
+                              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1"><Plus size={10} />Suggested Supporting Points</div>
                               <ul className="space-y-1">
-                                {labReviewerNotes.supporting_points.map((note, i) => (
+                                {(labReviewerNotes.supporting_points ?? []).map((note, i) => (
                                   <li key={i} className="text-xs text-slate-400 flex gap-1.5"><span className="text-amber-500 shrink-0">·</span>{note}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {/* Paper-usage report — tells the user which of their selected references
+                              actually made it into the draft, which were read but skipped (and why),
+                              and which couldn't be read (so they know why a paper may have been ignored). */}
+                          {labReviewerNotes.paper_usage && (labReviewerNotes.paper_usage.total ?? 0) > 0 && (
+                            <div className="pt-1 border-t border-amber-500/15">
+                              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400/80 uppercase tracking-wide mb-1"><BookOpen size={10} />Paper usage</div>
+                              <ul className="space-y-1">
+                                {(labReviewerNotes.paper_usage.used ?? []).map(u => (
+                                  <li key={`u-${u.index}`} className="text-xs text-slate-400 flex gap-1.5">
+                                    <span className="text-emerald-400 shrink-0 tabular-nums">[{u.index}]</span>
+                                    <span><span className="text-emerald-300">Used —</span> {u.note || "cited in the draft"}</span>
+                                  </li>
+                                ))}
+                                {(labReviewerNotes.paper_usage.unused ?? []).map(u => (
+                                  <li key={`x-${u.index}`} className="text-xs text-slate-400 flex gap-1.5">
+                                    <span className="text-slate-500 shrink-0 tabular-nums">[{u.index}]</span>
+                                    <span><span className="text-slate-300">Not used —</span> {u.reason || "reviewer judged it off-topic for this brief"}</span>
+                                  </li>
+                                ))}
+                                {(labReviewerNotes.paper_usage.unreadable ?? []).map(u => (
+                                  <li key={`q-${u.index}`} className="text-xs text-slate-400 flex gap-1.5">
+                                    <span className="text-rose-400 shrink-0 tabular-nums">[{u.index}]</span>
+                                    <span>
+                                      <span className="text-rose-300">Unreadable —</span> {u.reason || "abstract/body was missing"}
+                                      {" "}
+                                      <span className="text-slate-600">(tip: try Deep Read or upload the PDF under Files to give the writer full text)</span>
+                                    </span>
+                                  </li>
                                 ))}
                               </ul>
                             </div>
@@ -2996,6 +4030,7 @@ ${html}
                   )}
 
                 </div>
+                )}
               </div>
             </aside>
           </div>
@@ -3029,17 +4064,19 @@ ${html}
                     {/* Menu items */}
                     <div className="py-1.5">
                       {([
-                        { key: "profile",      label: "Profile" },
-                        { key: "accounts",     label: "Accounts" },
-                        { key: "settings",     label: "Settings" },
-                        { key: "subscription", label: "Subscription" },
-                        { key: "help",         label: "Help" },
-                      ] as const).map(({ key, label }) => (
+                        { key: "profile",      label: "Profile",      icon: <User size={14} /> },
+                        { key: "accounts",     label: "Accounts",     icon: <Users size={14} /> },
+                        { key: "settings",     label: "Settings",     icon: <Settings size={14} /> },
+                        { key: "subscription", label: "Subscription", icon: <CreditCard size={14} /> },
+                        { key: "legal",        label: "Terms & Notices", icon: <FileText size={14} /> },
+                        { key: "help",         label: "Help",         icon: <HelpCircle size={14} /> },
+                      ] as const).map(({ key, label, icon }) => (
                         <button
                           key={key}
                           onClick={() => { setUserPanel(key); setUserMenuOpen(false); }}
-                          className="w-full flex items-center px-4 py-2 text-sm text-slate-300 hover:bg-slate-800/60 hover:text-slate-100 transition-colors text-left"
+                          className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800/60 hover:text-slate-100 transition-colors text-left"
                         >
+                          <span className="text-slate-500">{icon}</span>
                           {label}
                         </button>
                       ))}
@@ -3236,12 +4273,14 @@ ${html}
                     const d = new Date(item.updated_at);
                     const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
                     const dateStr = d.toLocaleDateString([], { year: "2-digit", month: "2-digit", day: "2-digit" });
-                    // Dot color: blue = newest (i===0), green = search with understand, amber = direct search or understand-only
+                    // Dot color: blue = newest (i===0), green = quick search, amber = curated (deep) search
                     const dotCls = i === 0
                       ? "border-blue-500 bg-blue-500/40"
-                      : (item.entryType === "search" && item.usedUnderstand)
-                        ? "border-emerald-500 bg-emerald-500/20"
-                        : "border-amber-500 bg-amber-500/20";
+                      : item.entryType === "understand"
+                        ? "border-slate-500 bg-slate-500/20"
+                        : item.isFast
+                          ? "border-emerald-500 bg-emerald-500/20"
+                          : "border-amber-500 bg-amber-500/20";
                     return (
                       <div
                         key={item.id}
@@ -3287,18 +4326,34 @@ ${html}
 
       {/* ── User panel modals ─────────────────────────────────────────────────── */}
       {userPanel && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6" onClick={() => setUserPanel(null)}>
-          <div className="w-full max-w-md rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm" onClick={() => setUserPanel(null)}>
+          <div
+            className={`w-full rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
+              // Subscription + Legal need more horizontal room for side-by-side layouts;
+              // other panels keep the compact modal.
+              userPanel === "subscription" || userPanel === "legal" ? "max-w-3xl" : "max-w-md"
+            }`}
+            onClick={e => e.stopPropagation()}
+          >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
-              <h2 className="text-base font-semibold text-slate-100">
+            <div className="flex items-center gap-3 px-6 py-4 border-b border-slate-700/50">
+              <span className="text-slate-400">
+                {userPanel === "profile"      && <User size={16} />}
+                {userPanel === "accounts"     && <Users size={16} />}
+                {userPanel === "settings"     && <Settings size={16} />}
+                {userPanel === "subscription" && <CreditCard size={16} />}
+                {userPanel === "legal"        && <FileText size={16} />}
+                {userPanel === "help"         && <HelpCircle size={16} />}
+              </span>
+              <h2 className="flex-1 text-base font-semibold text-slate-100">
                 {userPanel === "profile"      && "Profile"}
                 {userPanel === "accounts"     && "Accounts"}
                 {userPanel === "settings"     && "Settings"}
                 {userPanel === "subscription" && "Subscription"}
+                {userPanel === "legal"        && "Terms & Notices"}
                 {userPanel === "help"         && "Help"}
               </h2>
-              <button onClick={() => setUserPanel(null)} className="text-slate-500 hover:text-slate-300 transition-colors text-lg leading-none">✕</button>
+              <button onClick={() => setUserPanel(null)} className="text-slate-500 hover:text-slate-300 transition-colors"><X size={16} /></button>
             </div>
 
             {/* Body */}
@@ -3330,24 +4385,108 @@ ${html}
 
               {userPanel === "settings" && (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
-                    <div>
-                      <p className="text-sm text-slate-200">Theme</p>
-                      <p className="text-xs text-slate-500 mt-0.5">Dark / Light mode</p>
+                  {/* Appearance — day / night category + per-category theme picker.
+                      Registry lives in src/lib/themes.ts; add new themes there and
+                      define their tokens in globals.css — they appear here automatically. */}
+                  <div className="rounded-xl bg-slate-800/50 px-4 py-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm text-slate-200">Mode</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Day or Night</p>
+                      </div>
+                      <div className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-xs font-semibold">
+                        <button
+                          onClick={() => setThemeMode("day")}
+                          className={`flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors ${themeMode === "day" ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
+                        ><Sun size={12} />Day</button>
+                        <button
+                          onClick={() => setThemeMode("night")}
+                          className={`flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors ${themeMode === "night" ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
+                        ><Moon size={12} />Night</button>
+                      </div>
                     </div>
-                    <button
-                      onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
-                      className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-400 hover:border-blue-500/50 hover:text-blue-400 transition-colors"
-                    >
-                      {theme === "dark" ? "🌙 Dark" : "☀️ Light"}
-                    </button>
+
+                    {(["day", "night"] as const).map(section => {
+                      const themes = themesByMode(section);
+                      const activeId = section === "day" ? dayThemeId : nightThemeId;
+                      const setId = section === "day" ? setDayThemeId : setNightThemeId;
+                      return (
+                        <div key={section}>
+                          <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">{section === "day" ? "Day themes" : "Night themes"}</p>
+                          <div className="grid grid-cols-1 gap-1.5">
+                            {themes.map(t => {
+                              const isActive = t.id === activeId;
+                              return (
+                                <button
+                                  key={t.id}
+                                  onClick={() => { setId(t.id); setThemeMode(section); }}
+                                  className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors ${isActive ? "border-blue-500/60 bg-blue-500/10" : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"}`}
+                                >
+                                  <span className="flex shrink-0 items-center gap-0.5">
+                                    {t.swatches.map((c, i) => (
+                                      <span key={i} className="h-4 w-4 rounded-full border border-black/20" style={{ backgroundColor: c }} />
+                                    ))}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block text-xs font-semibold text-slate-100">{t.label}</span>
+                                    {t.blurb && <span className="block text-[10px] leading-tight text-slate-500">{t.blurb}</span>}
+                                  </span>
+                                  {isActive && <Check size={13} className="shrink-0 text-blue-400" />}
+                                </button>
+                              );
+                            })}
+                            {/* Reserved slot hint for future themes in this category */}
+                            <div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-700/50 px-2.5 py-1.5 text-[10px] text-slate-600">
+                              More {section} themes coming soon…
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {/* Panel opacity — lets the page canvas bleed through each
+                        of the three main panels. Requires CSS relative-colour
+                        support (Chrome 119+ / FF 128+ / Safari 16.4+). */}
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Panel opacity</p>
+                      <div className="space-y-2">
+                        {(["synthesis", "workspace", "lab"] as const).map(region => {
+                          const labels = { synthesis: "Synthesis (left)", workspace: "Workspace (centre)", lab: "Synthesis Lab (right)" };
+                          return (
+                            <div key={region} className="flex items-center gap-3">
+                              <span className="shrink-0 w-36 text-xs text-slate-300">{labels[region]}</span>
+                              <input
+                                type="range"
+                                min={0.4}
+                                max={1}
+                                step={0.05}
+                                value={panelAlpha[region]}
+                                onChange={(e) => setPanelAlpha(prev => ({ ...prev, [region]: Number(e.target.value) }))}
+                                className="flex-1 accent-blue-500 cursor-pointer"
+                              />
+                              <span className="shrink-0 w-10 text-right text-[11px] font-mono text-slate-400 tabular-nums">{Math.round(panelAlpha[region] * 100)}%</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                   <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
                     <div>
                       <p className="text-sm text-slate-200">Default Paper Count</p>
-                      <p className="text-xs text-slate-500 mt-0.5">Papers returned per search</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Papers returned per search (3–500)</p>
                     </div>
-                    <span className="text-sm text-slate-300 font-mono">{paperCount}</span>
+                    <input
+                      type="number"
+                      min={3}
+                      max={500}
+                      value={paperCount}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) setPaperCount(Math.max(3, Math.min(500, Math.round(n))));
+                      }}
+                      className="w-20 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums"
+                    />
                   </div>
                   <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
                     <div>
@@ -3363,22 +4502,107 @@ ${html}
 
               {userPanel === "subscription" && (
                 <div className="space-y-4">
-                  <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-4">
+                  {/* Alpha banner — during alpha, every tier below is unlocked for everyone. */}
+                  <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="text-lg">💎</span>
-                      <span className="text-sm font-bold text-blue-300">Alpha Access</span>
+                      <Gem size={14} className="text-blue-400" />
+                      <span className="text-xs font-bold text-blue-300">Alpha Access — all tiers unlocked</span>
                     </div>
-                    <p className="text-xs text-slate-400">You have full access to all features during the Alpha period.</p>
+                    <p className="text-[11px] text-slate-400">Every plan below is free to use during Alpha. Pricing goes live once we exit beta.</p>
                   </div>
-                  <div className="space-y-2 text-xs text-slate-400">
-                    {["Unlimited searches", "Multi-agent deep analysis", "PDF export", "Synthesis Lab", "Early access to new features"].map(f => (
-                      <div key={f} className="flex items-center gap-2">
-                        <span className="text-green-400">✓</span>
-                        {f}
+
+                  {(() => {
+                    type PlanTier = {
+                      id: "free" | "basic" | "scholar";
+                      name: string;
+                      price: string;
+                      tagline: string;
+                      perks: string[];
+                      accent: string;
+                      activeDuringAlpha: boolean;
+                    };
+                    const plans: PlanTier[] = [
+                      {
+                        id: "free",
+                        name: "Free",
+                        price: "$0",
+                        tagline: "Kick the tyres",
+                        perks: [
+                          "5 Quick Searches / day",
+                          "Up to 10 papers per search",
+                          "Fast-mode Literature Brief",
+                          "Community support",
+                        ],
+                        accent: "border-slate-600/50",
+                        activeDuringAlpha: true,
+                      },
+                      {
+                        id: "basic",
+                        name: "Basic",
+                        price: "$9 / mo",
+                        tagline: "For daily research work",
+                        perks: [
+                          "50 Quick Searches / day",
+                          "20 Curated deep analyses / month",
+                          "Up to 40 papers per search",
+                          "Full Synthesis Lab",
+                          "PDF export",
+                          "Email support",
+                        ],
+                        accent: "border-blue-500/40",
+                        activeDuringAlpha: true,
+                      },
+                      {
+                        id: "scholar",
+                        name: "Scholar",
+                        price: "$29 / mo",
+                        tagline: "Deep, unlimited, priority",
+                        perks: [
+                          "Unlimited Quick Searches",
+                          "Unlimited Curated deep analyses",
+                          "Up to 200 papers per search",
+                          "6-agent multi-agent reasoning",
+                          "Synthesis Lab with Claude Sonnet writer",
+                          "Citation & author tracking",
+                          "PDF + Word export",
+                          "Priority support · early access",
+                        ],
+                        accent: "border-amber-400/50",
+                        activeDuringAlpha: true,
+                      },
+                    ];
+                    return (
+                      // Three-column grid on wide screens; collapses to one column
+                      // below `sm` so the modal stays usable on narrow viewports.
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        {plans.map(plan => (
+                          <div key={plan.id} className={`flex flex-col rounded-xl border bg-slate-900/40 px-4 py-3 ${plan.accent}`}>
+                            <div className="flex items-baseline justify-between gap-2 mb-1">
+                              <span className="text-sm font-bold text-slate-100">{plan.name}</span>
+                              <span className="text-xs font-semibold text-slate-300 tabular-nums">{plan.price}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-500 mb-2">{plan.tagline}</p>
+                            <ul className="flex-1 space-y-1">
+                              {plan.perks.map(perk => (
+                                <li key={perk} className="flex items-start gap-1.5 text-[11px] text-slate-400">
+                                  <Check size={11} className="mt-0.5 text-emerald-400 shrink-0" />
+                                  <span>{perk}</span>
+                                </li>
+                              ))}
+                            </ul>
+                            {plan.activeDuringAlpha && (
+                              <div className="mt-2 inline-flex items-center gap-1 self-start rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-300">
+                                <Check size={9} strokeWidth={3} />
+                                Included in Alpha
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-slate-600">Paid plans coming after Alpha. Your feedback shapes the pricing.</p>
+                    );
+                  })()}
+
+                  <p className="text-[10px] text-slate-600">Plans are placeholders — numbers and feature mapping are not final. Your Alpha feedback shapes the pricing.</p>
                 </div>
               )}
 
@@ -3473,17 +4697,80 @@ ${html}
                 </div>
               )}
 
+              {userPanel === "legal" && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {[
+                    {
+                      title: "Terms of Service",
+                      body: [
+                        "By using AcademiCats you agree to use the service for lawful academic research only.",
+                        "During Alpha, the service is provided AS-IS with no uptime, accuracy, or availability guarantees.",
+                        "We may throttle, pause, or discontinue features at any time while we iterate. Your account and data can be exported via Settings › Accounts at any point.",
+                      ],
+                    },
+                    {
+                      title: "AI Disclaimer",
+                      body: [
+                        "Results — including retrieved papers, ranking, Research Briefs, Deep-Reading summaries, and Synthesis Lab outputs — are generated by large language models and may contain errors, omissions, or fabricated citations.",
+                        "Always verify any fact, citation, or statistic against the original source before relying on it in academic, clinical, legal, financial, or policy work.",
+                        "Nothing produced by AcademiCats is medical, legal, or professional advice.",
+                      ],
+                    },
+                    {
+                      title: "Privacy & Data Use",
+                      body: [
+                        "We store your email, saved conversations, search history, and generated outputs in our Supabase backend so your work persists across sessions.",
+                        "Search queries and the text of uploaded documents may be transmitted to third-party LLM providers (OpenAI, Anthropic) strictly to fulfil your requests.",
+                        "We do not sell your data. You can clear all cloud history at any time from the History panel.",
+                      ],
+                    },
+                    {
+                      title: "Acceptable Use",
+                      body: [
+                        "Do not use AcademiCats to generate plagiarised submissions, fabricate research data, or pass AI output off as your own unaided work where your institution prohibits it.",
+                        "Do not upload documents that you are not authorised to share, or content that violates applicable law (CSAM, hate speech, malware, etc.).",
+                        "Automated scraping or redistributing raw outputs at scale is not permitted during Alpha.",
+                      ],
+                    },
+                    {
+                      title: "Citation Integrity",
+                      body: [
+                        "AI may hallucinate references. Before citing any paper in your own work, open the source link and confirm the authors, year, and claim are accurate.",
+                        "Use the Citation Format control to match your institution's style, but still double-check every entry.",
+                      ],
+                    },
+                    {
+                      title: "Changes & Contact",
+                      body: [
+                        "These terms may change as the product evolves. Continued use after a change constitutes acceptance.",
+                        "Questions, complaints, or takedown requests: jy1529098645@gmail.com.",
+                      ],
+                    },
+                  ].map(section => (
+                    <div key={section.title} className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <p className="text-sm font-semibold text-slate-200 mb-1.5">{section.title}</p>
+                      <ul className="space-y-1.5">
+                        {section.body.map((line, i) => (
+                          <li key={i} className="text-[11px] leading-relaxed text-slate-400">{line}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                  <p className="md:col-span-2 text-[10px] text-slate-600 text-center">Last updated 2026-04-19 · Alpha build v1.6.0</p>
+                </div>
+              )}
+
               {userPanel === "help" && (
                 <div className="space-y-3">
                   {[
-                    { icon: "📖", title: "How to search", desc: "Enter a research question and click Run Search or Quick Search." },
-                    { icon: "🧪", title: "Synthesis Lab", desc: "Select papers from results, then generate a literature review or proposal." },
-                    { icon: "📄", title: "Deep Read", desc: "Click Deep Read on any paper to get a full structured analysis." },
-                    { icon: "✉️", title: "Contact us", desc: "Email jy1529098645@gmail.com for feedback or support." },
+                    { icon: <Search size={14} />,       title: "How to search",  desc: "Enter a research question and click Run Search or Quick Search." },
+                    { icon: <PenLine size={14} />,      title: "Synthesis Lab",  desc: "Select papers from results, then generate a literature review or proposal." },
+                    { icon: <FileText size={14} />,     title: "Deep Read",      desc: "Click Deep Read on any paper to get a full structured analysis." },
+                    { icon: <Mail size={14} />,         title: "Contact us",     desc: "Email jy1529098645@gmail.com for feedback or support." },
                   ].map(({ icon, title, desc }) => (
                     <div key={title} className="rounded-xl bg-slate-800/50 px-4 py-3">
                       <div className="flex items-center gap-2 mb-1">
-                        <span>{icon}</span>
+                        <span className="text-slate-400">{icon}</span>
                         <p className="text-sm font-semibold text-slate-200">{title}</p>
                       </div>
                       <p className="text-xs text-slate-400">{desc}</p>
