@@ -2275,7 +2275,7 @@ ${html}
                 draggable={false}
               />
             </div>
-            <p className="mt-1.5 text-base text-slate-400">AI-powered academic research assistant <span className="text-xs text-slate-600">v1.6.0-Alpha</span></p>
+            <p className="mt-1.5 text-base italic text-slate-400">Where every question finds its sources. <span className="not-italic text-xs text-slate-600">v1.6.0-Alpha</span></p>
           </div>
           {/* Announcement banner – fills remaining width; extra left padding
               gives the mascot image visual breathing room. */}
