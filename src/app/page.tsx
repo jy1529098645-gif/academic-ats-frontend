@@ -3404,7 +3404,7 @@ ${html}
                             //     selected language → flip back to original.
                             //  b) Have a cached translation in the selected
                             //     language but viewing original → flip to it.
-                            //  c) Otherwise → fire a fresh SSE request.
+                            //  c) Otherwise → fire a fresh request.
                             const cachedMatches =
                               !!briefTranslated && briefTranslatedLang === briefTargetLang;
                             if (briefShowTrans && cachedMatches) {
@@ -3419,13 +3419,22 @@ ${html}
                           }}
                           disabled={briefTranslating}
                           title={briefShowTrans ? "Show original brief" : "Translate this brief"}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 disabled:opacity-60 disabled:cursor-wait"
+                          // Explicit `cursor-default` on disabled — prevents
+                          // the OS wait-spinner cursor that `cursor-wait`
+                          // (Tailwind default on `disabled:`) would show.
+                          // Dynamic feedback comes from the indeterminate
+                          // progress bar + spinning globe below instead.
+                          className="relative inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 disabled:opacity-80 disabled:cursor-default overflow-hidden"
                           style={{
                             backgroundColor: "var(--ats-bg-accent-soft)",
                             color:           "var(--ats-fg-accent)",
                           }}
                         >
-                          <Globe size={12} />
+                          {/* Globe spins while translating as a running
+                              indicator. lucide-react icons respect the
+                              `animate-spin` utility because they render
+                              as <svg>. */}
+                          <Globe size={12} className={briefTranslating ? "animate-spin" : ""} />
                           <span>
                             {briefTranslating
                               ? "Translating…"
@@ -3435,6 +3444,27 @@ ${html}
                                   ? "Show Translation"
                                   : "Translate"}
                           </span>
+                          {/* Indeterminate progress strip — slides a short
+                              gradient bar back and forth across the
+                              bottom edge while the request is in flight.
+                              Uses the `progress-slide` keyframe defined
+                              in globals.css (also used by the Agent
+                              activity bar). Absolute so it doesn't
+                              push the button's text around. */}
+                          {briefTranslating && (
+                            <span
+                              className="pointer-events-none absolute left-0 bottom-0 h-[2px] w-full overflow-hidden"
+                              aria-hidden
+                            >
+                              <span
+                                className="block h-full w-1/3 rounded-full"
+                                style={{
+                                  backgroundColor: "var(--ats-fg-accent)",
+                                  animation: "progress-slide 1.2s ease-in-out infinite",
+                                }}
+                              />
+                            </span>
+                          )}
                         </button>
                       </div>
                     )}
@@ -3531,6 +3561,10 @@ ${html}
                                         brief_text:         downloadText,
                                         original_query:     result?.original_query || query,
                                         final_search_query: result?.final_search_query || query,
+                                        // Language hint → backend picks a CJK-capable
+                                        // CID font. Empty string when downloading the
+                                        // original (English) brief → Helvetica.
+                                        language:           showingTrans ? briefTranslatedLang : "",
                                       }, `${filename}.pdf`, "brief-download");
                                     } else {
                                       downloadTextAs(downloadText, filename, briefDownloadFmt as "html"|"txt"|"md");
