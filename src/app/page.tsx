@@ -282,25 +282,44 @@ function scoreChip(score: number | undefined | null): { label: string; cls: stri
 
 // ── Developer controls panel ────────────────────────────────────────────────
 // Rendered inside the user modal only when the caller's tier is "dev".
-// Currently exposes two announcement-cleanup actions; add new privileged
-// operations here as they come up instead of sprinkling `isDeveloper`
-// conditionals across the page.
+// Exposes bulk cleanup + a per-row editor for the seed ("system")
+// announcements so the dev can rewrite / add opening messages without
+// touching the DDL. Add new privileged operations here as they come up
+// instead of sprinkling `isDeveloper` conditionals across the page.
+type AnnouncementLike = { id: string; author_email: string; text: string; created_at: string };
+
+const DEV_SEED_EMAIL = "dev@academicats.com";
+
 function DevControlsPanel({
   onError,
   onCleared,
+  announcements,
+  onRefresh,
 }: {
   onError:    (msg: string) => void;
-  /** Fired after a successful delete so the parent can re-fetch the
+  /** Fired after a successful bulk delete so the parent can re-fetch the
    *  announcements feed as a belt-and-suspenders against Realtime DELETE
-   *  events not being enabled in the current Supabase publication. The
-   *  Realtime subscription normally handles this on its own, but a manual
-   *  refresh guarantees the acting dev sees the change immediately. */
+   *  events not being enabled in the current Supabase publication. */
   onCleared?: () => void;
+  /** Live announcements feed — used to render the editor list for the
+   *  three seed system messages. Passed from the parent so we share the
+   *  same Realtime subscription. */
+  announcements: AnnouncementLike[];
+  /** Re-fetch callback; called after edits / inserts so the editor
+   *  list refreshes immediately without waiting for Realtime echo. */
+  onRefresh: () => void;
 }) {
-  const [busy, setBusy]   = useState<"" | "user" | "all">("");
+  const [busy, setBusy]     = useState<"" | "user" | "all" | `row:${string}` | "new">("");
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
-  async function run(kind: "user" | "all") {
+  // Drafts keyed by row id — lets the dev edit inline without losing
+  // local text between re-renders from Realtime echoes.
+  const [drafts, setDrafts]     = useState<Record<string, string>>({});
+  const [newDraft, setNewDraft] = useState("");
+
+  const systemMessages = announcements.filter(a => a.author_email === DEV_SEED_EMAIL);
+
+  async function runCleanup(kind: "user" | "all") {
     const path = kind === "user" ? "/api/announcements/user" : "/api/announcements/all";
     const confirmText = kind === "user"
       ? "Delete every user-posted announcement? Seeded dev messages will remain."
@@ -310,10 +329,7 @@ function DevControlsPanel({
     setStatus(null);
     try {
       const res = await fetchWithAuth(buildApiUrl(path), { method: "DELETE" });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const json = (await res.json()) as { deleted: number };
       setStatus({ kind: "ok", text: `Deleted ${json.deleted ?? 0} row(s).` });
       onCleared?.();
@@ -326,54 +342,232 @@ function DevControlsPanel({
     }
   }
 
+  async function saveRow(row: AnnouncementLike) {
+    const text = (drafts[row.id] ?? row.text).trim();
+    if (!text || text === row.text) return;
+    setBusy(`row:${row.id}`);
+    setStatus(null);
+    try {
+      const res = await fetchWithAuth(buildApiUrl(`/api/announcements/${row.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      setStatus({ kind: "ok", text: "Saved." });
+      setDrafts(d => { const next = { ...d }; delete next[row.id]; return next; });
+      onRefresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus({ kind: "err", text: msg });
+      onError(msg);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteRow(row: AnnouncementLike) {
+    if (!window.confirm(`Delete this system message?\n\n"${row.text.slice(0, 80)}${row.text.length > 80 ? "…" : ""}"`)) return;
+    setBusy(`row:${row.id}`);
+    setStatus(null);
+    try {
+      const res = await fetchWithAuth(buildApiUrl(`/api/announcements/${row.id}`), { method: "DELETE" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      setStatus({ kind: "ok", text: "Deleted." });
+      setDrafts(d => { const next = { ...d }; delete next[row.id]; return next; });
+      onRefresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus({ kind: "err", text: msg });
+      onError(msg);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function addNew() {
+    const text = newDraft.trim();
+    if (!text) return;
+    setBusy("new");
+    setStatus(null);
+    try {
+      const res = await fetchWithAuth(buildApiUrl("/api/announcements/system"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      setStatus({ kind: "ok", text: "Added system message." });
+      setNewDraft("");
+      onRefresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus({ kind: "err", text: msg });
+      onError(msg);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
-    <div className="space-y-4">
-      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-        <p className="text-xs font-bold text-amber-300">Developer-only controls</p>
-        <p className="text-[11px] text-slate-400 mt-1">
-          These actions affect every user. Use sparingly — the Realtime channel
-          pushes the changes to every open session immediately.
-        </p>
+    // Horizontal layout: a 3-column grid on md+ screens. Left column is the
+    // amber "this is powerful" preamble + admin console shortcut, middle is
+    // the system-message editor (flex-growing because it's the tallest
+    // content), right column holds the bulk-cleanup destructive actions +
+    // the status banner. On narrow screens the columns stack vertically
+    // because a single-column read-order makes more sense than scrolling
+    // sideways through dev chrome.
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+        {/* Col 1 — warning + admin console link ───────────────────── */}
+        <div className="space-y-3">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+            <p className="text-xs font-bold text-amber-300">Developer-only controls</p>
+            <p className="text-[11px] text-slate-400 mt-1">
+              These actions affect every user. Use sparingly — the Realtime
+              channel pushes the changes to every open session immediately.
+            </p>
+          </div>
+          <a
+            href="/admin"
+            target="_blank"
+            rel="noreferrer"
+            className="block rounded-xl border border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] px-3 py-2.5 hover:brightness-110 transition-all"
+          >
+            <p className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--ats-fg-accent)" }}>
+              <BarChartIcon size={12} />
+              Admin monitoring →
+            </p>
+            <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+              Opens the full commercial dashboard in a new tab — live KPIs,
+              usage time-series, per-tier breakdowns, and recent activity.
+            </p>
+          </a>
+        </div>
+
+        {/* Col 2 — system announcements editor ─────────────────────── */}
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-3 py-2.5 space-y-2">
+          <div>
+            <p className="text-sm font-semibold text-slate-200">System announcements</p>
+            <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+              Seed-email messages (<code className="text-slate-400">{DEV_SEED_EMAIL}</code>)
+              render without a byline. Edit, delete, or add more inline.
+            </p>
+          </div>
+          {systemMessages.length === 0 && (
+            <p className="text-[11px] rounded-lg border border-slate-700/60 bg-slate-900/60 px-3 py-2 text-slate-500 italic">
+              No system announcements yet — add the first one below.
+            </p>
+          )}
+          {systemMessages.map(row => {
+            const draft = drafts[row.id] ?? row.text;
+            const dirty = draft !== row.text;
+            const rowBusy = busy === `row:${row.id}`;
+            return (
+              <div key={row.id} className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-2 space-y-1.5">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDrafts(d => ({ ...d, [row.id]: e.target.value }))}
+                  rows={2}
+                  maxLength={280}
+                  className="w-full rounded-md border border-slate-700/60 bg-slate-900/80 px-2.5 py-1.5 text-xs text-slate-100 outline-none focus:border-[var(--ats-border-accent)] resize-y leading-relaxed"
+                />
+                <div className="flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                  <span className="tabular-nums">{draft.length} / 280</span>
+                  <div className="flex items-center gap-1.5">
+                    {dirty && (
+                      <button
+                        onClick={() => setDrafts(d => { const n = { ...d }; delete n[row.id]; return n; })}
+                        className="text-slate-400 hover:text-slate-200 transition-colors"
+                      >Cancel</button>
+                    )}
+                    <button
+                      onClick={() => void saveRow(row)}
+                      disabled={!dirty || rowBusy}
+                      className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors disabled:opacity-40"
+                    >
+                      {rowBusy && dirty ? "Saving…" : "Save"}
+                    </button>
+                    <button
+                      onClick={() => void deleteRow(row)}
+                      disabled={rowBusy}
+                      className="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-500/10 px-2 py-0.5 font-semibold text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-40"
+                    >
+                      <Trash2 size={10} />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Add new system message */}
+          <div className="rounded-lg border border-dashed border-slate-700/60 bg-slate-900/40 p-2 space-y-1.5">
+            <p className="text-[10px] uppercase tracking-wider text-slate-500">Add new</p>
+            <textarea
+              value={newDraft}
+              onChange={(e) => setNewDraft(e.target.value)}
+              rows={2}
+              maxLength={280}
+              placeholder="Text for a new system announcement…"
+              className="w-full rounded-md border border-slate-700/60 bg-slate-900/80 px-2.5 py-1.5 text-xs text-slate-100 outline-none focus:border-[var(--ats-border-accent)] resize-y leading-relaxed placeholder:text-slate-700"
+            />
+            <div className="flex items-center justify-between gap-2 text-[10px] text-slate-500">
+              <span className="tabular-nums">{newDraft.length} / 280</span>
+              <button
+                onClick={() => void addNew()}
+                disabled={!newDraft.trim() || busy === "new"}
+                className="inline-flex items-center gap-1 rounded border border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] px-2 py-0.5 font-semibold hover:brightness-110 transition-all disabled:opacity-40"
+                style={{ color: "var(--ats-fg-accent)" }}
+              >
+                <Plus size={10} />
+                {busy === "new" ? "Adding…" : "Add message"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Col 3 — bulk cleanup ─────────────────────────────────────── */}
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-3 py-2.5 space-y-2">
+          <div>
+            <p className="text-sm font-semibold text-slate-200">Bulk cleanup</p>
+            <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+              &ldquo;User-posted&rdquo; keeps the seeded welcome messages;
+              &ldquo;all&rdquo; wipes the table clean.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={() => void runCleanup("user")}
+              disabled={busy !== ""}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+            >
+              <Trash2 size={12} />
+              {busy === "user" ? "Clearing…" : "Clear user-posted"}
+            </button>
+            <button
+              onClick={() => void runCleanup("all")}
+              disabled={busy !== ""}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+            >
+              <Trash2 size={12} />
+              {busy === "all" ? "Nuking…" : "Clear ALL (incl. seeds)"}
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-4 py-3 space-y-3">
-        <div>
-          <p className="text-sm font-semibold text-slate-200">Announcement feed</p>
-          <p className="text-[11px] text-slate-500 mt-0.5">
-            Two cleanup levels. The &ldquo;user-posted&rdquo; option preserves the three
-            seeded welcome messages so the ticker always has opening copy;
-            the &ldquo;all&rdquo; option wipes the table clean (clients fall back to the
-            empty-state hint until someone posts again).
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => void run("user")}
-            disabled={busy !== ""}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
-          >
-            <Trash2 size={12} />
-            {busy === "user" ? "Clearing…" : "Clear user-posted"}
-          </button>
-          <button
-            onClick={() => void run("all")}
-            disabled={busy !== ""}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-          >
-            <Trash2 size={12} />
-            {busy === "all" ? "Nuking…" : "Clear ALL (incl. seeds)"}
-          </button>
-        </div>
-        {status && (
-          <p className={`text-[11px] rounded-lg px-3 py-1.5 ${
-            status.kind === "ok"
-              ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
-              : "bg-red-500/10 text-red-400 border border-red-500/30"
-          }`}>
-            {status.text}
-          </p>
-        )}
-      </div>
+      {/* Status banner — full width beneath the grid */}
+      {status && (
+        <p className={`text-[11px] rounded-lg px-3 py-1.5 ${
+          status.kind === "ok"
+            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+            : "bg-red-500/10 text-red-400 border border-red-500/30"
+        }`}>
+          {status.text}
+        </p>
+      )}
     </div>
   );
 }
@@ -1499,16 +1693,17 @@ export default function HomePage() {
     verifier:        (streamAgents.verifier        ?? result?.verifier)        as AgentPayload | undefined,
   };
 
-  // Analytical Trace & Retrieval Strategy visibility — hidden until the pipeline
-  // is running or has produced any agent output or strategy summary. Computed
-  // here so the JSX stays flat (no IIFE inside the tree).
-  const showAnalyticalTrace =
-    isSubmitting ||
+  // Analytical Trace / Retrieval Strategy — each section is now rendered
+  // inline below the Research Brief (no shared collapsible wrapper). Each
+  // is gated on the presence of its own data so neither shows until the
+  // pipeline has actually produced the corresponding artefact. During
+  // `isSubmitting` they stay hidden; they appear ONLY when results arrive.
+  const hasAgentOutput =
     !!agentData.evidence_mapper ||
     !!agentData.scholar ||
     !!agentData.gap_analyst ||
-    !!agentData.verifier ||
-    !!result?.strategy_summary;
+    !!agentData.verifier;
+  const hasStrategy = !!result?.strategy_summary;
 
   const toBackendPaper = (paper: Paper) => (paper.raw && typeof paper.raw === "object" ? paper.raw : paper);
   const hasDownloadSource = (paper: Paper) => {
@@ -2283,24 +2478,11 @@ ${html}
         </div>
       )}
 
-      {/* Day / Night category toggle — the specific theme within each category
-          is chosen in Settings → Appearance. */}
-      <button
-        onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
-        title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
-        aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
-        className={`fixed top-4 right-4 z-50 flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:shadow-[0_0_12px_var(--ats-border-accent)] border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-[var(--ats-fg-secondary)] hover:text-[var(--ats-fg-accent)]`}
-      >
-        {themeMode === "night" ? (
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-          </svg>
-        ) : (
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
-        )}
-      </button>
+      {/* Day / Night category toggle — rendered as a sibling of the
+          announcement banner so it sits in the top-right of that wrapper
+          and feels like part of the banner chrome. See the top-bar
+          block below where the theme toggle button lives inside the
+          banner container's `relative` wrapper. */}
 
       <div className="flex flex-col flex-1 min-h-0 px-5 pt-5 pb-4 gap-4">
         {/* ── Top bar: title + mascot + announcement side-by-side ── */}
@@ -2330,9 +2512,16 @@ ${html}
                 overflow past the mascot's right edge. */}
             <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.6.0-Alpha</span></p>
           </div>
-          {/* Announcement banner – fills remaining width; extra left padding
-              gives the mascot image visual breathing room. */}
-          <div className="min-w-0 flex-1 pl-4">
+          {/* Announcement banner – fills remaining width; extra left
+              padding gives the mascot image visual breathing room. The
+              wrapper is `relative` so the Day/Night toggle can pin to
+              the banner's top-right corner and read as part of the
+              banner chrome rather than a floating viewport button. */}
+          <div className="relative min-w-0 flex-1 pl-4">
+            {/* Theme toggle is now rendered INSIDE AnnouncementBanner
+                at the right end of the card, so it visually belongs to
+                the banner chrome. The old external floating button has
+                been removed. */}
             <AnnouncementBanner
               collapsed={announcementCollapsed}
               onCollapse={() => setAnnouncementCollapsed(true)}
@@ -2345,6 +2534,8 @@ ${html}
               msgSending={msgSending}
               msgSentOk={msgSentOk}
               onSend={handleSendMessage}
+              themeMode={themeMode}
+              onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
             />
           </div>
         </div>
@@ -2540,69 +2731,45 @@ ${html}
                   </div>
                 ) : null}
 
-                {/* Analytical Trace + Retrieval Strategy Summary — completely
-                    hidden until there is something to show. It appears once the
-                    pipeline is running or has produced any agent output / strategy
-                    summary, and stays collapsed-by-default once visible. */}
-                {showAnalyticalTrace && (
-                  // Auto-expand as soon as the Deep pipeline starts streaming
-                  // — users wanted to see agents in flight without clicking
-                  // the disclosure first. Once submitting stops, the user can
-                  // still collapse manually.
-                  <details
-                    open={isSubmitting && !fastMode}
-                    className="ats-details-reset mt-6 ats-card rounded-2xl px-4 py-3"
-                  >
-                    <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-slate-300">
-                      <Brain size={14} />
-                      <span>Analytical Trace &amp; Retrieval Strategy</span>
-                      <ChevronDown size={12} className="ml-auto transition-transform" />
-                    </summary>
-                    <div className="mt-4 space-y-4">
-                      {/* ANALYTICAL TRACE — deep-navy card with the multi-agent
-                          output. Neutral surface so agent sections (each with
-                          their own accent chrome) read as the focus. */}
-                      <div className="ats-card rounded-3xl bg-slate-950/40 p-4">
-                        <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
-                        <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
-                        <div className="space-y-3">
-                          <AgentSection title="Evidence Mapper" payload={agentData.evidence_mapper} running={isSubmitting && !fastMode && startedAgents.has("evidence_mapper")} />
-                          <AgentSection title="Scholar"         payload={agentData.scholar}        running={isSubmitting && !fastMode && startedAgents.has("scholar")} />
-                          <AgentSection title="Gap Analyst"     payload={agentData.gap_analyst}    running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
-                          <AgentSection title="Verifier"        payload={agentData.verifier}       running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
-                        </div>
-                      </div>
-
-                      {/* RETRIEVAL STRATEGY SUMMARY — visually distinct from
-                          the analytical-trace card above: dashed double-border
-                          on the accent hue + inset accent-soft background, so
-                          the reader instantly sees "this is a different kind
-                          of artefact (retrieval meta-data, not agent output)". */}
-                      <div
-                        className="rounded-3xl border-2 border-dashed border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] p-4"
-                        style={{ boxShadow: "inset 0 0 0 1px var(--ats-border-subtle)" }}
-                      >
-                        <div className="mb-2 flex items-center gap-2 text-base font-bold text-[var(--ats-fg-accent)]">
-                          <Compass size={16} />
-                          <span>Retrieval Strategy Summary</span>
-                          <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.18em] text-[var(--ats-fg-muted)]">meta</span>
-                        </div>
-                        <p className="mb-4 text-sm text-[var(--ats-fg-secondary)]">How the search was run, screened, and selected.</p>
-                        {result?.strategy_summary ? (
-                          <div className="space-y-2 text-xs text-[var(--ats-fg-secondary)]">
-                            {Array.isArray(result.strategy_summary.strategy_points) &&
-                              result.strategy_summary.strategy_points.map((item: any, idx: number) => (
-                                <div key={idx} className="break-words">• {String(item)}</div>
-                              ))}
-                          </div>
-                        ) : (
-                          <div className="rounded-2xl border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] p-4 text-sm text-[var(--ats-fg-muted)]">
-                            Run Search &amp; Analysis to see the retrieval strategy summary here.
-                          </div>
-                        )}
-                      </div>
+                {/* Analytical Trace — appears INLINE below the brief, only
+                    after at least one agent has produced output. No shared
+                    disclosure wrapper, no fallback copy; if there's nothing
+                    to show, nothing renders. */}
+                {hasAgentOutput && (
+                  <div className="mt-6 ats-card rounded-3xl bg-slate-950/40 p-4">
+                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
+                    <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
+                    <div className="space-y-3">
+                      <AgentSection title="Evidence Mapper" payload={agentData.evidence_mapper} running={isSubmitting && !fastMode && startedAgents.has("evidence_mapper")} />
+                      <AgentSection title="Scholar"         payload={agentData.scholar}        running={isSubmitting && !fastMode && startedAgents.has("scholar")} />
+                      <AgentSection title="Gap Analyst"     payload={agentData.gap_analyst}    running={isSubmitting && !fastMode && startedAgents.has("gap_analyst")} />
+                      <AgentSection title="Verifier"        payload={agentData.verifier}       running={isSubmitting && !fastMode && startedAgents.has("verifier")} />
                     </div>
-                  </details>
+                  </div>
+                )}
+
+                {/* Retrieval Strategy Summary — independent of Analytical
+                    Trace, renders INLINE after the brief when strategy data
+                    is present. Dashed accent border makes it visually
+                    distinct from the neutral trace card above. */}
+                {hasStrategy && (
+                  <div
+                    className="mt-4 rounded-3xl border-2 border-dashed border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] p-4"
+                    style={{ boxShadow: "inset 0 0 0 1px var(--ats-border-subtle)" }}
+                  >
+                    <div className="mb-2 flex items-center gap-2 text-base font-bold text-[var(--ats-fg-accent)]">
+                      <Compass size={16} />
+                      <span>Retrieval Strategy Summary</span>
+                      <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.18em] text-[var(--ats-fg-muted)]">meta</span>
+                    </div>
+                    <p className="mb-4 text-sm text-[var(--ats-fg-secondary)]">How the search was run, screened, and selected.</p>
+                    <div className="space-y-2 text-xs text-[var(--ats-fg-secondary)]">
+                      {Array.isArray(result?.strategy_summary?.strategy_points) &&
+                        result.strategy_summary.strategy_points.map((item: any, idx: number) => (
+                          <div key={idx} className="break-words">• {String(item)}</div>
+                        ))}
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -4524,11 +4691,16 @@ ${html}
             // streaming regions still opt out individually via translate="no".
             translate="yes"
             className={`w-full rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
-              // Subscription / Legal / Usage / Settings all benefit from
-              // extra horizontal room — Settings specifically lays its
-              // theme picker + opacity sliders side-by-side at this width.
-              userPanel === "subscription" || userPanel === "legal" || userPanel === "usage" || userPanel === "settings"
-                ? "max-w-3xl" : "max-w-md"
+              // Dev panel hosts a 3-column grid (warning + editor + cleanup),
+              // so it needs the widest modal size — anything narrower squashes
+              // the system-announcement editor. Subscription / Legal / Usage /
+              // Settings all benefit from extra horizontal room — Settings
+              // specifically lays its theme picker + opacity sliders side-by-
+              // side. Everything else fits comfortably at the default width.
+              userPanel === "dev"
+                ? "max-w-6xl"
+                : userPanel === "subscription" || userPanel === "legal" || userPanel === "usage" || userPanel === "settings"
+                  ? "max-w-3xl" : "max-w-md"
             }`}
             onClick={e => e.stopPropagation()}
           >
@@ -5206,6 +5378,8 @@ ${html}
                 <DevControlsPanel
                   onError={setUiError}
                   onCleared={() => { void announcementsFeed.refresh(); }}
+                  announcements={announcementsFeed.items}
+                  onRefresh={() => { void announcementsFeed.refresh(); }}
                 />
               )}
 
