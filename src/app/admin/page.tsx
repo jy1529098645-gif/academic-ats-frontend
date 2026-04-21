@@ -231,6 +231,52 @@ type AdminAnnouncement = {
   created_at: string;
 };
 
+type DbStats = {
+  tables: Array<{ name: string; rows: number }>;
+  estimated_bytes:       number;
+  free_tier_limit_bytes: number;
+};
+
+type AdminError = {
+  id:          number;
+  created_at:  string;
+  source:      "frontend" | "backend";
+  user_email:  string | null;
+  path:        string | null;
+  method:      string | null;
+  status_code: number | null;
+  error_name:  string | null;
+  message:     string | null;
+};
+
+type CostAlert = {
+  user_id:   string;
+  email:     string | null;
+  tier:      string;
+  cost_usd:  number;
+  threshold: number;
+  overshoot: number;
+  ratio:     number | null;
+  counts:    { quick: number; deep: number; synth: number; reads: number };
+};
+
+type SystemHealth = {
+  redis:    { configured: boolean; backend: string };
+  key_pool: Record<string, unknown>;
+  workers:  number;
+};
+
+type FeedbackRow = {
+  id:           number;
+  created_at:   string;
+  user_email:   string | null;
+  category:     "bug" | "feature" | "general" | string;
+  message:      string;
+  page_url:     string | null;
+  resolved:     boolean;
+  resolved_at:  string | null;
+};
+
 // ── Tiny polling hook ───────────────────────────────────────────────────────
 // Keeps the polling logic in one place and cleans up correctly on unmount
 // or when the user pauses — React StrictMode's double-invoke friendly.
@@ -365,16 +411,77 @@ export default function AdminPage() {
     return res.json();
   }, []);
 
+  // ── New integrated-monitoring fetchers ────────────────────────────────
+  // DB stats → polled 60s (row counts only; cheap).
+  // Errors → polled 30s (forensic tail; should feel near-live).
+  // Cost alerts → polled 60s.
+  // System health → polled 10s (Redis/key-pool status).
+  // Feedback → polled 30s (inbox).
+  const fetchDbStats = useCallback(async (): Promise<DbStats> => {
+    const res = await fetchAsDev(buildApiUrl("/api/admin/db-stats"));
+    if (!res.ok) throw new Error(`db-stats HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
+  const fetchErrors = useCallback(async (): Promise<{ errors: AdminError[] }> => {
+    const res = await fetchAsDev(buildApiUrl("/api/admin/errors?limit=100"));
+    if (!res.ok) throw new Error(`errors HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
+  const fetchCostAlerts = useCallback(async (): Promise<{ alerts: CostAlert[] }> => {
+    const res = await fetchAsDev(buildApiUrl("/api/admin/cost-alerts"));
+    if (!res.ok) throw new Error(`cost-alerts HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
+  const fetchSystemHealth = useCallback(async (): Promise<SystemHealth> => {
+    const res = await fetchAsDev(buildApiUrl("/api/admin/system-health"));
+    if (!res.ok) throw new Error(`system-health HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
+  const fetchFeedback = useCallback(async (): Promise<{ feedback: FeedbackRow[] }> => {
+    const res = await fetchAsDev(buildApiUrl("/api/admin/feedback?limit=100"));
+    if (!res.ok) throw new Error(`feedback HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
   const overview     = usePolling(fetchOverview,     OVERVIEW_POLL_MS, enabled);
   const timeseries   = usePolling(fetchTimeseries,   DETAIL_POLL_MS,   enabled);
   const users        = usePolling(fetchUsers,        DETAIL_POLL_MS,   enabled);
   const announcements= usePolling(fetchAnnouncements,DETAIL_POLL_MS,   enabled);
+  const dbStats      = usePolling(fetchDbStats,      DETAIL_POLL_MS,   enabled);
+  const errors       = usePolling(fetchErrors,       30_000,           enabled);
+  const costAlerts   = usePolling(fetchCostAlerts,   DETAIL_POLL_MS,   enabled);
+  const sysHealth    = usePolling(fetchSystemHealth, OVERVIEW_POLL_MS, enabled);
+  const feedback     = usePolling(fetchFeedback,     30_000,           enabled);
 
   const refreshAll = () => {
     overview.refresh();
     timeseries.refresh();
     users.refresh();
     announcements.refresh();
+    dbStats.refresh();
+    errors.refresh();
+    costAlerts.refresh();
+    sysHealth.refresh();
+    feedback.refresh();
+  };
+
+  // Resolve / unresolve a feedback row (dev action — flips the flag).
+  const toggleFeedbackResolved = async (id: number, next: boolean) => {
+    try {
+      const res = await fetchAsDev(buildApiUrl(`/api/admin/feedback/${id}`), {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ resolved: next }),
+      });
+      if (!res.ok) throw new Error(`resolve HTTP ${res.status}`);
+      feedback.refresh();
+    } catch (e) {
+      console.error("[admin] toggleFeedbackResolved:", e);
+    }
   };
 
   // ── Gate screens ────────────────────────────────────────────────────────
@@ -709,6 +816,96 @@ export default function AdminPage() {
             </h3>
             <SystemSnapshot overview={ov} />
           </div>
+        </section>
+
+        {/* ── Integrated monitoring: DB / health / errors / cost / feedback ── */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Database storage — predicts when the Supabase free tier runs out */}
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>Database storage</h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Estimated usage vs. Supabase free tier (500 MB). History entries dominate — watch that row.
+                </p>
+              </div>
+              <button onClick={() => dbStats.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <DbStatsPanel data={dbStats.data} />
+          </div>
+
+          {/* System health — Redis + LLM key pool + worker count */}
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>System health</h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Live state of the backend's infra: Redis, LLM key pool, worker count.
+                </p>
+              </div>
+              <button onClick={() => sysHealth.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <SystemHealthPanel data={sysHealth.data} />
+          </div>
+        </section>
+
+        {/* Cost alerts + Error log side-by-side */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Cost alerts today
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Users over their tier threshold. Empty = everyone&apos;s within budget.
+                </p>
+              </div>
+              <button onClick={() => costAlerts.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <CostAlertsPanel alerts={costAlerts.data?.alerts ?? []} />
+          </div>
+
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Error log
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Backend 5xx + frontend window.onerror. Replaces Sentry for alpha forensics.
+                </p>
+              </div>
+              <button onClick={() => errors.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <ErrorLogPanel rows={errors.data?.errors ?? []} />
+          </div>
+        </section>
+
+        {/* Feedback inbox — full width so long messages are readable */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                Feedback inbox
+              </h3>
+              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                User-submitted bug reports / feature requests. Unresolved rows surface first.
+              </p>
+            </div>
+            <button onClick={() => feedback.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+              <RefreshCw size={10} /> Refresh
+            </button>
+          </div>
+          <FeedbackInbox rows={feedback.data?.feedback ?? []} onToggle={toggleFeedbackResolved} />
         </section>
 
         <footer className="pt-2 pb-8 text-center">
@@ -1091,6 +1288,303 @@ function SystemSnapshot({ overview }: { overview: Overview | null }) {
       ))}
     </div>
   );
+}
+
+// ── DB stats panel ─────────────────────────────────────────────────────────
+// Row counts per table + a progress bar against the 500 MB Supabase free-tier
+// ceiling. The byte estimate is rough (rows × avg_row_size) — the goal is
+// "is the tank 20% or 90% full", not byte-exact accuracy.
+
+function DbStatsPanel({ data }: { data: DbStats | null }) {
+  if (!data) {
+    return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
+  }
+  const pctFull = Math.min(100, Math.round((data.estimated_bytes / data.free_tier_limit_bytes) * 100));
+  const barColor =
+    pctFull >= 80 ? "#ef4444" :
+    pctFull >= 50 ? "#f59e0b" :
+                    "#10b981";
+  const tables = [...data.tables].sort((a, b) => b.rows - a.rows);
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="flex items-baseline justify-between mb-1">
+          <span className="text-[11px]" style={{ color: "var(--ats-fg-secondary)" }}>
+            Estimated: <strong style={{ color: "var(--ats-fg-primary)" }}>{fmtBytes(data.estimated_bytes)}</strong>
+            {" / "}{fmtBytes(data.free_tier_limit_bytes)}
+          </span>
+          <span className="text-xs font-bold tabular-nums" style={{ color: barColor }}>
+            {pctFull}%
+          </span>
+        </div>
+        <div className="h-2 w-full rounded-full overflow-hidden" style={{ backgroundColor: "var(--ats-border-subtle)" }}>
+          <div className="h-full rounded-full transition-all" style={{ width: `${pctFull}%`, backgroundColor: barColor }} />
+        </div>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-[10px] uppercase tracking-wider border-b" style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}>
+            <th className="pb-1.5 pr-3 font-semibold">Table</th>
+            <th className="pb-1.5 font-semibold text-right">Rows</th>
+          </tr>
+        </thead>
+        <tbody style={{ color: "var(--ats-fg-primary)" }}>
+          {tables.map(t => (
+            <tr key={t.name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+              <td className="py-1 pr-3 font-mono text-[11px]">{t.name}</td>
+              <td className="py-1 text-right tabular-nums">{t.rows < 0 ? <span style={{ color: "var(--ats-fg-muted)" }}>?</span> : t.rows.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {pctFull >= 80 && (
+        <p className="text-[10px] font-semibold" style={{ color: "#ef4444" }}>
+          ⚠ Storage above 80%. Upgrade Supabase Pro ($25/mo → 8 GB) or enable history-entry TTL.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── System health panel ───────────────────────────────────────────────────
+// Redis status, worker count, LLM key pool breakdown. Replaces flipping
+// between Railway logs + Upstash dashboard during dev/support.
+
+function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
+  if (!data) {
+    return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
+  }
+  const redisGood = data.redis.configured;
+  // Flatten the key pool dict (provider → {active, disabled, total}) into a
+  // compact tabular view. Shape may vary slightly per provider, so we're
+  // defensive about missing fields.
+  const pool = data.key_pool ?? {};
+  const providers = Object.entries(pool).filter(([k]) => k !== "error");
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
+          <p className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>Redis</p>
+          <p className="font-bold" style={{ color: redisGood ? "#10b981" : "#f59e0b" }}>
+            {redisGood ? "Connected" : "Not configured"}
+          </p>
+          <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>{data.redis.backend}</p>
+        </div>
+        <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
+          <p className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>Workers</p>
+          <p className="font-bold tabular-nums" style={{ color: "var(--ats-fg-primary)" }}>{data.workers}</p>
+          <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>uvicorn procs</p>
+        </div>
+      </div>
+      <div>
+        <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: "var(--ats-fg-muted)" }}>LLM key pool</p>
+        {providers.length === 0 ? (
+          <p className="text-xs italic" style={{ color: "var(--ats-fg-muted)" }}>No key pool data available.</p>
+        ) : (
+          <table className="w-full text-xs">
+            <tbody style={{ color: "var(--ats-fg-primary)" }}>
+              {providers.map(([name, info]) => (
+                <tr key={name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                  <td className="py-1 pr-3 font-semibold">{name}</td>
+                  <td className="py-1 text-[11px]" style={{ color: "var(--ats-fg-secondary)" }}>
+                    {typeof info === "object" && info !== null
+                      ? JSON.stringify(info).slice(0, 200)
+                      : String(info)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Cost alerts panel ─────────────────────────────────────────────────────
+
+function CostAlertsPanel({ alerts }: { alerts: CostAlert[] }) {
+  if (alerts.length === 0) {
+    return (
+      <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        All users within their tier threshold today. ✓
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1.5 max-h-80 overflow-y-auto thin-scrollbar pr-1">
+      {alerts.map(a => (
+        <div key={a.user_id} className="rounded-lg border p-2" style={{ borderColor: "#ef444455", backgroundColor: "#ef44441a" }}>
+          <div className="flex items-baseline justify-between gap-2 mb-0.5">
+            <span className="text-[11px] font-semibold truncate max-w-[240px]" style={{ color: "var(--ats-fg-primary)" }} title={a.email ?? ""}>
+              {a.email ?? <em style={{ color: "var(--ats-fg-muted)" }}>(no email)</em>}
+            </span>
+            <span
+              className="inline-flex text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide"
+              style={{
+                color:           TIER_COLORS[a.tier] ?? "#64748b",
+                backgroundColor: (TIER_COLORS[a.tier] ?? "#64748b") + "22",
+                borderColor:     (TIER_COLORS[a.tier] ?? "#64748b") + "55",
+                borderWidth: 1, borderStyle: "solid",
+              }}
+            >
+              {a.tier}
+            </span>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] tabular-nums">
+            <span style={{ color: "#ef4444" }}>${a.cost_usd.toFixed(4)}</span>
+            <span style={{ color: "var(--ats-fg-muted)" }}>/ limit ${a.threshold.toFixed(2)}</span>
+            {a.ratio !== null && (
+              <span style={{ color: "#ef4444" }}>
+                {a.ratio.toFixed(1)}× over
+              </span>
+            )}
+          </div>
+          <div className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+            Q{a.counts.quick} · D{a.counts.deep} · S{a.counts.synth} · R{a.counts.reads}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Error log panel ───────────────────────────────────────────────────────
+
+function ErrorLogPanel({ rows }: { rows: AdminError[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No errors logged. 🎉
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1.5 max-h-80 overflow-y-auto thin-scrollbar pr-1">
+      {rows.map(e => (
+        <div key={e.id} className="rounded-md border p-2" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
+          <div className="flex items-center justify-between gap-2 mb-0.5">
+            <div className="flex items-center gap-1.5">
+              <span
+                className="text-[9px] font-bold uppercase px-1 py-0.5 rounded border"
+                style={{
+                  color:           e.source === "frontend" ? "#8b5cf6" : "#ef4444",
+                  backgroundColor: (e.source === "frontend" ? "#8b5cf6" : "#ef4444") + "1a",
+                  borderColor:     (e.source === "frontend" ? "#8b5cf6" : "#ef4444") + "55",
+                }}
+              >
+                {e.source}
+              </span>
+              {e.status_code && (
+                <span className="text-[9px] font-mono" style={{ color: "var(--ats-fg-muted)" }}>
+                  {e.method ? `${e.method} ` : ""}{e.status_code}
+                </span>
+              )}
+              <span className="text-[11px] font-semibold truncate" style={{ color: "var(--ats-fg-primary)" }}>
+                {e.error_name ?? "Error"}
+              </span>
+            </div>
+            <span className="text-[9px] shrink-0" style={{ color: "var(--ats-fg-muted)" }}>
+              {fmtDateTime(e.created_at)}
+            </span>
+          </div>
+          {e.path && (
+            <p className="text-[10px] font-mono truncate" style={{ color: "var(--ats-fg-secondary)" }}>{e.path}</p>
+          )}
+          {e.message && (
+            <p className="text-[11px] mt-0.5 break-words" style={{ color: "var(--ats-fg-secondary)" }}>{e.message}</p>
+          )}
+          {e.user_email && (
+            <p className="text-[9px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>user: {e.user_email}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Feedback inbox ────────────────────────────────────────────────────────
+
+function FeedbackInbox({
+  rows, onToggle,
+}: {
+  rows: FeedbackRow[];
+  onToggle: (id: number, next: boolean) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No feedback yet. The 🐛 button in the main app posts here.
+      </div>
+    );
+  }
+  const CATEGORY_COLOR: Record<string, string> = {
+    bug:     "#ef4444",
+    feature: "#3b82f6",
+    general: "#64748b",
+  };
+  return (
+    <div className="space-y-2 max-h-[28rem] overflow-y-auto thin-scrollbar pr-1">
+      {rows.map(f => {
+        const color = CATEGORY_COLOR[f.category] ?? "#64748b";
+        return (
+          <div
+            key={f.id}
+            className="rounded-lg border p-2.5"
+            style={{
+              borderColor:     f.resolved ? "var(--ats-border-subtle)" : color + "55",
+              backgroundColor: f.resolved ? "var(--ats-bg-base)"       : color + "0f",
+              opacity:         f.resolved ? 0.6 : 1,
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border tracking-wide"
+                  style={{ color, backgroundColor: color + "1a", borderColor: color + "55" }}
+                >
+                  {f.category}
+                </span>
+                <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  {f.user_email ?? <em>(no email)</em>}
+                </span>
+                <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  · {fmtDateTime(f.created_at)}
+                </span>
+              </div>
+              <button
+                onClick={() => onToggle(f.id, !f.resolved)}
+                className="text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors hover:brightness-110"
+                style={{
+                  borderColor:     f.resolved ? "var(--ats-border-subtle)" : "#10b98155",
+                  backgroundColor: f.resolved ? "transparent"              : "#10b9811a",
+                  color:           f.resolved ? "var(--ats-fg-muted)"      : "#10b981",
+                }}
+              >
+                {f.resolved ? "Reopen" : "Resolve"}
+              </button>
+            </div>
+            <p className="text-[12px] break-words leading-relaxed" style={{ color: "var(--ats-fg-primary)" }}>
+              {f.message}
+            </p>
+            {f.page_url && (
+              <p className="text-[10px] mt-1 font-mono truncate" style={{ color: "var(--ats-fg-muted)" }}>
+                {f.page_url}
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Human-readable byte formatter — used only by DbStatsPanel.
+function fmtBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 // ── Formatting helpers ──────────────────────────────────────────────────────

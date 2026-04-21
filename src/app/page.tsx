@@ -1393,6 +1393,101 @@ export default function HomePage() {
     setAcctSwitching(null);
   };
   const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
+
+  // ── Feedback modal (bug report button) ─────────────────────────────────
+  // Floating 🐛 button at the bottom-right opens this modal. POSTs to
+  // /api/feedback; rows land in the feedback table and surface in the
+  // /admin inbox. Replaces an external feedback widget during alpha.
+  const [feedbackOpen,     setFeedbackOpen]     = useState(false);
+  const [feedbackCategory, setFeedbackCategory] = useState<"bug" | "feature" | "general">("bug");
+  const [feedbackText,     setFeedbackText]     = useState("");
+  const [feedbackSending,  setFeedbackSending]  = useState(false);
+  const [feedbackMsg,      setFeedbackMsg]      = useState<{ text: string; error?: boolean } | null>(null);
+
+  const submitFeedback = useCallback(async () => {
+    const message = feedbackText.trim();
+    if (message.length < 3) {
+      setFeedbackMsg({ text: "Please describe the issue in at least 3 characters.", error: true });
+      return;
+    }
+    setFeedbackSending(true);
+    setFeedbackMsg(null);
+    try {
+      const res = await fetchWithAuth(buildApiUrl("/api/feedback"), {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          category: feedbackCategory,
+          message,
+          page_url: typeof window !== "undefined" ? window.location.href : "",
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      setFeedbackMsg({ text: "Thanks! Sent to the developers." });
+      setFeedbackText("");
+      // Auto-close after 1.2 s so the success message is visible briefly.
+      window.setTimeout(() => { setFeedbackOpen(false); setFeedbackMsg(null); }, 1200);
+    } catch (e) {
+      setFeedbackMsg({
+        text: e instanceof Error ? e.message : String(e),
+        error: true,
+      });
+    } finally {
+      setFeedbackSending(false);
+    }
+  }, [feedbackCategory, feedbackText]);
+
+  // ── Global frontend error logger ───────────────────────────────────────
+  // Forwards window.onerror + unhandledrejection to the backend's
+  // /api/errors endpoint so the /admin error log captures crashes from
+  // the browser side (React render errors, async await failures, etc).
+  // Non-authenticated endpoint so failures in the login flow still
+  // telemeter. Rate-limited via the backend's anonymous bucket.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const post = (payload: { error_name?: string; message?: string; stack?: string }) => {
+      try {
+        const body = JSON.stringify({
+          error_name: (payload.error_name || "Error").slice(0, 200),
+          message:    (payload.message    || "").slice(0, 4000),
+          stack:      (payload.stack      || "").slice(0, 8000),
+          page_url:   window.location.href.slice(0, 500),
+        });
+        // Use keepalive + fetch so the request survives the crashing
+        // tab / unload. No auth header — backend accepts anonymous.
+        fetch(buildApiUrl("/api/errors"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+        }).catch(() => { /* swallow — nothing to do with a logging failure */ });
+      } catch { /* ignore — the original error matters more */ }
+    };
+    const onError = (ev: ErrorEvent) => {
+      post({
+        error_name: ev.error?.name || "Error",
+        message:    ev.message || String(ev.error),
+        stack:      ev.error?.stack || "",
+      });
+    };
+    const onRejection = (ev: PromiseRejectionEvent) => {
+      const reason = ev.reason;
+      post({
+        error_name: (reason?.name as string) || "UnhandledRejection",
+        message:    (reason?.message as string) || String(reason),
+        stack:      (reason?.stack as string) || "",
+      });
+    };
+    window.addEventListener("error",              onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error",              onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
   const [historyPanelHeight, setHistoryPanelHeight] = useState(150);
   type HistoryEntry = { id: string; title: string; updated_at: string; result?: SearchResponse | null; directionData?: QueryDirectionsResponse | null; entryType?: "understand" | "search"; usedUnderstand?: boolean; isFast?: boolean };
   const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
@@ -4845,6 +4940,127 @@ ${html}
           </div>
         </div>
       </div>
+
+      {/* ── Feedback button + modal — fixed bottom-right ─────────────────── */}
+      {!!authUser && (
+        <>
+          <button
+            onClick={() => { setFeedbackOpen(true); setFeedbackMsg(null); }}
+            className="fixed right-4 z-50 flex items-center gap-1.5 rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:brightness-110 px-3.5 py-2 text-xs font-semibold"
+            style={{
+              bottom:          historyPanelOpen ? historyPanelHeight + 12 : 16,
+              borderColor:     "var(--ats-border-accent)",
+              backgroundColor: "var(--ats-bg-accent-soft)",
+              color:           "var(--ats-fg-accent)",
+            }}
+            title="Report a bug or request a feature"
+          >
+            <span>🐛</span>
+            <span>Feedback</span>
+          </button>
+
+          {feedbackOpen && (
+            <div
+              className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm"
+              onClick={() => setFeedbackOpen(false)}
+            >
+              <div
+                className="w-full max-w-md rounded-2xl border shadow-2xl"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-3 px-5 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                  <span>🐛</span>
+                  <h2 className="flex-1 text-base font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                    Send feedback
+                  </h2>
+                  <button onClick={() => setFeedbackOpen(false)} className="transition-colors" style={{ color: "var(--ats-fg-muted)" }}>
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="px-5 py-4 space-y-3">
+                  <div className="flex gap-1.5">
+                    {(["bug", "feature", "general"] as const).map(c => {
+                      const active = feedbackCategory === c;
+                      return (
+                        <button
+                          key={c}
+                          onClick={() => setFeedbackCategory(c)}
+                          className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors"
+                          style={{
+                            borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                            backgroundColor: active ? "var(--ats-bg-accent-soft)" : "transparent",
+                            color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-secondary)",
+                          }}
+                        >
+                          {c === "bug" ? "Bug" : c === "feature" ? "Feature" : "General"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <textarea
+                    value={feedbackText}
+                    onChange={(e) => setFeedbackText(e.target.value)}
+                    rows={5}
+                    maxLength={4000}
+                    placeholder={
+                      feedbackCategory === "bug"
+                        ? "What happened? What did you expect? Steps if you remember them."
+                        : feedbackCategory === "feature"
+                          ? "What would you like AcademiCats to do?"
+                          : "Tell us anything — compliments, confusions, ideas."
+                    }
+                    className="w-full rounded-lg border p-3 text-sm outline-none resize-y"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-base)",
+                      color:           "var(--ats-fg-primary)",
+                    }}
+                  />
+                  <div className="flex items-center justify-between gap-2 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                    <span className="tabular-nums">{feedbackText.length} / 4000</span>
+                    <span>Sent as <code>{authUser.email}</code></span>
+                  </div>
+                  {feedbackMsg && (
+                    <p
+                      className="text-xs rounded-lg px-3 py-1.5 border"
+                      style={{
+                        borderColor:     feedbackMsg.error ? "#ef444455" : "#10b98155",
+                        backgroundColor: feedbackMsg.error ? "#ef44441a" : "#10b9811a",
+                        color:           feedbackMsg.error ? "#ef4444"   : "#10b981",
+                      }}
+                    >
+                      {feedbackMsg.text}
+                    </p>
+                  )}
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => setFeedbackOpen(false)}
+                      className="rounded-lg px-3 py-1.5 text-xs transition-colors"
+                      style={{ color: "var(--ats-fg-muted)" }}
+                    >Cancel</button>
+                    <button
+                      onClick={() => void submitFeedback()}
+                      disabled={feedbackSending || feedbackText.trim().length < 3}
+                      className="rounded-lg border px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      style={{
+                        borderColor:     "var(--ats-border-accent)",
+                        backgroundColor: "var(--ats-bg-accent-soft)",
+                        color:           "var(--ats-fg-accent)",
+                      }}
+                    >
+                      {feedbackSending ? "Sending…" : "Send"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
       {/* ── Auth widget — fixed bottom-left ───────────────────────────────── */}
       {!authLoading && (
