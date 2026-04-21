@@ -819,6 +819,15 @@ function AdminLoginScreen({ currentEmail }: { currentEmail: string | null }) {
 
   const submit = async () => {
     const e = email.trim().toLowerCase();
+    console.log("[admin-login] submit clicked, email:", e);
+    if (!e) {
+      setErr("Please enter an email.");
+      return;
+    }
+    if (!password) {
+      setErr("Please enter a password.");
+      return;
+    }
     if (!DEV_ACCTS.includes(e)) {
       setErr("Only developer accounts (dev01 / dev02 / dev03 @academicats.com) can sign into the admin console.");
       return;
@@ -826,10 +835,17 @@ function AdminLoginScreen({ currentEmail }: { currentEmail: string | null }) {
     setBusy(true);
     setErr("");
     try {
-      const { error } = await adminSupabase.auth.signInWithPassword({ email: e, password });
-      if (error) setErr(error.message);
-      // success path: onAuthStateChange listener re-renders to the dashboard.
+      console.log("[admin-login] calling Supabase signInWithPassword…");
+      const { data, error } = await adminSupabase.auth.signInWithPassword({ email: e, password });
+      console.log("[admin-login] Supabase response:", { hasSession: !!data?.session, error });
+      if (error) {
+        setErr(error.message);
+      } else if (!data?.session) {
+        setErr("Supabase returned no session. Check that the account exists and email/password auth is enabled for this project.");
+      }
+      // success path: onAuthStateChange listener in AdminPage re-renders to the dashboard.
     } catch (ex) {
+      console.error("[admin-login] exception:", ex);
       setErr(ex instanceof Error ? ex.message : String(ex));
     } finally {
       setBusy(false);
@@ -918,8 +934,14 @@ function AdminLoginScreen({ currentEmail }: { currentEmail: string | null }) {
           )}
           <button
             type="submit"
-            disabled={busy || !email.trim() || !password}
-            className="w-full rounded-lg px-4 py-2 text-sm font-bold shadow-md hover:brightness-110 hover:shadow-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+            // Also bind onClick directly — belt-and-suspenders if the form's
+            // onSubmit doesn't fire (browser quirks, nested form, autofill
+            // weirdness). The handler is idempotent because `busy` guards
+            // re-entry, and `type="submit"` still triggers form submission
+            // for the Enter-key path.
+            onClick={(ev) => { ev.preventDefault(); void submit(); }}
+            disabled={busy}
+            className="w-full rounded-lg px-4 py-2 text-sm font-bold shadow-md hover:brightness-110 hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-wait disabled:shadow-none cursor-pointer"
             style={{
               // Solid accent-colored background so the enabled state is
               // unambiguously "click me" rather than blending into the
