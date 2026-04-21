@@ -295,6 +295,29 @@ type AnnouncementLike = { id: string; author_email: string; text: string; create
 
 const DEV_SEED_EMAIL = "dev@academicats.com";
 
+// Small indeterminate progress strip used across action buttons to show
+// "something is happening" while an async operation is in flight. Pair
+// with a spinning icon on the same button for a consistent running-state
+// visual. `color` defaults to currentColor so the strip picks up the
+// button's theme-token text colour automatically.
+function ProgressStrip({ active, color }: { active: boolean; color?: string }) {
+  if (!active) return null;
+  return (
+    <span
+      className="pointer-events-none absolute left-0 bottom-0 h-[2px] w-full overflow-hidden"
+      aria-hidden
+    >
+      <span
+        className="block h-full w-1/3 rounded-full"
+        style={{
+          backgroundColor: color ?? "currentColor",
+          animation: "progress-slide 1.2s ease-in-out infinite",
+        }}
+      />
+    </span>
+  );
+}
+
 function DevControlsPanel({
   onError,
   onCleared,
@@ -2233,11 +2256,17 @@ export default function HomePage() {
   // is gated on the presence of its own data so neither shows until the
   // pipeline has actually produced the corresponding artefact. During
   // `isSubmitting` they stay hidden; they appear ONLY when results arrive.
+  // In Fast mode the backend skips the multi-agent pipeline entirely, so
+  // there's nothing meaningful under "Analytical Trace". Hide the section
+  // even if some stray agent field leaked in. Deep-mode still shows it
+  // as soon as any agent produces output.
   const hasAgentOutput =
-    !!agentData.evidence_mapper ||
-    !!agentData.scholar ||
-    !!agentData.gap_analyst ||
-    !!agentData.verifier;
+    !fastMode && (
+      !!agentData.evidence_mapper ||
+      !!agentData.scholar ||
+      !!agentData.gap_analyst ||
+      !!agentData.verifier
+    );
   const hasStrategy = !!result?.strategy_summary;
 
   const toBackendPaper = (paper: Paper) => (paper.raw && typeof paper.raw === "object" ? paper.raw : paper);
@@ -3256,6 +3285,7 @@ ${html}
               onSend={handleSendMessage}
               themeMode={themeMode}
               onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
+              onVote={(id, v) => { void announcementsFeed.vote(id, v); }}
             />
           </div>
         </div>
@@ -3399,72 +3429,61 @@ ${html}
                         </select>
                         <button
                           onClick={() => {
-                            // Three paths:
-                            //  a) Currently viewing translation in the
+                            // Four paths:
+                            //  a) IN FLIGHT → clicking again cancels the
+                            //     translation (AbortController). Label
+                            //     flips to "Stop" while translating so
+                            //     the affordance is clear.
+                            //  b) Currently viewing translation in the
                             //     selected language → flip back to original.
-                            //  b) Have a cached translation in the selected
+                            //  c) Have a cached translation in the selected
                             //     language but viewing original → flip to it.
-                            //  c) Otherwise → fire a fresh request.
+                            //  d) Otherwise → fire a fresh request.
+                            if (briefTranslating) {
+                              briefTransAbortRef.current?.abort();
+                              return;
+                            }
                             const cachedMatches =
                               !!briefTranslated && briefTranslatedLang === briefTargetLang;
                             if (briefShowTrans && cachedMatches) {
                               setBriefShowTrans(false);
                               return;
                             }
-                            if (cachedMatches && !briefTranslating) {
+                            if (cachedMatches) {
                               setBriefShowTrans(true);
                               return;
                             }
                             void requestBriefTranslation();
                           }}
-                          disabled={briefTranslating}
-                          title={briefShowTrans ? "Show original brief" : "Translate this brief"}
-                          // Explicit `cursor-default` on disabled — prevents
-                          // the OS wait-spinner cursor that `cursor-wait`
-                          // (Tailwind default on `disabled:`) would show.
-                          // Dynamic feedback comes from the indeterminate
-                          // progress bar + spinning globe below instead.
-                          className="relative inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 disabled:opacity-80 disabled:cursor-default overflow-hidden"
+                          title={
+                            briefTranslating ? "Stop translation" :
+                            briefShowTrans  ? "Show original brief" :
+                                              "Translate this brief"
+                          }
+                          // No `disabled` while translating — we want the
+                          // click to cancel. cursor-default + animated
+                          // feedback make it clear work is happening.
+                          className="relative inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 overflow-hidden"
                           style={{
                             backgroundColor: "var(--ats-bg-accent-soft)",
                             color:           "var(--ats-fg-accent)",
                           }}
                         >
-                          {/* Globe spins while translating as a running
-                              indicator. lucide-react icons respect the
-                              `animate-spin` utility because they render
-                              as <svg>. */}
-                          <Globe size={12} className={briefTranslating ? "animate-spin" : ""} />
+                          {briefTranslating ? (
+                            <Square size={10} fill="currentColor" />
+                          ) : (
+                            <Globe size={12} />
+                          )}
                           <span>
                             {briefTranslating
-                              ? "Translating…"
+                              ? "Stop"
                               : (briefShowTrans && briefTranslatedLang === briefTargetLang)
                                 ? "Show Original"
                                 : (briefTranslated && briefTranslatedLang === briefTargetLang)
                                   ? "Show Translation"
                                   : "Translate"}
                           </span>
-                          {/* Indeterminate progress strip — slides a short
-                              gradient bar back and forth across the
-                              bottom edge while the request is in flight.
-                              Uses the `progress-slide` keyframe defined
-                              in globals.css (also used by the Agent
-                              activity bar). Absolute so it doesn't
-                              push the button's text around. */}
-                          {briefTranslating && (
-                            <span
-                              className="pointer-events-none absolute left-0 bottom-0 h-[2px] w-full overflow-hidden"
-                              aria-hidden
-                            >
-                              <span
-                                className="block h-full w-1/3 rounded-full"
-                                style={{
-                                  backgroundColor: "var(--ats-fg-accent)",
-                                  animation: "progress-slide 1.2s ease-in-out infinite",
-                                }}
-                              />
-                            </span>
-                          )}
+                          <ProgressStrip active={briefTranslating} color="var(--ats-fg-accent)" />
                         </button>
                       </div>
                     )}
@@ -4234,37 +4253,43 @@ ${html}
                           <button
                             onClick={() => void runDeepRead(paper, paperKey)}
                             disabled={!hasDownloadSource(paper) || deepReadLoading[paperKey]}
-                            className={`shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed overflow-hidden ${
                               deepReadLoading[paperKey]
-                                ? "border-blue-500/60 bg-blue-500/15 text-blue-300 animate-pulse"
+                                ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
                             }`}
                           >
-                            <Microscope size={12} className="shrink-0" /><span className="truncate">{deepReadLoading[paperKey] ? "Running…" : "Deep Read"}</span>
+                            <Microscope size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
+                            <span className="truncate">{deepReadLoading[paperKey] ? "Running…" : "Deep Read"}</span>
+                            <ProgressStrip active={!!deepReadLoading[paperKey]} color="#60a5fa" />
                           </button>
                           {/* Download PDF */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/download-original"), { paper: toBackendPaper(paper) }, `${paper.title || "paper"}.pdf`, `${paperKey}-original`)}
                             disabled={!hasDownloadSource(paper) || originalLoading[`${paperKey}-original`]}
-                            className={`shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed overflow-hidden ${
                               originalLoading[`${paperKey}-original`]
-                                ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-300 animate-pulse"
+                                ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-300"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
                             }`}
                           >
-                            <Download size={12} className="shrink-0" /><span className="truncate">{originalLoading[`${paperKey}-original`] ? "Downloading…" : "Download PDF"}</span>
+                            <Download size={12} className={`shrink-0 ${originalLoading[`${paperKey}-original`] ? "animate-pulse" : ""}`} />
+                            <span className="truncate">{originalLoading[`${paperKey}-original`] ? "Downloading…" : "Download PDF"}</span>
+                            <ProgressStrip active={!!originalLoading[`${paperKey}-original`]} color="#34d399" />
                           </button>
                           {/* Translate PDF + inline language selector */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/translate-pdf"), { paper: toBackendPaper(paper), target_languages: langs }, `${paper.title || "paper"}_${(langs[0] || "translated").replace(/\s*\(.*?\)/g, "").trim()}.pdf`, `${paperKey}-translate`)}
                             disabled={!hasDownloadSource(paper) || translateLoading[`${paperKey}-translate`]}
-                            className={`shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed overflow-hidden ${
                               translateLoading[`${paperKey}-translate`]
-                                ? "border-purple-500/60 bg-purple-500/10 text-purple-300 animate-pulse"
+                                ? "border-purple-500/60 bg-purple-500/10 text-purple-300"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
                             }`}
                           >
-                            <Globe size={12} className="shrink-0" /><span className="truncate">{translateLoading[`${paperKey}-translate`] ? "Translating…" : "Translate PDF"}</span>
+                            <Globe size={12} className={`shrink-0 ${translateLoading[`${paperKey}-translate`] ? "animate-spin" : ""}`} />
+                            <span className="truncate">{translateLoading[`${paperKey}-translate`] ? "Translating…" : "Translate PDF"}</span>
+                            <ProgressStrip active={!!translateLoading[`${paperKey}-translate`]} color="#c084fc" />
                           </button>
                           <select
                             value={langs[0] ?? "Chinese (Simplified)"}
@@ -4740,17 +4765,26 @@ ${html}
                     </select>
                   </div>
 
-                  {/* Generate / Stop row */}
+                  {/* Generate / Stop row — Generate button gets the same
+                      spinning-icon + sliding-bar treatment as the brief
+                      Translate button so its in-flight state reads the
+                      same way across the app. */}
                   <div className="flex gap-2">
                     <button
                       onClick={() => void handleSynthesize()}
                       disabled={labRefs.length === 0 || labGenerating}
-                      className={`flex-1 rounded-xl px-4 py-3 text-sm font-bold transition-all disabled:cursor-not-allowed ${
+                      className={`relative flex-1 rounded-xl px-4 py-3 text-sm font-bold transition-all disabled:cursor-not-allowed overflow-hidden ${
                         labGenerating
-                          ? "border border-violet-500/40 bg-violet-500/10 text-violet-300 animate-pulse"
+                          ? "border border-violet-500/40 bg-violet-500/10 text-violet-300"
                           : "bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-40"
                       }`}
-                    >{labGenerating ? <span className="flex items-center justify-center gap-1.5"><Sparkles size={14} />Composing…</span> : <span className="flex items-center justify-center gap-1.5"><Sparkles size={14} />Generate Academic Text</span>}</button>
+                    >
+                      <span className="flex items-center justify-center gap-1.5">
+                        <Sparkles size={14} className={labGenerating ? "animate-spin" : ""} />
+                        {labGenerating ? "Composing…" : "Generate Academic Text"}
+                      </span>
+                      <ProgressStrip active={labGenerating} color="#a78bfa" />
+                    </button>
                     {labGenerating && (
                       <button
                         onClick={handleLabStop}
