@@ -189,6 +189,7 @@ function ControlStrip({
   collapsed,
   onCollapse,
   onExpand,
+  paused,
 }: {
   count: number;
   idx: number;
@@ -196,6 +197,7 @@ function ControlStrip({
   collapsed: boolean;
   onCollapse: () => void;
   onExpand: () => void;
+  paused: boolean;
 }) {
   const safeIdx = count > 0 ? idx % count : 0;
   const useDots = count > 1 && count <= DOT_LIMIT;
@@ -218,8 +220,9 @@ function ControlStrip({
           still functional so returning to board mode remembers the idx. */}
       {count > 1 && (
         <div
-          className="flex items-center gap-1 transition-opacity"
-          style={{ opacity: collapsed ? 0.5 : 1 }}
+          className="flex items-center gap-1 transition-opacity duration-200"
+          style={{ opacity: collapsed ? 0.5 : (paused ? 0.65 : 1) }}
+          title={paused && !collapsed ? "Paused — move mouse off to resume" : undefined}
         >
           <button
             onClick={prev}
@@ -408,7 +411,9 @@ export function AnnouncementBanner({
       onMouseEnter={() => setHoverPaused(true)}
       onMouseLeave={() => setHoverPaused(false)}
     >
-      {/* CONTROL STRIP — lives outside the card, doesn't eat banner space */}
+      {/* CONTROL STRIP — lives outside the card, doesn't eat banner space.
+          `paused` drives the dim-on-hover feedback so the user knows the
+          rotator is frozen while their cursor is over the banner. */}
       <ControlStrip
         count={count}
         idx={idx}
@@ -416,6 +421,7 @@ export function AnnouncementBanner({
         collapsed={collapsed}
         onCollapse={onCollapse}
         onExpand={onExpand}
+        paused={hoverPaused}
       />
 
       {/* BANNER CARD — the board-mode structure (rotator + composer) is
@@ -445,10 +451,18 @@ export function AnnouncementBanner({
         >
           {/* Row 1 — rotator (marquees when text overflows). Right
               padding reserves space for the theme toggle so long
-              messages don't slide under it. */}
+              messages don't slide under it. Hover-pause is signalled
+              two ways: (1) the megaphone swaps to a pause glyph, and
+              (2) a subtle "Paused" pill fades in on the left so the
+              user can't miss that the rotator is actually frozen. */}
           <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
-            <span className="megaphone-breath shrink-0 flex items-center justify-center">
-              <Megaphone size={13} style={{ color: "var(--ats-fg-accent)", opacity: 0.85 }} />
+            <span
+              className={`shrink-0 flex items-center justify-center transition-all duration-200 ${hoverPaused ? "" : "megaphone-breath"}`}
+              title={hoverPaused ? "Paused — move mouse away to resume rotation" : undefined}
+            >
+              {hoverPaused
+                ? <PauseGlyph color="var(--ats-fg-accent)" />
+                : <Megaphone size={13} style={{ color: "var(--ats-fg-accent)", opacity: 0.85 }} />}
             </span>
             <div className="min-w-0 flex-1 overflow-hidden">
               <AnnouncementRotatorCard items={announcements} paused={hoverPaused} idx={idx} />
@@ -618,6 +632,17 @@ function SignedAnonymousToggle({ value, onChange }: { value: boolean; onChange: 
         ANON
       </button>
     </div>
+  );
+}
+
+// Small ‖ pause glyph — used in the rotator megaphone slot while the user
+// hovers to make the pause state feel intentional rather than accidental.
+function PauseGlyph({ color }: { color: string }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="6"  y="4" width="4" height="16" rx="1" fill={color} opacity={0.85} />
+      <rect x="14" y="4" width="4" height="16" rx="1" fill={color} opacity={0.85} />
+    </svg>
   );
 }
 

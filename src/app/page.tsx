@@ -800,6 +800,34 @@ export default function HomePage() {
   const setRotatorIntervalMs = usePrefsStore(s => s.setRotatorIntervalMs);
   const setThemeTransitionMs = usePrefsStore(s => s.setThemeTransitionMs);
 
+  // Theme-change unifier: whenever mode / day-theme / night-theme flips,
+  // tag <html> with `theme-transitioning` for the full configured
+  // duration. The globals.css rule keyed on `html.theme-transitioning *`
+  // forces every element — including Tailwind `.transition-colors`
+  // buttons that would otherwise finish in 150ms — to the user's
+  // configured theme-transition duration, so the whole page crossfades
+  // in lockstep. Class is removed after the animation finishes so
+  // normal hover/focus interactions stay snappy.
+  //
+  // Skips the very first mount (nothing to animate yet) so page load
+  // doesn't briefly slow down its entry transitions.
+  const _themeMountedRef = useRef(false);
+  useEffect(() => {
+    if (!_themeMountedRef.current) {
+      _themeMountedRef.current = true;
+      return;
+    }
+    if (typeof document === "undefined") return;
+    document.documentElement.classList.add("theme-transitioning");
+    // +60 ms buffer past the configured duration so the class is still
+    // present when the final frame paints.
+    const hold = themeTransitionMs + 60;
+    const t = window.setTimeout(() => {
+      document.documentElement.classList.remove("theme-transitioning");
+    }, hold);
+    return () => window.clearTimeout(t);
+  }, [themeMode, dayThemeId, nightThemeId, themeTransitionMs]);
+
   // Per-panel translucency (0.4–1.0). Applied to the three main panel backgrounds
   // via `rgb(from <token> r g b / <alpha>)` — lets the page gradient bleed through
   // without dimming the panel's text/content.
@@ -5736,14 +5764,45 @@ ${html}
                     </div>
                   </div>
 
-                  {/* Saved accounts */}
+                  {/* Saved accounts — shows every account that has a
+                      cached session in localStorage. Multiple accounts can
+                      be "mounted" simultaneously: the Active row is the
+                      live supabase.auth session; every other row marked
+                      "Mounted" has a cached refresh-token that the /admin
+                      page (or any future multi-session feature) can use
+                      without disturbing the current session. Dev accounts
+                      with a mounted session also unlock admin access. */}
                   {savedAccounts.length > 0 && (
                     <div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">Saved accounts</p>
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-[10px] text-slate-500 uppercase tracking-wide">Mounted accounts</p>
+                        <p className="text-[9px] text-slate-600">
+                          {savedAccounts.length} session{savedAccounts.length === 1 ? "" : "s"}
+                        </p>
+                      </div>
                       <div className="space-y-1.5">
                         {savedAccounts.map(acct => {
                           const isCurrent = acct.email === authUser?.email;
                           const isLoading = acctSwitching === acct.email;
+                          const hasCachedSession = (() => {
+                            try {
+                              return !!window.localStorage.getItem(_sessionKey(acct.email));
+                            } catch { return false; }
+                          })();
+                          const statusLabel = isCurrent
+                            ? "Active"
+                            : hasCachedSession
+                              ? "Mounted"
+                              : "Signed out";
+                          const statusColor = isCurrent
+                            ? "text-blue-400 bg-blue-500/15 border-blue-500/30"
+                            : hasCachedSession
+                              ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/25"
+                              : "text-slate-500 bg-slate-700/30 border-slate-600/40";
+                          const typeLabel =
+                            acct.type === "dev"   ? "Dev · password login" :
+                            acct.type === "oauth" ? "Google OAuth" :
+                                                    "OTP · magic link";
                           return (
                             <div key={acct.email} className={`flex items-center gap-2 rounded-xl px-3 py-2 ${isCurrent ? "bg-blue-500/10 border border-blue-500/20" : "bg-slate-800/40"}`}>
                               <div className="h-6 w-6 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-[10px] font-bold shrink-0">
@@ -5751,9 +5810,17 @@ ${html}
                               </div>
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs text-slate-200 truncate">{acct.email}</p>
-                                <p className="text-[9px] text-slate-500">{acct.type === "dev" ? "Dev · password login" : "OTP · magic link"}</p>
+                                <p className="text-[9px] text-slate-500 flex items-center gap-1.5">
+                                  <span>{typeLabel}</span>
+                                  {acct.type === "dev" && hasCachedSession && (
+                                    <span className="text-amber-400/80">· admin access available</span>
+                                  )}
+                                </p>
                               </div>
                               <div className="flex items-center gap-1.5 shrink-0">
+                                <span className={`inline-flex items-center text-[9px] font-bold uppercase tracking-wide border rounded px-1.5 py-0.5 ${statusColor}`}>
+                                  {statusLabel}
+                                </span>
                                 {!isCurrent && (
                                   <button
                                     onClick={() => switchToAccount(acct)}
@@ -5761,17 +5828,27 @@ ${html}
                                     className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors font-medium"
                                   >{isLoading ? "…" : "Switch"}</button>
                                 )}
-                                {isCurrent && <span className="text-[9px] text-blue-400">Active</span>}
                                 <button
                                   onClick={() => removeSavedAccount(acct.email)}
                                   className="text-[10px] text-slate-600 hover:text-red-400 transition-colors ml-1"
-                                  title="Remove"
+                                  title="Remove this account (drops its cached session)"
                                 >✕</button>
                               </div>
                             </div>
                           );
                         })}
                       </div>
+                      {/* Explainer — clarifies that multiple accounts can
+                          stay mounted at once without conflict, and that
+                          admin access follows any mounted dev account. */}
+                      <p className="mt-2 text-[9px] text-slate-600 leading-relaxed">
+                        Accounts marked <span className="text-emerald-400">Mounted</span> keep a
+                        refresh token on this browser — switching between them skips the
+                        re-login step. The <span className="text-blue-400">Active</span> row is
+                        the live session used for every main-app request. /admin calls use
+                        any mounted dev account independently, so you can browse the dashboard
+                        while signed in as a regular user.
+                      </p>
                     </div>
                   )}
 
