@@ -846,7 +846,7 @@ function AnnouncementLog({ rows }: { rows: AdminAnnouncement[] }) {
                 className="text-[10px] font-semibold"
                 style={{ color: isSeed ? "#d97706" : "var(--ats-fg-accent)" }}
               >
-                {isSeed ? "SEED" : (a.author_email || "ANONYMOUS")}
+                {isSeed ? "SEED" : (a.author_email || "NAMELESS CAT")}
               </span>
               <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
                 {fmtDateTime(a.created_at)}

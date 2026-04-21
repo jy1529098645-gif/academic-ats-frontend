@@ -45,8 +45,13 @@ const DOT_LIMIT          = 10;
 
 function formatAuthor(a: Announcement): string | null {
   const email = (a.author_email || "").toLowerCase();
+  // Anonymous posts land with author_email="" from the backend (see the
+  // POST /api/announcements handler). Render them under a playful
+  // "Nameless Cat" handle — fits the AcademiCats branding and makes
+  // anonymity feel intentional rather than sketchy. "Anonymous User"
+  // was the old copy; several users asked for something lighter.
   if (!email || email === "anonymous" || email.startsWith("anonymous@")) {
-    return "Anonymous User";
+    return "Nameless Cat";
   }
   if (email.includes("dev@")) return null;
   return email.split("@")[0];

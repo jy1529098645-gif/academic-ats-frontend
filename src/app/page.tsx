@@ -1114,7 +1114,7 @@ export default function HomePage() {
   // userRole: "guest" | "user" | "dev"
   const userRole = !authUser ? "guest" : DEV_ACCTS.includes(authUser.email ?? "") ? "dev" : "user";
   const isDeveloper = userRole === "dev";
-  type SavedAccount = { email: string; type: "dev" | "otp" };
+  type SavedAccount = { email: string; type: "dev" | "otp" | "oauth" };
   const [savedAccounts, setSavedAccounts] = useState<SavedAccount[]>(() => {
     try { return JSON.parse(localStorage.getItem("ats-saved-accounts") || "[]"); } catch { return []; }
   });
@@ -1133,21 +1133,120 @@ export default function HomePage() {
     persistAccounts([...savedAccounts, { email, type }]);
     setAddAcctInput("");
   };
-  const removeSavedAccount = (email: string) => persistAccounts(savedAccounts.filter(a => a.email !== email));
+  const removeSavedAccount = (email: string) => {
+    // Dropping the account also drops its cached session — no point
+    // keeping auth tokens around for an account the user has forgotten.
+    try { localStorage.removeItem(_sessionKey(email)); } catch { /* ignore */ }
+    persistAccounts(savedAccounts.filter(a => a.email !== email));
+  };
 
   const handleGoogleLogin = async () => {
     const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/` : 'https://academic-ats-frontend.vercel.app/';
     await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } });
   };
 
+  // ── Multi-session session-cache ─────────────────────────────────────────
+  // Supabase only keeps ONE active session at a time — signing into
+  // account B replaces the tokens for account A in the shared
+  // `sb-<ref>-auth-token` slot. To support "switch between accounts
+  // without re-authenticating each time", we shadow-cache the refresh
+  // token for every session we see under a per-email key. When the
+  // user clicks Switch, we pull the stored refresh token for the
+  // target account and call auth.setSession() to restore it instantly.
+  // Fallback to the full password / magic-link flow if no cached
+  // session exists or the refresh token has expired.
+
+  type CachedSession = { access_token: string; refresh_token: string };
+
+  // Defined at the top of the hook scope so handlers can reference it
+  // without worrying about JS hoisting / closure capture.
+  function _sessionKey(email: string): string {
+    return `ats-session::${email.toLowerCase()}`;
+  }
+
+  function _cacheSession(email: string, s: CachedSession) {
+    try { localStorage.setItem(_sessionKey(email), JSON.stringify(s)); } catch { /* quota — ignore */ }
+  }
+
+  function _loadCachedSession(email: string): CachedSession | null {
+    try {
+      const raw = localStorage.getItem(_sessionKey(email));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed?.refresh_token) return null;
+      return parsed as CachedSession;
+    } catch {
+      return null;
+    }
+  }
+
+  // When an account-switch target has a cached refresh token, this path
+  // calls auth.setSession() which validates the token against Supabase
+  // and — if still valid — re-establishes the full session client-side
+  // (writes the shared sb-auth-token slot, fires SIGNED_IN). Returns
+  // true on success, false if the cached token is expired / invalid so
+  // the caller can fall back to a fresh login.
+  async function _restoreCachedSession(email: string): Promise<boolean> {
+    const cached = _loadCachedSession(email);
+    if (!cached) return false;
+    try {
+      const { error } = await supabase.auth.setSession({
+        access_token:  cached.access_token,
+        refresh_token: cached.refresh_token,
+      });
+      if (error) {
+        // Token expired or revoked — drop the cache so we don't keep
+        // trying this dead session on future switch attempts.
+        try { localStorage.removeItem(_sessionKey(email)); } catch { /* ignore */ }
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   const switchToAccount = async (acct: SavedAccount) => {
     setAcctSwitchMsg(null);
     setAcctSwitching(acct.email);
     try {
+      // Step 1 — save the current session under its own email so the
+      // user can flip back to it later without re-auth. Runs even if
+      // the switch below ultimately fails; the cached token remains
+      // valid until Supabase rotates its refresh family.
+      const { data: { session: current } } = await supabase.auth.getSession();
+      const currentEmail = current?.user?.email;
+      if (currentEmail && current?.refresh_token && current?.access_token) {
+        _cacheSession(currentEmail, {
+          access_token:  current.access_token,
+          refresh_token: current.refresh_token,
+        });
+      }
+
+      // Step 2 — try the cached-session fast path first. A hit means
+      // zero network round-trips visible to the user (setSession's
+      // refresh call is sub-second) and no emails / passwords.
+      const restored = await _restoreCachedSession(acct.email);
+      if (restored) {
+        setUserPanel(null);
+        setUserMenuOpen(false);
+        setAcctSwitchMsg({ text: `Switched to ${acct.email}` });
+        return;
+      }
+
+      // Step 3 — no cached session (or it expired). Fall back to the
+      // appropriate auth method for this account type. OAuth accounts
+      // can only come back via their provider redirect, so we surface
+      // a hint instead of silently doing nothing.
       if (acct.type === "dev") {
         const { error } = await supabase.auth.signInWithPassword({ email: acct.email, password: DEV_PWD });
         if (error) { setAcctSwitchMsg({ text: error.message, error: true }); }
         else { setUserPanel(null); setUserMenuOpen(false); }
+      } else if (acct.type === "oauth") {
+        setAcctSwitchMsg({
+          text: `Session for ${acct.email} expired — please sign in again via Google.`,
+          error: true,
+        });
       } else {
         const redirectTo = typeof window !== "undefined" ? `${window.location.origin}/` : "/";
         const { error } = await supabase.auth.signInWithOtp({ email: acct.email, options: { emailRedirectTo: redirectTo } });
@@ -1267,19 +1366,52 @@ export default function HomePage() {
   }, [_needsTick]);
 
   // ── Auth: load current session + subscribe to changes ─────────────────────
+  //
+  // Every valid session we observe — whether from the initial getSession,
+  // a fresh login, or an OAuth redirect — gets mirrored into the
+  // per-email session cache (_cacheSession) AND auto-registered in the
+  // saved-accounts list. That makes "switch back to the account I was
+  // just on" work without the user ever having to manually add it under
+  // Accounts → Add. The cache persists across tabs (shared localStorage)
+  // and survives until Supabase rotates or invalidates the refresh
+  // family, so a day-later switch is usually still instant.
   useEffect(() => {
+    const cacheAndRegister = (session: { access_token?: string; refresh_token?: string; user?: { email?: string | null } } | null) => {
+      const email = session?.user?.email?.toLowerCase();
+      if (!email || !session?.access_token || !session?.refresh_token) return;
+      _cacheSession(email, {
+        access_token:  session.access_token,
+        refresh_token: session.refresh_token,
+      });
+      // Auto-register any email we see logged in, so it shows up in the
+      // Accounts → Switch list next time the user opens that panel.
+      // Dedup by email; tier is inferred from DEV_ACCTS / domain.
+      setSavedAccounts(prev => {
+        if (prev.some(a => a.email === email)) return prev;
+        const type: SavedAccount["type"] = DEV_ACCTS.includes(email)
+          ? "dev"
+          : (email.endsWith("@gmail.com") ? "oauth" : "otp");
+        const next = [...prev, { email, type }];
+        try { localStorage.setItem("ats-saved-accounts", JSON.stringify(next)); } catch { /* ignore */ }
+        return next;
+      });
+    };
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       authTokenRef.current = session?.access_token ?? null;
       setAuthUser(session?.user ?? null);
+      cacheAndRegister(session);
       console.log("[auth] getSession →", session?.user?.email ?? "no session", "| token:", session?.access_token ? "✓" : "✗");
       setAuthLoading(false);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       authTokenRef.current = session?.access_token ?? null;
       setAuthUser(session?.user ?? null);
+      cacheAndRegister(session);
       console.log("[auth] onAuthStateChange →", session?.user?.email ?? "signed out", "| token:", session?.access_token ? "✓" : "✗");
     });
     return () => subscription.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Per-user localStorage key helpers ────────────────────────────────────
