@@ -1,23 +1,34 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // /admin — dev-only commercial monitoring dashboard.
 //
-// Access control happens in two places:
-//   1. Client-side: access is granted if EITHER the current Supabase
-//      session OR a previously-cached dev session (see `ats-session::*`
-//      keys written by page.tsx's auth listener) belongs to a
-//      DEV_ACCTS email. This lets the user switch to a non-dev account
-//      in the main app and still keep admin access here — the page
-//      will use the cached dev refresh-token to mint fresh access
-//      tokens for every /api/admin/* call, without disturbing the
-//      current app's session.
-//   2. Server-side: every /api/admin/* endpoint re-runs `_require_dev`
-//      which enforces tier == "dev" or membership in the email allowlist.
+// Auth architecture (updated):
+//   /admin uses a SEPARATE Supabase auth client (`getAdminClient()`) with its
+//   own localStorage storage key. This is completely isolated from the main
+//   app's auth state — signing in / out of the main app has zero effect on
+//   the admin session, and vice-versa. The operator signs in once here with
+//   a dev account; the session persists across main-app account switches,
+//   reloads, and even tab closes (until it expires or is explicitly signed
+//   out from the admin console).
+//
+//   This replaces the previous "cached refresh token" fallback which had a
+//   hard edge case around Supabase token rotation — if the user signed in
+//   as a new account in the main app, Supabase could rotate the dev's old
+//   refresh token as part of the sign-in flow, killing /admin access. The
+//   separate-client approach sidesteps that entirely.
+//
+//   Server-side: every /api/admin/* endpoint still re-runs `_require_dev`
+//   which enforces tier == "dev" OR membership in the email allowlist.
 //
 // Data flow:
 //   - /api/admin/overview            — polled every 10s
+//   - /api/admin/system-health       — polled every 10s
 //   - /api/admin/usage-timeseries    — refreshed every 60s
 //   - /api/admin/users               — refreshed every 60s
 //   - /api/admin/announcements-all   — refreshed every 60s
+//   - /api/admin/db-stats            — refreshed every 60s
+//   - /api/admin/cost-alerts         — refreshed every 60s
+//   - /api/admin/errors              — refreshed every 30s
+//   - /api/admin/feedback            — refreshed every 30s
 //
 // Charts are hand-rolled SVG (see `LineChart` / `DonutChart` below) so we
 // don't pull in a chart library for a single-page internal tool.
@@ -27,13 +38,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase/client";
+import { getAdminClient } from "@/lib/supabase/admin-client";
 import { buildApiUrl } from "@/lib/api";
 import {
   BarChart as BarChartIcon, Users, Activity, MessageSquare, Zap,
-  DollarSign, RefreshCw, ArrowLeft, AlertTriangle, Sparkles,
-  FileText, Clock, Database,
+  DollarSign, RefreshCw, ArrowLeft, Sparkles,
+  FileText, Clock, Database, LogOut,
 } from "lucide-react";
 
 // ── Must stay in sync with the same list in src/app/page.tsx ────────────────
@@ -43,128 +53,19 @@ const DEV_ACCTS = [
   "dev03@academicats.com",
 ];
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
+// Isolated admin Supabase client — see admin-client.ts for the rationale.
+// One instance module-wide so all hooks share the same session state.
+const adminSupabase = getAdminClient();
 
-// Per-email session cache key — must match _sessionKey() in page.tsx.
-function devSessionKey(email: string): string {
-  return `ats-session::${email.toLowerCase()}`;
-}
-
-// Read any cached dev session from localStorage, newest first. Returns
-// null if none of the three seed accounts have ever been signed in on
-// this browser, OR all of their cached refresh tokens have been wiped.
-function findCachedDevSession(): { email: string; refresh_token: string; access_token: string } | null {
-  if (typeof window === "undefined") return null;
-  for (const email of DEV_ACCTS) {
-    try {
-      const raw = window.localStorage.getItem(devSessionKey(email));
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      if (parsed?.refresh_token && parsed?.access_token) {
-        return { email, refresh_token: parsed.refresh_token, access_token: parsed.access_token };
-      }
-    } catch { /* bad JSON — keep scanning */ }
-  }
-  return null;
-}
-
-// Exchange a cached refresh token for a fresh access token by POSTing
-// directly to Supabase's /auth/v1/token endpoint. This bypasses the
-// `supabase.auth` client entirely so the current session (which may
-// belong to a completely different, non-dev user) is NOT overwritten.
-// Updates the cache with the rotated refresh token so the next call
-// picks up the new one.
-async function mintDevAccessToken(): Promise<string | null> {
-  const cached = findCachedDevSession();
-  if (!cached || !SUPABASE_URL || !SUPABASE_KEY) return null;
-  try {
-    const res = await fetch(
-      `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey:         SUPABASE_KEY,
-          Authorization:  `Bearer ${SUPABASE_KEY}`,
-        },
-        body: JSON.stringify({ refresh_token: cached.refresh_token }),
-      },
-    );
-    if (!res.ok) {
-      // Refresh token revoked or expired — drop the cache so we don't
-      // keep hitting Supabase for a dead token every 10 s.
-      try { window.localStorage.removeItem(devSessionKey(cached.email)); } catch { /* ignore */ }
-      return null;
-    }
-    const json = await res.json();
-    if (!json?.access_token) return null;
-    // Persist the rotated refresh token so subsequent mints succeed.
-    try {
-      window.localStorage.setItem(
-        devSessionKey(cached.email),
-        JSON.stringify({
-          access_token:  json.access_token,
-          refresh_token: json.refresh_token ?? cached.refresh_token,
-        }),
-      );
-    } catch { /* quota — ignore */ }
-    return json.access_token;
-  } catch {
-    return null;
-  }
-}
-
-// Drop-in replacement for fetchWithAuth that guarantees the outgoing
-// request carries a dev-account access token, regardless of who the
-// main app is currently signed in as.
-//
-// Priority order:
-//   1. LIVE session — if the current Supabase session belongs to a dev
-//      account (DEV_ACCTS), use its access token directly. This is the
-//      common case when the user is actively signed in as dev; no need
-//      to hit Supabase's refresh endpoint or read from localStorage at
-//      all. Also handles the "user opened /admin WITHOUT first visiting
-//      /" case where page.tsx's auth listener never ran to populate the
-//      per-email cache.
-//   2. CACHED session — if the current live session is a non-dev
-//      account (the user deliberately switched), fall back to the
-//      cached dev refresh token. Mint a fresh access token via a
-//      direct POST to Supabase's /auth/v1/token endpoint so the main
-//      app's current session isn't disturbed.
-//   3. Give up — surface a clear message asking the user to sign in.
-//
-// The live-session path ALSO refreshes the per-email cache as a
-// side-effect, so a future switch to a non-dev account still has a
-// valid refresh token to use.
-async function fetchAsDev(url: string, options: RequestInit = {}): Promise<Response> {
-  let token: string | null = null;
-
-  // Step 1: live session
-  try {
-    const { data } = await supabase.auth.getSession();
-    const sess = data.session;
-    const email = sess?.user?.email?.toLowerCase() ?? null;
-    if (email && DEV_ACCTS.includes(email) && sess?.access_token && sess.refresh_token) {
-      token = sess.access_token;
-      // Side-effect: seed the per-email cache so a future non-dev
-      // switch still has a refresh token to mint from.
-      try {
-        window.localStorage.setItem(
-          devSessionKey(email),
-          JSON.stringify({ access_token: sess.access_token, refresh_token: sess.refresh_token }),
-        );
-      } catch { /* quota — ignore */ }
-    }
-  } catch { /* getSession failed — continue to cached path */ }
-
-  // Step 2: cached refresh token
+// All admin API calls go through this — the admin client's access token
+// is refreshed automatically by Supabase, so we just read the current
+// session each request. If the session is missing, callers surface the
+// login screen (below) rather than erroring the user out silently.
+async function fetchWithAdminAuth(url: string, options: RequestInit = {}): Promise<Response> {
+  const { data } = await adminSupabase.auth.getSession();
+  const token = data.session?.access_token;
   if (!token) {
-    token = await mintDevAccessToken();
-  }
-
-  if (!token) {
-    throw new Error("No cached dev session on this browser. Sign in with a dev account at least once, then come back here.");
+    throw new Error("No admin session. Sign in below.");
   }
   return fetch(url, {
     ...options,
@@ -331,82 +232,58 @@ const TIER_COLORS: Record<string, string> = {
 // ── Page component ──────────────────────────────────────────────────────────
 
 export default function AdminPage() {
-  const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
   const [authEmail,   setAuthEmail]   = useState<string | null>(null);
-  // Separate state for the cached-dev path so we can tell the user
-  // "you're impersonating a dev account from cache" vs "you're actively
-  // signed in as a dev account right now".
-  const [cachedDevEmail, setCachedDevEmail] = useState<string | null>(null);
 
-  // Gate — dev accounts OR any cached dev session can enter.
+  // Gate — driven entirely by the ISOLATED admin auth client. Subscribe
+  // to its auth state so sign-in / sign-out / refresh events flip the
+  // UI without needing a manual reload.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await supabase.auth.getSession();
+        const { data } = await adminSupabase.auth.getSession();
         if (cancelled) return;
-        const sess = data.session;
-        const email = sess?.user?.email?.toLowerCase() ?? null;
-        setAuthEmail(email);
-        // If the current live session belongs to a dev account, SEED
-        // the per-email cache right now. The admin page might be the
-        // first page the user visits after login (bookmark, direct
-        // link), in which case page.tsx's auth listener never ran to
-        // populate the cache — without this seed, fetchAsDev's cache
-        // fallback would fail when the user later switches accounts.
-        if (email && DEV_ACCTS.includes(email) && sess?.access_token && sess.refresh_token) {
-          try {
-            window.localStorage.setItem(
-              devSessionKey(email),
-              JSON.stringify({ access_token: sess.access_token, refresh_token: sess.refresh_token }),
-            );
-          } catch { /* quota — ignore */ }
-        }
-        // Look for any cached dev session (including the one we just
-        // seeded above) — drives the impersonation banner copy.
-        const cached = findCachedDevSession();
-        setCachedDevEmail(cached?.email ?? null);
+        setAuthEmail(data.session?.user?.email?.toLowerCase() ?? null);
         setAuthChecked(true);
       } catch {
         setAuthChecked(true);
       }
     })();
-    return () => { cancelled = true; };
+    const { data: { subscription } } = adminSupabase.auth.onAuthStateChange((_event, session) => {
+      setAuthEmail(session?.user?.email?.toLowerCase() ?? null);
+    });
+    return () => { cancelled = true; subscription.unsubscribe(); };
   }, []);
 
-  const isCurrentUserDev = authEmail ? DEV_ACCTS.includes(authEmail) : false;
-  // Entry is allowed if EITHER path is available. Both are verified
-  // server-side on every request, so the worst case of a stale cache
-  // is a single 401 from the backend.
-  const isDev   = isCurrentUserDev || !!cachedDevEmail;
+  const isDev   = authEmail ? DEV_ACCTS.includes(authEmail) : false;
   const enabled = authChecked && isDev;
 
   // ── Fetchers ────────────────────────────────────────────────────────────
-  // Always use fetchAsDev — it mints a fresh access token from whichever
-  // dev refresh-token is cached. When the current user IS a dev, their
-  // own session was cached by the main app's auth listener, so this
-  // still works (and stays consistent with the non-dev case).
+  // Every admin API call uses fetchWithAdminAuth, which pulls the access
+  // token from the ISOLATED admin Supabase client. No dependency on the
+  // main app's auth state — if the operator is signed into /admin, these
+  // work regardless of which account the main app is using.
   const fetchOverview = useCallback(async (): Promise<Overview> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/overview"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/overview"));
     if (!res.ok) throw new Error(`overview HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchTimeseries = useCallback(async (): Promise<{ data: TimeSeriesPoint[] }> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/usage-timeseries?days=30"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/usage-timeseries?days=30"));
     if (!res.ok) throw new Error(`timeseries HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchUsers = useCallback(async (): Promise<{ users: AdminUser[] }> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/users?limit=50"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/users?limit=50"));
     if (!res.ok) throw new Error(`users HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchAnnouncements = useCallback(async (): Promise<{ announcements: AdminAnnouncement[] }> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/announcements-all"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/announcements-all"));
     if (!res.ok) throw new Error(`announcements HTTP ${res.status}`);
     return res.json();
   }, []);
@@ -418,31 +295,31 @@ export default function AdminPage() {
   // System health → polled 10s (Redis/key-pool status).
   // Feedback → polled 30s (inbox).
   const fetchDbStats = useCallback(async (): Promise<DbStats> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/db-stats"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/db-stats"));
     if (!res.ok) throw new Error(`db-stats HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchErrors = useCallback(async (): Promise<{ errors: AdminError[] }> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/errors?limit=100"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/errors?limit=100"));
     if (!res.ok) throw new Error(`errors HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchCostAlerts = useCallback(async (): Promise<{ alerts: CostAlert[] }> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/cost-alerts"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/cost-alerts"));
     if (!res.ok) throw new Error(`cost-alerts HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchSystemHealth = useCallback(async (): Promise<SystemHealth> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/system-health"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/system-health"));
     if (!res.ok) throw new Error(`system-health HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchFeedback = useCallback(async (): Promise<{ feedback: FeedbackRow[] }> => {
-    const res = await fetchAsDev(buildApiUrl("/api/admin/feedback?limit=100"));
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/feedback?limit=100"));
     if (!res.ok) throw new Error(`feedback HTTP ${res.status}`);
     return res.json();
   }, []);
@@ -472,7 +349,7 @@ export default function AdminPage() {
   // Resolve / unresolve a feedback row (dev action — flips the flag).
   const toggleFeedbackResolved = async (id: number, next: boolean) => {
     try {
-      const res = await fetchAsDev(buildApiUrl(`/api/admin/feedback/${id}`), {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/feedback/${id}`), {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ resolved: next }),
@@ -496,63 +373,14 @@ export default function AdminPage() {
     );
   }
 
-  if (!authEmail) {
-    return (
-      <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center">
-        <div
-          className="rounded-2xl border p-8 max-w-md text-center"
-          style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
-        >
-          <AlertTriangle className="mx-auto mb-3 text-amber-500" size={32} />
-          <h1 className="text-lg font-bold mb-2" style={{ color: "var(--ats-fg-primary)" }}>Admin console</h1>
-          <p className="text-sm mb-4" style={{ color: "var(--ats-fg-secondary)" }}>
-            Please sign in with a developer account to access the monitoring dashboard.
-          </p>
-          <button
-            onClick={() => router.push("/login")}
-            className="rounded-lg border px-4 py-2 text-sm font-semibold hover:brightness-110 transition-all"
-            style={{
-              borderColor:     "var(--ats-border-accent)",
-              backgroundColor: "var(--ats-bg-accent-soft)",
-              color:           "var(--ats-fg-accent)",
-            }}
-          >
-            Go to login
-          </button>
-        </div>
-      </div>
-    );
+  // No admin session OR non-dev email signed in → show the dedicated
+  // admin login. This is the ONLY surface where the operator authenticates
+  // the admin context; the main app's session is irrelevant here. A
+  // successful sign-in writes tokens to `ats-admin-auth-token` in
+  // localStorage, from which the client auto-refreshes going forward.
+  if (!authEmail || !isDev) {
+    return <AdminLoginScreen currentEmail={authEmail} />;
   }
-
-  if (!isDev) {
-    return (
-      <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center">
-        <div className="rounded-2xl border border-red-500/40 bg-red-500/10 p-8 max-w-md text-center">
-          <AlertTriangle className="mx-auto mb-3 text-red-500" size={32} />
-          <h1 className="text-lg font-bold mb-2" style={{ color: "var(--ats-fg-primary)" }}>Access denied</h1>
-          <p className="text-sm" style={{ color: "var(--ats-fg-secondary)" }}>
-            The admin console is restricted to developer accounts. You&apos;re signed in as
-            <code className="ml-1" style={{ color: "var(--ats-fg-primary)" }}>{authEmail}</code>,
-            and no cached dev session was found on this browser.
-          </p>
-          <p className="mt-3 text-xs" style={{ color: "var(--ats-fg-muted)" }}>
-            Sign in as a dev account at least once (the main app&apos;s Accounts panel) —
-            the admin console will then stay accessible even after you switch back to
-            your regular account.
-          </p>
-          <Link href="/" className="inline-block mt-4 text-xs underline" style={{ color: "var(--ats-fg-muted)" }}>
-            ← Back to the main app
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
-  // Flag that we're running on a cached dev session rather than the
-  // current live one — surface it in the header so the user isn't
-  // surprised by admin access while "signed in" as a non-dev account
-  // in the main app. Purely informational.
-  const usingCachedDev = !isCurrentUserDev && !!cachedDevEmail;
 
   // ── Authorised render ───────────────────────────────────────────────────
   const ov = overview.data;
@@ -619,6 +447,9 @@ export default function AdminPage() {
                 Updated {relativeTime(overview.lastUpdated)}
               </span>
             )}
+            <span className="inline-flex items-center gap-1" title="Signed into admin console as">
+              <code style={{ color: "var(--ats-fg-primary)" }}>{authEmail}</code>
+            </span>
             <button
               onClick={refreshAll}
               className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors"
@@ -632,29 +463,27 @@ export default function AdminPage() {
               <RefreshCw size={11} />
               Refresh
             </button>
+            <button
+              onClick={async () => {
+                await adminSupabase.auth.signOut();
+                // onAuthStateChange listener will flip UI back to login.
+              }}
+              className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors hover:brightness-110"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-panel)",
+                color:           "var(--ats-fg-secondary)",
+              }}
+              title="Sign out of admin console (main app unaffected)"
+            >
+              <LogOut size={11} />
+              Sign out
+            </button>
           </div>
         </div>
       </header>
 
       <main className="max-w-[1600px] mx-auto px-6 py-6 space-y-6">
-        {/* ── Cached-dev impersonation banner ───────────────────────── */}
-        {usingCachedDev && (
-          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs flex items-start gap-2">
-            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />
-            <div>
-              <p className="font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
-                Impersonating cached dev session: <code>{cachedDevEmail}</code>
-              </p>
-              <p className="mt-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
-                Main app is signed in as <code>{authEmail ?? "(guest)"}</code>. Admin API
-                calls use the cached dev refresh-token and do NOT affect the main app&apos;s
-                session. If the cache expires you&apos;ll be asked to sign in as a dev
-                account again.
-              </p>
-            </div>
-          </div>
-        )}
-
         {/* ── Global errors ─────────────────────────────────────────── */}
         {(overview.error || timeseries.error || users.error || announcements.error) && (
           <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-700 dark:text-red-300 space-y-1">
@@ -842,7 +671,7 @@ export default function AdminPage() {
               <div>
                 <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>System health</h3>
                 <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                  Live state of the backend's infra: Redis, LLM key pool, worker count.
+                  Live state of the backend&apos;s infra: Redis, LLM key pool, worker count.
                 </p>
               </div>
               <button onClick={() => sysHealth.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
@@ -916,6 +745,142 @@ export default function AdminPage() {
           </p>
         </footer>
       </main>
+    </div>
+  );
+}
+
+// ── Admin login screen ────────────────────────────────────────────────────
+// Gates /admin behind its own email+password prompt against the isolated
+// admin Supabase client. Only accepts dev-account emails (checked
+// client-side for UX; the backend re-enforces on every request). On
+// success, onAuthStateChange fires and flips the page to the dashboard.
+
+function AdminLoginScreen({ currentEmail }: { currentEmail: string | null }) {
+  const [email,    setEmail]    = useState("");
+  const [password, setPassword] = useState("");
+  const [busy,     setBusy]     = useState(false);
+  const [err,      setErr]      = useState<string>("");
+
+  const submit = async () => {
+    const e = email.trim().toLowerCase();
+    if (!DEV_ACCTS.includes(e)) {
+      setErr("Only developer accounts (dev01 / dev02 / dev03 @academicats.com) can sign into the admin console.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      const { error } = await adminSupabase.auth.signInWithPassword({ email: e, password });
+      if (error) setErr(error.message);
+      // success path: onAuthStateChange listener re-renders to the dashboard.
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center px-4">
+      <div
+        className="w-full max-w-sm rounded-2xl border p-6 shadow-lg"
+        style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <BarChartIcon size={18} style={{ color: "var(--ats-fg-accent)" }} />
+          <h1 className="text-base font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+            AcademiCats · Admin
+          </h1>
+          <span
+            className="text-[10px] uppercase tracking-wider rounded px-1.5 py-0.5 font-bold border"
+            style={{
+              backgroundColor: "var(--ats-bg-accent-soft)",
+              color:           "var(--ats-fg-accent)",
+              borderColor:     "var(--ats-border-accent)",
+            }}
+          >DEV</span>
+        </div>
+        <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--ats-fg-secondary)" }}>
+          Separate login — the admin console has its own auth context.
+          {currentEmail && (
+            <>
+              {" "}You&apos;re signed into the main app as <code style={{ color: "var(--ats-fg-primary)" }}>{currentEmail}</code>;
+              this won&apos;t change that.
+            </>
+          )}
+        </p>
+        <form
+          onSubmit={(ev) => { ev.preventDefault(); void submit(); }}
+          className="space-y-2.5"
+        >
+          <div>
+            <label className="block text-[10px] uppercase tracking-wider mb-1" style={{ color: "var(--ats-fg-muted)" }}>
+              Email
+            </label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
+              placeholder="dev01@academicats.com"
+              disabled={busy}
+              className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--ats-border-accent)]"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-base)",
+                color:           "var(--ats-fg-primary)",
+              }}
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wider mb-1" style={{ color: "var(--ats-fg-muted)" }}>
+              Password
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              disabled={busy}
+              className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--ats-border-accent)]"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-base)",
+                color:           "var(--ats-fg-primary)",
+              }}
+            />
+          </div>
+          {err && (
+            <p
+              className="text-[11px] rounded-md px-2 py-1.5 border"
+              style={{
+                borderColor:     "#ef444455",
+                backgroundColor: "#ef44441a",
+                color:           "#ef4444",
+              }}
+            >{err}</p>
+          )}
+          <button
+            type="submit"
+            disabled={busy || !email.trim() || !password}
+            className="w-full rounded-lg border px-4 py-2 text-sm font-semibold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{
+              borderColor:     "var(--ats-border-accent)",
+              backgroundColor: "var(--ats-bg-accent-soft)",
+              color:           "var(--ats-fg-accent)",
+            }}
+          >
+            {busy ? "Signing in…" : "Sign in to admin"}
+          </button>
+        </form>
+        <Link
+          href="/"
+          className="block mt-4 text-center text-[11px] underline"
+          style={{ color: "var(--ats-fg-muted)" }}
+        >
+          ← Back to the main app
+        </Link>
+      </div>
     </div>
   );
 }

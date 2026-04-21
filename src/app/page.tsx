@@ -4941,22 +4941,32 @@ ${html}
         </div>
       </div>
 
-      {/* ── Feedback button + modal — fixed bottom-right ─────────────────── */}
+      {/* ── Feedback icon bubble + modal — fixed bottom-right ────────────── */}
       {!!authUser && (
         <>
           <button
             onClick={() => { setFeedbackOpen(true); setFeedbackMsg(null); }}
-            className="fixed right-4 z-50 flex items-center gap-1.5 rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:brightness-110 px-3.5 py-2 text-xs font-semibold"
+            className="group fixed right-4 z-50 flex items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:brightness-110 hover:scale-110 h-11 w-11"
             style={{
               bottom:          historyPanelOpen ? historyPanelHeight + 12 : 16,
               borderColor:     "var(--ats-border-accent)",
               backgroundColor: "var(--ats-bg-accent-soft)",
               color:           "var(--ats-fg-accent)",
             }}
-            title="Report a bug or request a feature"
+            aria-label="Send feedback"
           >
-            <span>🐛</span>
-            <span>Feedback</span>
+            <span className="text-lg leading-none" aria-hidden>🐛</span>
+            {/* Hover tooltip — appears to the left so it never clips off-screen. */}
+            <span
+              className="pointer-events-none absolute right-full mr-2 whitespace-nowrap rounded-md border px-2 py-1 text-[11px] font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-panel)",
+                color:           "var(--ats-fg-primary)",
+              }}
+            >
+              Report a bug / feedback
+            </span>
           </button>
 
           {feedbackOpen && (
