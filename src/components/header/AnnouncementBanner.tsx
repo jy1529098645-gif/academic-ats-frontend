@@ -1,83 +1,110 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AnnouncementBanner — the thin strip at the top of the Workspace that
-// carries the SHARED PUBLIC ticker.
+// AnnouncementBanner — shared public ticker.
 //
-// Every public message anyone posts lands in the announcements Supabase
-// table, the trigger caps it at 50 rows, and every open tab gets the new
-// row via Supabase Realtime (see src/lib/hooks/use-announcements.ts).
-// The banner just renders whatever array the parent passes in — it has no
-// opinion about where the data came from.
+// Two modes, both driven by the same announcements[] prop:
 //
-// Two display modes:
-//   - Expanded  (default): horizontal marquee scrolling every announcement
-//                          left-to-right, looped twice so the wrap is seamless.
-//   - Collapsed: translucent strip where the same announcements float across
-//                as bullet-comments (danmu-style), so users still get a
-//                peripheral signal that activity is happening.
+//  1. Expanded: a single-card rotator. One message shows at a time, cycles
+//     every 6 s with a soft fade-in. Key advantages over the previous
+//     marquee:
+//       • New messages slot into the rotation without restarting the
+//         animation — the current card stays up until its dwell ends.
+//       • Hovering the banner pauses the rotation so users can read long
+//         messages.
+//       • Pure state machine — no CSS animation duration tied to list
+//         length, so there's no "content width changed → jump" glitch.
+//
+//  2. Collapsed: translucent strip where the same announcements float
+//     across as bullet-comments (danmu). Each message is keyed by a
+//     deterministic hash of its id so layout stays stable when the list
+//     updates; a new message appends at the end without reshuffling the
+//     existing ones.
+//
+// Theme coupling: the megaphone icon reads its colour from
+// --ats-fg-accent so every theme (night-amber / night-emerald / Cherry
+// Blossom / …) tints it automatically. The old hardcoded text-blue-400/70
+// bypassed the global remap because Tailwind's opacity-modifier compiles
+// to a distinct class.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { useEffect, useRef, useState } from "react";
 import { Megaphone, MessageSquare, Check } from "lucide-react";
 import type { Announcement } from "@/lib/hooks/use-announcements";
 
-// ── Ticker ───────────────────────────────────────────────────────────────────
+const ROTATE_INTERVAL_MS = 6000;
 
-function TickerTrack({ items }: { items: Announcement[] }) {
-  // Fallback copy — only shown when no announcements exist at all (fresh DB
-  // before seed insert). The DDL seeds three welcome rows, so in practice
-  // users should always see real content.
-  const fallback: Announcement[] = items.length > 0 ? [] : [{
-    id:           "fallback",
-    author_email: "system",
-    text:         "Welcome to AcademiCats — this is where team + user announcements scroll live.",
-    created_at:   new Date().toISOString(),
-  }];
-  const list = items.length > 0 ? items : fallback;
+// ── One-at-a-time rotator (expanded banner) ────────────────────────────────
 
-  const segment = (
-    <span className="inline-flex items-center gap-0">
-      {list.map((item) => {
-        const author = item.author_email && !item.author_email.includes("dev@")
-          ? item.author_email.split("@")[0]
-          : null;
-        return (
-          <span key={`${item.id}-${item.created_at}`} className="inline-block shrink-0 pr-16 text-xs leading-relaxed text-slate-300">
-            {author && (
-              <span className="mr-1 text-blue-400/80 font-semibold">{author}:</span>
-            )}
-            {item.text}
-          </span>
-        );
-      })}
-    </span>
-  );
-  // Animation duration is FIXED. When a new announcement arrives the
-  // segment content changes but the `animation` CSS property stays
-  // byte-for-byte identical, so the browser continues the in-progress
-  // loop seamlessly instead of restarting from 0 (which previously
-  // manifested as a "stutter" the moment a user sent a message).
-  // Longer feeds simply pack more content into each 50 s cycle; the
-  // segment is duplicated below so the wrap is always seamless.
-  const TICKER_DURATION = "50s";
+function formatAuthor(a: Announcement): string | null {
+  const email = (a.author_email || "").toLowerCase();
+  if (!email || email === "anonymous" || email.startsWith("anonymous@")) {
+    return "Anonymous User";
+  }
+  // Seed dev messages render without a prefix to stay subtle.
+  if (email.includes("dev@")) return null;
+  return email.split("@")[0];
+}
+
+function AnnouncementRotator({
+  items,
+  paused,
+}: {
+  items: Announcement[];
+  paused: boolean;
+}) {
+  const [idx, setIdx] = useState(0);
+  const count = items.length;
+
+  // Advance every ROTATE_INTERVAL_MS unless paused or only one item.
+  useEffect(() => {
+    if (paused || count <= 1) return;
+    const id = window.setInterval(() => {
+      setIdx((i) => (i + 1) % count);
+    }, ROTATE_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [paused, count]);
+
+  // Clamp idx when the feed shrinks (e.g. after a dev "clear all").
+  const safeIdx = count > 0 ? idx % count : 0;
+  const current = count > 0 ? items[safeIdx] : null;
+
+  if (!current) {
+    return (
+      <span className="text-xs text-slate-500 italic">
+        No announcements yet — send one with the input below.
+      </span>
+    );
+  }
+
+  const author = formatAuthor(current);
+  // Position indicator (e.g. "3 / 14") stays stable across renders so the
+  // user has a sense of progress through the feed.
   return (
-    // translate="no" — the marquee content is continuously re-composed by the
-    // CSS keyframe; letting Google Translate rewrite its text nodes mid-flight
-    // produces a "removeChild" DOM mismatch and crashes the tab.
     <div
+      key={current.id}
+      // translate="no" because React remounts this every rotation; letting
+      // Google Translate grab the node between renders crashes with a
+      // "removeChild" DOM mismatch.
       translate="no"
-      className="notranslate flex overflow-hidden"
-      style={{ maskImage: "linear-gradient(to right, transparent 0%, black 4%, black 96%, transparent 100%)" }}
+      className="notranslate ticker-fade-in flex items-center gap-2 min-w-0 w-full"
     >
-      <div
-        className="flex shrink-0 whitespace-nowrap"
-        style={{ animation: `ticker ${TICKER_DURATION} linear infinite` }}
-      >
-        {segment}{segment}
-      </div>
+      {author && (
+        <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide" style={{ color: "var(--ats-fg-accent)" }}>
+          {author}
+        </span>
+      )}
+      <span className="min-w-0 flex-1 truncate text-xs leading-relaxed text-slate-300">
+        {current.text}
+      </span>
+      {count > 1 && (
+        <span className="shrink-0 text-[10px] tabular-nums text-slate-500">
+          {safeIdx + 1} / {count}
+        </span>
+      )}
     </div>
   );
 }
 
-// ── Danmu (bullet-comment) message shape ────────────────────────────────────
+// ── Danmu (collapsed banner) ─────────────────────────────────────────────────
 
 export type DanmuMsg = {
   id:     string;
@@ -90,20 +117,18 @@ export type DanmuMsg = {
 };
 
 /** Deterministic per-item layout so the same announcement always lands at the
- *  same Y/speed/colour — important for the feed to feel stable across reloads. */
+ *  same Y / speed / colour across reloads. */
 function makeDanmuMsg(a: Announcement, idx: number): DanmuMsg {
   const colors = ["#60a5fa", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#38bdf8", "#facc15"];
   const h = (Math.imul(idx + 1, 2654435761) >>> 0);
   return {
-    id:    a.id,
-    text:  a.text,
-    y:     6 + (h % 72),
-    speed: 35 + ((h >> 8) % 10),
-    color: colors[(h >> 4) % colors.length],
-    delay: -(((h >> 12) % 20)),
-    author: a.author_email && !a.author_email.includes("dev@")
-      ? a.author_email.split("@")[0]
-      : "",
+    id:     a.id,
+    text:   a.text,
+    y:      6 + (h % 72),
+    speed:  35 + ((h >> 8) % 10),
+    color:  colors[(h >> 4) % colors.length],
+    delay:  -(((h >> 12) % 20)),
+    author: formatAuthor(a) ?? "",
   };
 }
 
@@ -117,8 +142,10 @@ export type AnnouncementBannerProps = {
   announcements: Announcement[];
   msgInput:     string;
   setMsgInput:  (v: string) => void;
-  msgPublic:    boolean;
-  setMsgPublic: (v: boolean) => void;
+  /** True → the next send will be posted with author_email="anonymous"
+   *  so the ticker renders "Anonymous User" instead of the signed name. */
+  msgAnonymous: boolean;
+  setMsgAnonymous: (v: boolean) => void;
   msgSending:   boolean;
   msgSentOk:    boolean;
   onSend:       () => void;
@@ -130,17 +157,29 @@ export function AnnouncementBanner({
   collapsed, onCollapse, onExpand,
   announcements,
   msgInput, setMsgInput,
-  msgPublic, setMsgPublic,
+  msgAnonymous, setMsgAnonymous,
   msgSending, msgSentOk, onSend,
 }: AnnouncementBannerProps) {
-  const danmu = announcements.map((a, idx) => makeDanmuMsg(a, idx));
+  // Hover pauses the rotation so users can read long messages without the
+  // card advancing out from under them.
+  const [hoverPaused, setHoverPaused] = useState(false);
+
+  // Deterministic danmu payload — each Announcement always maps to the same
+  // floating bullet position. Only recompute when the announcements array
+  // identity changes.
+  const danmuRef = useRef<DanmuMsg[]>([]);
+  if (danmuRef.current.length !== announcements.length ||
+      danmuRef.current.some((m, i) => m.id !== announcements[i]?.id)) {
+    danmuRef.current = announcements.map((a, i) => makeDanmuMsg(a, i));
+  }
+  const danmu = danmuRef.current;
 
   if (collapsed) {
     return (
       <div className="h-full rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)] overflow-hidden flex flex-col">
         <div className="flex items-center gap-2 px-3 pr-10 shrink-0" style={{ height: "20px" }}>
           <span className="megaphone-breath shrink-0 flex items-center justify-center">
-            <Megaphone size={11} className="shrink-0 text-blue-400/60" />
+            <Megaphone size={11} className="shrink-0" style={{ color: "var(--ats-fg-accent)", opacity: 0.75 }} />
           </span>
           <div className="flex-1 h-px bg-gradient-to-r from-blue-500/25 via-purple-500/20 to-blue-500/25" />
           <button
@@ -150,9 +189,10 @@ export function AnnouncementBanner({
             className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
           >▼</button>
         </div>
-        {/* Danmu area — translate="no" because each message is continuously
-            re-rendered via a keyframe; Google Translate rewriting text nodes
-            mid-flight produces a DOM mismatch crash. */}
+        {/* Danmu — each message is its own absolutely-positioned span keyed
+            by its announcement id. Adding a new message appends a new span
+            without touching the existing ones, so earlier bullets keep
+            their in-flight animation and never "jump". */}
         <div translate="no" className="notranslate relative flex-1 overflow-hidden">
           {danmu.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-600 opacity-50 select-none pointer-events-none">
@@ -184,14 +224,18 @@ export function AnnouncementBanner({
   }
 
   return (
-    <div className="h-full flex flex-col justify-between overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
-      {/* Ticker row */}
+    <div
+      className="h-full flex flex-col justify-between overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]"
+      onMouseEnter={() => setHoverPaused(true)}
+      onMouseLeave={() => setHoverPaused(false)}
+    >
+      {/* Rotator row — single-card, pause-on-hover. */}
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
         <span className="megaphone-breath shrink-0 flex items-center justify-center">
-          <Megaphone size={13} className="shrink-0 text-blue-400/70" />
+          <Megaphone size={13} className="shrink-0" style={{ color: "var(--ats-fg-accent)", opacity: 0.85 }} />
         </span>
         <div className="min-w-0 flex-1 overflow-hidden">
-          <TickerTrack items={announcements} />
+          <AnnouncementRotator items={announcements} paused={hoverPaused} />
         </div>
         <button
           onClick={onCollapse}
@@ -204,15 +248,17 @@ export function AnnouncementBanner({
       {/* Message input row */}
       <div className="flex items-center gap-1.5 border-t border-slate-800/50 px-3 py-1.5">
         <button
-          onClick={() => setMsgPublic(!msgPublic)}
-          title={msgPublic ? "Public — will broadcast to the live ticker" : "Private — only emailed to the developer"}
-          className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide transition select-none ${
-            msgPublic
-              ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-              : "bg-slate-700/30 text-slate-500 border border-slate-700/40"
+          onClick={() => setMsgAnonymous(!msgAnonymous)}
+          title={msgAnonymous
+            ? "Anonymous — your ID will not be shown on the ticker"
+            : "Signed — your ID will appear next to the message"}
+          className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide transition select-none border ${
+            msgAnonymous
+              ? "bg-slate-700/30 text-slate-300 border-slate-600/50"
+              : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
           }`}
         >
-          {msgPublic ? "PUBLIC" : "PRIVATE"}
+          {msgAnonymous ? "ANONYMOUS" : "SIGNED"}
         </button>
         <MessageSquare size={11} className="shrink-0 text-slate-600" />
         <input
@@ -220,7 +266,7 @@ export function AnnouncementBanner({
           value={msgInput}
           onChange={(e) => setMsgInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !msgSending) void onSend(); }}
-          placeholder={msgPublic ? "Broadcast to every open tab…" : "Send a private note to the team…"}
+          placeholder={msgAnonymous ? "Send anonymously to every open tab…" : "Broadcast to every open tab…"}
           maxLength={280}
           className="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-slate-300 outline-none placeholder:text-slate-700"
         />
@@ -242,5 +288,5 @@ export function AnnouncementBanner({
   );
 }
 
-/** Back-compat re-export — old imports of makeMsg expected a plain text factory. */
+/** Back-compat re-export — old imports of makeMsg expected the danmu factory. */
 export { makeDanmuMsg as makeMsg };

@@ -70,8 +70,13 @@ export function useAnnouncements() {
     };
   }, []);
 
-  /** Fire-and-forget post; relies on Realtime to echo the new row back. */
-  const post = useCallback(async (text: string): Promise<{ ok: boolean; error?: string }> => {
+  /** Fire-and-forget post; relies on Realtime to echo the new row back.
+   *  `anonymous: true` asks the server to record the row with an empty
+   *  author_email so the ticker renders it as "Anonymous User". */
+  const post = useCallback(async (
+    text: string,
+    opts?: { anonymous?: boolean },
+  ): Promise<{ ok: boolean; error?: string }> => {
     const trimmed = (text ?? "").trim();
     if (!trimmed) return { ok: false, error: "text is empty" };
     try {
@@ -79,7 +84,7 @@ export function useAnnouncements() {
       const res = await fetchWithAuth(buildApiUrl("/api/announcements"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: trimmed }),
+        body: JSON.stringify({ text: trimmed, anonymous: !!opts?.anonymous }),
       });
       if (!res.ok) {
         const body = await res.text();

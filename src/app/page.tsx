@@ -762,7 +762,11 @@ export default function HomePage() {
   const announcementsFeed = useAnnouncements();
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
   const [msgInput, setMsgInput] = useState("");
-  const [msgPublic, setMsgPublic] = useState(true);
+  // Two send modes, both post to the public ticker. SIGNED includes the
+  // user's email local-part next to the message; ANONYMOUS hides the
+  // identity on the display side (server still stores author_id for
+  // moderation — the display is what's anonymised).
+  const [msgAnonymous, setMsgAnonymous] = useState(false);
   const [msgSending, setMsgSending] = useState(false);
   const [msgSentOk, setMsgSentOk] = useState(false);
 
@@ -1157,24 +1161,14 @@ export default function HomePage() {
     if (!text || msgSending) return;
     setMsgSending(true);
     try {
-      if (msgPublic) {
-        // Public: post to the shared ticker. The server-side trigger trims
-        // the table to the 50 newest rows, and Supabase Realtime pushes the
-        // new insert to every open tab so everyone sees it within a second.
-        const { ok, error } = await announcementsFeed.post(text);
-        if (!ok) {
-          setUiError(error ?? "Could not broadcast announcement.");
-          return;
-        }
-      } else {
-        // Private: legacy email relay (Next.js /api/send-message route).
-        // Kept best-effort because email config is not guaranteed in all
-        // environments — a failure here shouldn't break the UX.
-        await fetch("/api/send-message", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, isPublic: false }),
-        }).catch(() => { /* no email config — that's OK */ });
+      // Both signed and anonymous modes post to the shared ticker — the
+      // only difference is what the server records for author_email.
+      // Supabase Realtime pushes the insert to every open tab so everyone
+      // sees it within a second.
+      const { ok, error } = await announcementsFeed.post(text, { anonymous: msgAnonymous });
+      if (!ok) {
+        setUiError(error ?? "Could not broadcast announcement.");
+        return;
       }
       setMsgInput("");
       setMsgSentOk(true);
@@ -1245,6 +1239,40 @@ export default function HomePage() {
     const t = setTimeout(() => setGridTransitioning(false), 950);
     return () => clearTimeout(t);
   }, [leftVisible, analyticsVisible]);
+
+  /** Animate the layout to 1:3:1 (20 / 60 / 20) with the same grid-transition
+   *  feel used for panel toggles — the user sees the dividers slide into
+   *  their "working" positions exactly like they dragged them there. */
+  const snapToWorkingLayout = useCallback(() => {
+    setGridTransitioning(true);
+    setLeftPct(20);
+    setCenterPct(60);
+    window.setTimeout(() => setGridTransitioning(false), 950);
+  }, []);
+
+  // Trigger the snap exactly once per search, as soon as the pipeline
+  // produces something visible — whether that's the first streamed paper
+  // (Deep mode streams candidates progressively) or the final result
+  // object (Quick mode resolves in one shot). The ref resets on every
+  // new submission so a second search can re-snap if the user has
+  // dragged the layout elsewhere.
+  const _autoSnappedRef = useRef(false);
+  useEffect(() => {
+    if (isSubmitting) _autoSnappedRef.current = false;
+  }, [isSubmitting]);
+  // Inline the `!!job?.result` check — the memoised `result = job?.result ||
+  // null` derivation is declared further down in the component, so
+  // referencing it here would produce a TDZ error. Using the same
+  // underlying expression works before any TDZ barrier.
+  useEffect(() => {
+    const hasPhaseResult =
+      streamPapers.length > 0 ||
+      job?.status === "done" ||
+      !!job?.result;
+    if (!hasPhaseResult || _autoSnappedRef.current) return;
+    _autoSnappedRef.current = true;
+    snapToWorkingLayout();
+  }, [streamPapers.length, job?.status, job?.result, snapToWorkingLayout]);
 
   // Tracked container width for the 5-column grid. All five tracks are computed
   // in px from this value so grid-template-columns interpolates uniformly when
@@ -2290,8 +2318,8 @@ ${html}
               announcements={announcementsFeed.items}
               msgInput={msgInput}
               setMsgInput={setMsgInput}
-              msgPublic={msgPublic}
-              setMsgPublic={setMsgPublic}
+              msgAnonymous={msgAnonymous}
+              setMsgAnonymous={setMsgAnonymous}
               msgSending={msgSending}
               msgSentOk={msgSentOk}
               onSend={handleSendMessage}
