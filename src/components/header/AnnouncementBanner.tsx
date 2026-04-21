@@ -1,48 +1,42 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // AnnouncementBanner — shared public ticker.
 //
-// Two modes, both driven by the same announcements[] prop:
+// Expanded: single-card rotator with prev / next arrows + dot indicator.
+//   • Text wraps onto multiple lines (line-clamp-2 keeps the banner height
+//     predictable while still showing more than one line of copy).
+//   • Hovering pauses auto-rotation.
+//   • Clicking ‹ › lets the user page manually; dot indicator shows the
+//     current position (or "n/total" text fallback when the feed is huge).
 //
-//  1. Expanded: a single-card rotator. One message shows at a time, cycles
-//     every 6 s with a soft fade-in. Key advantages over the previous
-//     marquee:
-//       • New messages slot into the rotation without restarting the
-//         animation — the current card stays up until its dwell ends.
-//       • Hovering the banner pauses the rotation so users can read long
-//         messages.
-//       • Pure state machine — no CSS animation duration tied to list
-//         length, so there's no "content width changed → jump" glitch.
+// Collapsed: danmu (bullet-comment) layer. Each announcement gets a
+// deterministic Y / speed / colour keyed by its id, PLUS a staggered
+// positive delay that keeps new messages from bunching with the existing
+// ones. The fix for the "3 seeded messages overlap at launch" bug: we
+// spread Y into distinct buckets based on index (not a hash that can
+// collide), and give each one a deterministic positive delay so they
+// enter the screen one-after-another instead of all at once.
 //
-//  2. Collapsed: translucent strip where the same announcements float
-//     across as bullet-comments (danmu). Each message is keyed by a
-//     deterministic hash of its id so layout stays stable when the list
-//     updates; a new message appends at the end without reshuffling the
-//     existing ones.
-//
-// Theme coupling: the megaphone icon reads its colour from
-// --ats-fg-accent so every theme (night-amber / night-emerald / Cherry
-// Blossom / …) tints it automatically. The old hardcoded text-blue-400/70
-// bypassed the global remap because Tailwind's opacity-modifier compiles
-// to a distinct class.
+// Theme coupling: the megaphone icon reads --ats-fg-accent so every theme
+// tints it without needing its own class.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useRef, useState } from "react";
-import { Megaphone, MessageSquare, Check } from "lucide-react";
+import { Megaphone, MessageSquare, Check, ChevronLeft, ChevronRight } from "lucide-react";
 import type { Announcement } from "@/lib/hooks/use-announcements";
 
 const ROTATE_INTERVAL_MS = 6000;
-
-// ── One-at-a-time rotator (expanded banner) ────────────────────────────────
+const DOT_LIMIT          = 10; // show dots when count <= DOT_LIMIT; else fallback to "n/m"
 
 function formatAuthor(a: Announcement): string | null {
   const email = (a.author_email || "").toLowerCase();
   if (!email || email === "anonymous" || email.startsWith("anonymous@")) {
     return "Anonymous User";
   }
-  // Seed dev messages render without a prefix to stay subtle.
-  if (email.includes("dev@")) return null;
+  if (email.includes("dev@")) return null; // system messages render without a byline
   return email.split("@")[0];
 }
+
+// ── One-at-a-time rotator (expanded banner) ────────────────────────────────
 
 function AnnouncementRotator({
   items,
@@ -54,18 +48,16 @@ function AnnouncementRotator({
   const [idx, setIdx] = useState(0);
   const count = items.length;
 
-  // Advance every ROTATE_INTERVAL_MS unless paused or only one item.
   useEffect(() => {
     if (paused || count <= 1) return;
-    const id = window.setInterval(() => {
-      setIdx((i) => (i + 1) % count);
-    }, ROTATE_INTERVAL_MS);
+    const id = window.setInterval(() => setIdx(i => (i + 1) % count), ROTATE_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, [paused, count]);
 
-  // Clamp idx when the feed shrinks (e.g. after a dev "clear all").
   const safeIdx = count > 0 ? idx % count : 0;
   const current = count > 0 ? items[safeIdx] : null;
+  const prev = () => { if (count > 0) setIdx((safeIdx - 1 + count) % count); };
+  const next = () => { if (count > 0) setIdx((safeIdx + 1) % count); };
 
   if (!current) {
     return (
@@ -76,29 +68,83 @@ function AnnouncementRotator({
   }
 
   const author = formatAuthor(current);
-  // Position indicator (e.g. "3 / 14") stays stable across renders so the
-  // user has a sense of progress through the feed.
+  const useDots = count > 1 && count <= DOT_LIMIT;
+
   return (
-    <div
-      key={current.id}
-      // translate="no" because React remounts this every rotation; letting
-      // Google Translate grab the node between renders crashes with a
-      // "removeChild" DOM mismatch.
-      translate="no"
-      className="notranslate ticker-fade-in flex items-center gap-2 min-w-0 w-full"
-    >
-      {author && (
-        <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide" style={{ color: "var(--ats-fg-accent)" }}>
-          {author}
-        </span>
-      )}
-      <span className="min-w-0 flex-1 truncate text-xs leading-relaxed text-slate-300">
-        {current.text}
-      </span>
+    <div className="flex items-center gap-2 min-w-0 w-full">
+      {/* Prev arrow */}
       {count > 1 && (
-        <span className="shrink-0 text-[10px] tabular-nums text-slate-500">
-          {safeIdx + 1} / {count}
+        <button
+          onClick={prev}
+          title="Previous announcement"
+          aria-label="Previous announcement"
+          className="shrink-0 flex h-5 w-5 items-center justify-center rounded-md text-slate-500 hover:text-[var(--ats-fg-accent)] hover:bg-[var(--ats-bg-accent-soft)] transition-colors"
+        >
+          <ChevronLeft size={13} />
+        </button>
+      )}
+
+      {/* Rotating card — keyed by announcement id so React remounts on step,
+          playing the ticker-fade-in animation each time. */}
+      <div
+        key={current.id}
+        translate="no"
+        className="notranslate ticker-fade-in min-w-0 flex-1 flex items-start gap-2"
+      >
+        {author && (
+          <span
+            className="shrink-0 text-[10px] font-bold uppercase tracking-wide mt-[2px]"
+            style={{ color: "var(--ats-fg-accent)" }}
+          >
+            {author}
+          </span>
+        )}
+        <span className="min-w-0 flex-1 text-xs leading-snug text-slate-300 line-clamp-2 break-words">
+          {current.text}
         </span>
+      </div>
+
+      {/* Indicator + next arrow */}
+      {count > 1 && (
+        <>
+          {useDots ? (
+            <div className="shrink-0 flex items-center gap-1 px-1" aria-label={`Announcement ${safeIdx + 1} of ${count}`}>
+              {Array.from({ length: count }, (_, i) => {
+                const active = i === safeIdx;
+                return (
+                  <button
+                    key={i}
+                    onClick={() => setIdx(i)}
+                    title={`Go to announcement ${i + 1}`}
+                    aria-label={`Go to announcement ${i + 1}`}
+                    className="transition-all"
+                    style={{
+                      width:  active ? "16px" : "5px",
+                      height: "5px",
+                      borderRadius: "9999px",
+                      backgroundColor: active
+                        ? "var(--ats-fg-accent)"
+                        : "var(--ats-border-subtle)",
+                      opacity: active ? 1 : 0.6,
+                    }}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <span className="shrink-0 text-[10px] tabular-nums text-slate-500 px-1">
+              {safeIdx + 1} <span className="opacity-50">/</span> {count}
+            </span>
+          )}
+          <button
+            onClick={next}
+            title="Next announcement"
+            aria-label="Next announcement"
+            className="shrink-0 flex h-5 w-5 items-center justify-center rounded-md text-slate-500 hover:text-[var(--ats-fg-accent)] hover:bg-[var(--ats-bg-accent-soft)] transition-colors"
+          >
+            <ChevronRight size={13} />
+          </button>
+        </>
       )}
     </div>
   );
@@ -109,25 +155,35 @@ function AnnouncementRotator({
 export type DanmuMsg = {
   id:     string;
   text:   string;
-  y:      number;
-  speed:  number;
-  delay:  number;
+  yPct:   number;   // vertical bucket — evenly spread, stable per idx
+  speed:  number;   // seconds-per-loop
+  delay:  number;   // positive stagger so entries don't stack at launch
   color:  string;
   author: string;
 };
 
-/** Deterministic per-item layout so the same announcement always lands at the
- *  same Y / speed / colour across reloads. */
+const DANMU_COLORS = ["#60a5fa", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#38bdf8", "#facc15"];
+const DANMU_BUCKETS = 8; // evenly spaced Y rows so adjacent messages never pile up
+
+/**
+ * Stable danmu layout. Y is assigned by rotating through DANMU_BUCKETS so no
+ * two adjacent messages share a row; speed / colour come from a hash of the
+ * announcement id. Delay is strictly POSITIVE and increases with index so
+ * the feed spawns left→right instead of all messages popping in on top of
+ * each other at mount (which is what caused the visible stacking on load
+ * with 3 seeded items).
+ */
 function makeDanmuMsg(a: Announcement, idx: number): DanmuMsg {
-  const colors = ["#60a5fa", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#38bdf8", "#facc15"];
   const h = (Math.imul(idx + 1, 2654435761) >>> 0);
+  const bucket = idx % DANMU_BUCKETS;
+  const yPct = 8 + (bucket * (80 / DANMU_BUCKETS)); // 8 % .. 78 %, evenly
   return {
     id:     a.id,
     text:   a.text,
-    y:      6 + (h % 72),
-    speed:  35 + ((h >> 8) % 10),
-    color:  colors[(h >> 4) % colors.length],
-    delay:  -(((h >> 12) % 20)),
+    yPct,
+    speed:  34 + ((h >> 8) % 12),               // 34 s–46 s
+    delay:  (idx % 8) * 2.2,                    // 0 s, 2.2 s, 4.4 s, …
+    color:  DANMU_COLORS[(h >> 4) % DANMU_COLORS.length],
     author: formatAuthor(a) ?? "",
   };
 }
@@ -138,20 +194,15 @@ export type AnnouncementBannerProps = {
   collapsed:    boolean;
   onCollapse:   () => void;
   onExpand:     () => void;
-  /** Shared public ticker feed (newest-first) — comes from useAnnouncements. */
   announcements: Announcement[];
   msgInput:     string;
   setMsgInput:  (v: string) => void;
-  /** True → the next send will be posted with author_email="anonymous"
-   *  so the ticker renders "Anonymous User" instead of the signed name. */
   msgAnonymous: boolean;
   setMsgAnonymous: (v: boolean) => void;
   msgSending:   boolean;
   msgSentOk:    boolean;
   onSend:       () => void;
 };
-
-// ── Component ────────────────────────────────────────────────────────────────
 
 export function AnnouncementBanner({
   collapsed, onCollapse, onExpand,
@@ -160,13 +211,11 @@ export function AnnouncementBanner({
   msgAnonymous, setMsgAnonymous,
   msgSending, msgSentOk, onSend,
 }: AnnouncementBannerProps) {
-  // Hover pauses the rotation so users can read long messages without the
-  // card advancing out from under them.
   const [hoverPaused, setHoverPaused] = useState(false);
 
-  // Deterministic danmu payload — each Announcement always maps to the same
-  // floating bullet position. Only recompute when the announcements array
-  // identity changes.
+  // Re-derive danmu only when the announcements array identity changes.
+  // Keep the memo object stable so floating bullets don't restart their
+  // CSS animations whenever a sibling re-renders.
   const danmuRef = useRef<DanmuMsg[]>([]);
   if (danmuRef.current.length !== announcements.length ||
       danmuRef.current.some((m, i) => m.id !== announcements[i]?.id)) {
@@ -189,10 +238,6 @@ export function AnnouncementBanner({
             className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
           >▼</button>
         </div>
-        {/* Danmu — each message is its own absolutely-positioned span keyed
-            by its announcement id. Adding a new message appends a new span
-            without touching the existing ones, so earlier bullets keep
-            their in-flight animation and never "jump". */}
         <div translate="no" className="notranslate relative flex-1 overflow-hidden">
           {danmu.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-600 opacity-50 select-none pointer-events-none">
@@ -204,7 +249,7 @@ export function AnnouncementBanner({
                 key={msg.id}
                 className="absolute whitespace-nowrap text-[11px] font-medium select-none pointer-events-none"
                 style={{
-                  top: `${msg.y}%`,
+                  top: `${msg.yPct}%`,
                   left: 0,
                   color: msg.color,
                   opacity: 0.82,
@@ -229,7 +274,7 @@ export function AnnouncementBanner({
       onMouseEnter={() => setHoverPaused(true)}
       onMouseLeave={() => setHoverPaused(false)}
     >
-      {/* Rotator row — single-card, pause-on-hover. */}
+      {/* Rotator row — now supports arrows, dot indicator, and line-wrap */}
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
         <span className="megaphone-breath shrink-0 flex items-center justify-center">
           <Megaphone size={13} className="shrink-0" style={{ color: "var(--ats-fg-accent)", opacity: 0.85 }} />
@@ -288,5 +333,4 @@ export function AnnouncementBanner({
   );
 }
 
-/** Back-compat re-export — old imports of makeMsg expected the danmu factory. */
 export { makeDanmuMsg as makeMsg };

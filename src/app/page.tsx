@@ -4502,9 +4502,11 @@ ${html}
             // streaming regions still opt out individually via translate="no".
             translate="yes"
             className={`w-full rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
-              // Subscription / Legal / Usage want more horizontal room for
-              // the multi-column grids; compact modal otherwise.
-              userPanel === "subscription" || userPanel === "legal" || userPanel === "usage" ? "max-w-3xl" : "max-w-md"
+              // Subscription / Legal / Usage / Settings all benefit from
+              // extra horizontal room — Settings specifically lays its
+              // theme picker + opacity sliders side-by-side at this width.
+              userPanel === "subscription" || userPanel === "legal" || userPanel === "usage" || userPanel === "settings"
+                ? "max-w-3xl" : "max-w-md"
             }`}
             onClick={e => e.stopPropagation()}
           >
@@ -4561,15 +4563,16 @@ ${html}
               )}
 
               {userPanel === "settings" && (
-                <div className="space-y-3">
-                  {/* Appearance — day / night category + per-category theme picker.
-                      Registry lives in src/lib/themes.ts; add new themes there and
-                      define their tokens in globals.css — they appear here automatically. */}
+                // Two-column horizontal layout at md+: Appearance on the left,
+                // Behaviour controls on the right. Stacks vertically on narrow
+                // viewports so the modal stays usable on small windows.
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+                  {/* ── APPEARANCE ───────────────────────────────────────── */}
                   <div className="rounded-xl bg-slate-800/50 px-4 py-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="text-sm text-slate-200">Mode</p>
-                        <p className="text-xs text-slate-500 mt-0.5">Day or Night</p>
+                        <p className="text-sm font-semibold text-slate-200">Appearance</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">Day or Night</p>
                       </div>
                       <div className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-xs font-semibold">
                         <button
@@ -4583,55 +4586,54 @@ ${html}
                       </div>
                     </div>
 
-                    {(["day", "night"] as const).map(section => {
-                      const themes = themesByMode(section);
-                      const activeId = section === "day" ? dayThemeId : nightThemeId;
-                      const setId = section === "day" ? setDayThemeId : setNightThemeId;
-                      return (
-                        <div key={section}>
-                          <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">{section === "day" ? "Day themes" : "Night themes"}</p>
-                          <div className="grid grid-cols-1 gap-1.5">
-                            {themes.map(t => {
-                              const isActive = t.id === activeId;
-                              return (
-                                <button
-                                  key={t.id}
-                                  onClick={() => { setId(t.id); setThemeMode(section); }}
-                                  className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors ${isActive ? "border-blue-500/60 bg-blue-500/10" : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"}`}
-                                >
-                                  <span className="flex shrink-0 items-center gap-0.5">
-                                    {t.swatches.map((c, i) => (
-                                      <span key={i} className="h-4 w-4 rounded-full border border-black/20" style={{ backgroundColor: c }} />
-                                    ))}
-                                  </span>
-                                  <span className="min-w-0 flex-1">
-                                    <span className="block text-xs font-semibold text-slate-100">{t.label}</span>
-                                    {t.blurb && <span className="block text-[10px] leading-tight text-slate-500">{t.blurb}</span>}
-                                  </span>
-                                  {isActive && <Check size={13} className="shrink-0 text-blue-400" />}
-                                </button>
-                              );
-                            })}
-                            {/* Reserved slot hint for future themes in this category */}
-                            <div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-700/50 px-2.5 py-1.5 text-[10px] text-slate-600">
-                              More {section} themes coming soon…
+                    {/* Day + Night theme lists side-by-side inside Appearance */}
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["day", "night"] as const).map(section => {
+                        const themes = themesByMode(section);
+                        const activeId = section === "day" ? dayThemeId : nightThemeId;
+                        const setId = section === "day" ? setDayThemeId : setNightThemeId;
+                        return (
+                          <div key={section} className="min-w-0">
+                            <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">{section === "day" ? "Day" : "Night"}</p>
+                            <div className="flex flex-col gap-1.5">
+                              {themes.map(t => {
+                                const isActive = t.id === activeId;
+                                return (
+                                  <button
+                                    key={t.id}
+                                    onClick={() => { setId(t.id); setThemeMode(section); }}
+                                    className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-left transition-colors ${isActive ? "border-blue-500/60 bg-blue-500/10" : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"}`}
+                                    title={t.blurb}
+                                  >
+                                    <span className="flex shrink-0 items-center gap-0.5">
+                                      {t.swatches.map((c, i) => (
+                                        <span key={i} className="h-3 w-3 rounded-full border border-black/20" style={{ backgroundColor: c }} />
+                                      ))}
+                                    </span>
+                                    <span className="min-w-0 flex-1 text-[11px] font-semibold text-slate-100 truncate">{t.label}</span>
+                                    {isActive && <Check size={11} className="shrink-0 text-blue-400" />}
+                                  </button>
+                                );
+                              })}
                             </div>
                           </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
+                  </div>
 
-                    {/* Panel opacity — lets the page canvas bleed through each
-                        of the three main panels. Requires CSS relative-colour
-                        support (Chrome 119+ / FF 128+ / Safari 16.4+). */}
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Panel opacity</p>
+                  {/* ── BEHAVIOUR ────────────────────────────────────────── */}
+                  <div className="space-y-3">
+                    {/* Panel opacity */}
+                    <div className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <p className="text-sm font-semibold text-slate-200">Panel opacity</p>
+                      <p className="text-[10px] text-slate-500 mt-0.5 mb-2">Let the page canvas bleed through each panel</p>
                       <div className="space-y-2">
                         {(["synthesis", "workspace", "lab"] as const).map(region => {
-                          const labels = { synthesis: "Synthesis (left)", workspace: "Workspace (centre)", lab: "Synthesis Lab (right)" };
+                          const labels = { synthesis: "Synthesis", workspace: "Workspace", lab: "Lab" };
                           return (
-                            <div key={region} className="flex items-center gap-3">
-                              <span className="shrink-0 w-36 text-xs text-slate-300">{labels[region]}</span>
+                            <div key={region} className="flex items-center gap-2">
+                              <span className="shrink-0 w-20 text-[11px] text-slate-300">{labels[region]}</span>
                               <input
                                 type="range"
                                 min={0.4}
@@ -4641,38 +4643,40 @@ ${html}
                                 onChange={(e) => setPanelAlpha(prev => ({ ...prev, [region]: Number(e.target.value) }))}
                                 className="flex-1 accent-blue-500 cursor-pointer"
                               />
-                              <span className="shrink-0 w-10 text-right text-[11px] font-mono text-slate-400 tabular-nums">{Math.round(panelAlpha[region] * 100)}%</span>
+                              <span className="shrink-0 w-10 text-right text-[10px] font-mono text-slate-400 tabular-nums">{Math.round(panelAlpha[region] * 100)}%</span>
                             </div>
                           );
                         })}
                       </div>
                     </div>
-                  </div>
-                  <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
-                    <div>
-                      <p className="text-sm text-slate-200">Default Paper Count</p>
-                      <p className="text-xs text-slate-500 mt-0.5">Papers returned per search (3–500)</p>
+                    {/* Default paper count */}
+                    <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-200">Default paper count</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">Papers returned per search (3–500)</p>
+                      </div>
+                      <input
+                        type="number"
+                        min={3}
+                        max={500}
+                        value={paperCount}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) setPaperCount(Math.max(3, Math.min(500, Math.round(n))));
+                        }}
+                        className="w-20 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums"
+                      />
                     </div>
-                    <input
-                      type="number"
-                      min={3}
-                      max={500}
-                      value={paperCount}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        if (Number.isFinite(n)) setPaperCount(Math.max(3, Math.min(500, Math.round(n))));
-                      }}
-                      className="w-20 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
-                    <div>
-                      <p className="text-sm text-slate-200">Fast Mode</p>
-                      <p className="text-xs text-slate-500 mt-0.5">Quick results vs deep analysis</p>
+                    {/* Fast mode indicator */}
+                    <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-200">Fast Mode</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">Quick results vs deep analysis</p>
+                      </div>
+                      <span className={`text-xs font-semibold px-2 py-1 rounded-full ${fastMode ? "bg-blue-500/20 text-blue-400" : "bg-slate-700 text-slate-400"}`}>
+                        {fastMode ? "On" : "Off"}
+                      </span>
                     </div>
-                    <span className={`text-xs font-semibold px-2 py-1 rounded-full ${fastMode ? "bg-blue-500/20 text-blue-400" : "bg-slate-700 text-slate-400"}`}>
-                      {fastMode ? "On" : "Off"}
-                    </span>
                   </div>
                 </div>
               )}
