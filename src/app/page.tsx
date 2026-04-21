@@ -422,13 +422,13 @@ function DevControlsPanel({
     // the status banner. On narrow screens the columns stack vertically
     // because a single-column read-order makes more sense than scrolling
     // sideways through dev chrome.
-    <div className="space-y-3">
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
         {/* Col 1 — warning + admin console link ───────────────────── */}
         <div className="space-y-3">
-          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
             <p className="text-xs font-bold text-amber-300">Developer-only controls</p>
-            <p className="text-[11px] text-slate-400 mt-1">
+            <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
               These actions affect every user. Use sparingly — the Realtime
               channel pushes the changes to every open session immediately.
             </p>
@@ -437,13 +437,13 @@ function DevControlsPanel({
             href="/admin"
             target="_blank"
             rel="noreferrer"
-            className="block rounded-xl border border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] px-3 py-2.5 hover:brightness-110 transition-all"
+            className="block rounded-xl border border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] px-4 py-3 hover:brightness-110 transition-all"
           >
             <p className="text-xs font-bold flex items-center gap-1.5" style={{ color: "var(--ats-fg-accent)" }}>
               <BarChartIcon size={12} />
               Admin monitoring →
             </p>
-            <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+            <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
               Opens the full commercial dashboard in a new tab — live KPIs,
               usage time-series, per-tier breakdowns, and recent activity.
             </p>
@@ -451,10 +451,10 @@ function DevControlsPanel({
         </div>
 
         {/* Col 2 — system announcements editor ─────────────────────── */}
-        <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-3 py-2.5 space-y-2">
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-4 py-3 space-y-2.5">
           <div>
             <p className="text-sm font-semibold text-slate-200">System announcements</p>
-            <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+            <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
               Seed-email messages (<code className="text-slate-400">{DEV_SEED_EMAIL}</code>)
               render without a byline. Edit, delete, or add more inline.
             </p>
@@ -534,10 +534,10 @@ function DevControlsPanel({
         </div>
 
         {/* Col 3 — bulk cleanup ─────────────────────────────────────── */}
-        <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-3 py-2.5 space-y-2">
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-4 py-3 space-y-2.5">
           <div>
             <p className="text-sm font-semibold text-slate-200">Bulk cleanup</p>
-            <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+            <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
               &ldquo;User-posted&rdquo; keeps the seeded welcome messages;
               &ldquo;all&rdquo; wipes the table clean.
             </p>
@@ -5206,7 +5206,7 @@ ${html}
               // specifically lays its theme picker + opacity sliders side-by-
               // side. Everything else fits comfortably at the default width.
               userPanel === "dev"
-                ? "max-w-6xl"
+                ? "max-w-7xl"
                 : userPanel === "subscription" || userPanel === "legal" || userPanel === "usage" || userPanel === "settings"
                   ? "max-w-3xl" : "max-w-md"
             }`}
