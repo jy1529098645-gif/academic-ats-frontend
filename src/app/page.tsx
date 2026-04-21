@@ -1987,15 +1987,15 @@ export default function HomePage() {
     setBriefTargetLang(inferred);
   }, []);
 
-  // SSE-streaming translation. Each {"token":"..."} frame is appended
-  // to briefTranslated, so the user sees the translation render
-  // progressively into the markdown pane. Aborts cleanly on new
-  // requests or unmount. After completion (or error), briefTranslatedLang
-  // gets set so UI can detect "cached translation for current language".
+  // Blocking translation: POST the brief text + target language, wait
+  // for the full translated markdown in one JSON response. Button
+  // shows "Translating…" until the response arrives, then we swap
+  // the rendered markdown block in one atomic update. Aborts cleanly
+  // on new requests or unmount. After completion, briefTranslatedLang
+  // is set so UI can detect "cached translation for current language".
   const requestBriefTranslation = useCallback(async () => {
     const source = (result?.brief || "").trim();
     if (!source) return;
-    // Cancel any in-flight translation so rapid double-clicks don't race.
     briefTransAbortRef.current?.abort();
     const ac = new AbortController();
     briefTransAbortRef.current = ac;
@@ -2018,43 +2018,16 @@ export default function HomePage() {
           target_language: targetLang,
         }),
       });
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         const bodyText = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
       }
-
-      // SSE parse loop: each message is separated by "\n\n" and carries
-      // a single `data: <json>` line (plus heartbeat comments we ignore).
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      let sawError = false;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const raw of parts) {
-          const line = raw.split("\n").find(l => l.startsWith("data: "));
-          if (!line) continue;
-          const payload = line.slice(6).trim();
-          if (!payload) continue;
-          try {
-            const obj = JSON.parse(payload);
-            if (typeof obj.token === "string") {
-              setBriefTranslated(prev => prev + obj.token);
-            } else if (obj.error) {
-              setBriefTransError(String(obj.error));
-              sawError = true;
-            }
-            // obj.done — nothing to do, next read() returns done.
-          } catch { /* non-JSON data line — ignore (heartbeat etc.) */ }
-        }
+      const data = await res.json() as { translated?: string; target_language?: string };
+      if (!data?.translated || !data.translated.trim()) {
+        throw new Error("Empty translation — try again or pick another language.");
       }
-      if (!sawError) {
-        setBriefTranslatedLang(targetLang);
-      }
+      setBriefTranslated(data.translated);
+      setBriefTranslatedLang(targetLang);
     } catch (e) {
       if ((e as { name?: string })?.name !== "AbortError") {
         setBriefTransError(e instanceof Error ? e.message : String(e));
@@ -3313,37 +3286,67 @@ ${html}
                     </div>
                     {!isStreamingBrief && result?.brief && (
                       <div className="mt-6 flex flex-nowrap items-center gap-2 overflow-hidden">
-                        <button
-                          onClick={() => void navigator.clipboard.writeText(result?.brief || "")}
-                          className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
-                        ><ClipboardList size={13} className="shrink-0" /><span className="truncate">Copy Brief</span></button>
-                        <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
-                          <select
-                            value={briefDownloadFmt}
-                            onChange={e => setBriefDownloadFmt(e.target.value as "pdf"|"html"|"txt"|"md")}
-                            className="shrink-0 rounded-lg border border-slate-600 bg-slate-900 px-2 py-2 text-sm text-slate-400 focus:outline-none focus:border-blue-500/60"
-                          >
-                            <option value="pdf">PDF</option>
-                            <option value="html">HTML</option>
-                            <option value="md">Markdown</option>
-                            <option value="txt">TXT</option>
-                          </select>
-                          <button
-                            onClick={() => {
-                              const slug = (result?.original_query || query || "brief").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
-                              if (briefDownloadFmt === "pdf") {
-                                void triggerDownload(buildApiUrl("/api/brief/download"), {
-                                  brief_text: result?.brief || "",
-                                  original_query: result?.original_query || query,
-                                  final_search_query: result?.final_search_query || query,
-                                }, `research_brief_${slug}.pdf`, "brief-download");
-                              } else {
-                                downloadTextAs(result?.brief || "", `research_brief_${slug}`, briefDownloadFmt as "html"|"txt"|"md");
-                              }
-                            }}
-                            className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 transition-colors"
-                          ><Download size={14} className="shrink-0" /><span className="truncate">Download Brief</span></button>
-                        </div>
+                        {/* Copy / Download act on whatever the user is
+                            currently looking at — translated text when
+                            the translation is on screen, original brief
+                            otherwise. Matches the user's ask: "下载的是
+                            当前显示的内容". The filename slug is
+                            suffixed with the language tag when exporting
+                            a translation so the file name announces
+                            itself. */}
+                        {(() => {
+                          const showingTrans = briefShowTrans && briefTranslated
+                            && briefTranslatedLang === briefTargetLang;
+                          const downloadText = showingTrans ? briefTranslated : (result?.brief || "");
+                          const langSlug = showingTrans
+                            ? "_" + briefTranslatedLang.replace(/[^\w]+/g, "_").replace(/_+$/, "")
+                            : "";
+                          const slug = (result?.original_query || query || "brief")
+                            .replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
+                          const filename = `research_brief_${slug}${langSlug}`;
+                          return (
+                            <>
+                              <button
+                                onClick={() => void navigator.clipboard.writeText(downloadText)}
+                                className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
+                                title={showingTrans ? "Copy the displayed translation" : "Copy the original brief"}
+                              ><ClipboardList size={13} className="shrink-0" /><span className="truncate">
+                                Copy {showingTrans ? "Translation" : "Brief"}
+                              </span></button>
+                              <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
+                                <select
+                                  value={briefDownloadFmt}
+                                  onChange={e => setBriefDownloadFmt(e.target.value as "pdf"|"html"|"txt"|"md")}
+                                  className="shrink-0 rounded-lg border border-slate-600 bg-slate-900 px-2 py-2 text-sm text-slate-400 focus:outline-none focus:border-blue-500/60"
+                                >
+                                  <option value="pdf">PDF</option>
+                                  <option value="html">HTML</option>
+                                  <option value="md">Markdown</option>
+                                  <option value="txt">TXT</option>
+                                </select>
+                                <button
+                                  onClick={() => {
+                                    if (briefDownloadFmt === "pdf") {
+                                      void triggerDownload(buildApiUrl("/api/brief/download"), {
+                                        brief_text:         downloadText,
+                                        original_query:     result?.original_query || query,
+                                        final_search_query: result?.final_search_query || query,
+                                      }, `${filename}.pdf`, "brief-download");
+                                    } else {
+                                      downloadTextAs(downloadText, filename, briefDownloadFmt as "html"|"txt"|"md");
+                                    }
+                                  }}
+                                  className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 transition-colors"
+                                  title={showingTrans
+                                    ? `Download the ${briefTranslatedLang} translation`
+                                    : "Download the original brief"}
+                                ><Download size={14} className="shrink-0" /><span className="truncate">
+                                  Download {showingTrans ? "Translation" : "Brief"}
+                                </span></button>
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </>

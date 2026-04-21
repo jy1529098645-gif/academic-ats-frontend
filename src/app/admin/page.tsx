@@ -1567,7 +1567,13 @@ function TierLimitsEditor({
   if (!data) {
     return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
   }
-  const TIERS: string[]    = ["anonymous", "free", "basic", "scholar", "dev"];
+  // Only the 4 user-facing tiers are editable here: 3 subscription
+  // levels (free / basic / scholar) + the internal dev tier. The
+  // "anonymous" limits (for unauthenticated endpoint access) stay in
+  // the backend quota.TIER_LIMITS code default and are deliberately
+  // NOT surfaced here — operators rarely tune them, and exposing them
+  // in the dashboard invites confusion with paid-subscription tiers.
+  const TIERS: string[]    = ["free", "basic", "scholar", "dev"];
   const FEATURES: { key: string; label: string }[] = [
     { key: "quick_search", label: "Quick Search" },
     { key: "deep_search",  label: "Deep Search"  },
