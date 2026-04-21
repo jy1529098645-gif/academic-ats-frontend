@@ -38,7 +38,7 @@ import {
   PenLine, ListChecks, Ruler, Quote, Globe, Sparkles, Square, Play, Star,
   ChevronRight, ChevronLeft, ChevronDown, Trash2, Download, ClipboardList,
   X, Gem, Check, Mail, Moon, Sun, User, Settings, CreditCard, HelpCircle, Users,
-  Plus, Minus, ArrowRight, Lightbulb, ExternalLink,
+  Plus, Minus, ArrowRight, Lightbulb, ExternalLink, MessageCircle, ClipboardCheck,
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical
 } from "lucide-react";
@@ -1420,7 +1420,7 @@ export default function HomePage() {
   const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
 
   // ── Feedback modal (bug report button) ─────────────────────────────────
-  // Floating 🐛 button at the bottom-right opens this modal. POSTs to
+  // Floating feedback button at the bottom-right opens this modal. POSTs to
   // /api/feedback; rows land in the feedback table and surface in the
   // /admin inbox. Replaces an external feedback widget during alpha.
   const [feedbackOpen,     setFeedbackOpen]     = useState(false);
@@ -5043,7 +5043,11 @@ ${html}
             }}
             aria-label="Send feedback"
           >
-            <span className="text-lg leading-none" aria-hidden>🐛</span>
+            {/* Lucide MessageCircle — matches the line-drawing style of
+                every other icon in the app (Search, Brain, Trash2, etc).
+                Previously an emoji bug 🐛 which looked foreign next to
+                the rest of the UI. */}
+            <MessageCircle size={18} aria-hidden />
             {/* Hover tooltip — appears to the left so it never clips off-screen. */}
             <span
               className="pointer-events-none absolute right-full mr-2 whitespace-nowrap rounded-md border px-2 py-1 text-[11px] font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-150"
@@ -5070,8 +5074,8 @@ ${html}
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                <div className="flex items-center gap-3 px-5 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
-                  <span>🐛</span>
+                <div className="flex items-center gap-2 px-5 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                  <MessageCircle size={16} style={{ color: "var(--ats-fg-accent)" }} />
                   <h2 className="flex-1 text-base font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
                     Send feedback
                   </h2>
@@ -5080,6 +5084,40 @@ ${html}
                   </button>
                 </div>
                 <div className="px-5 py-4 space-y-3">
+                  {/* Longer-form survey shortcut — opens the Google Form in a
+                      new tab. Positioned above the quick-feedback composer so
+                      users see both options but default to the lightweight
+                      "leave a message" path. Styled as a dashed-border callout
+                      so it reads as "auxiliary" rather than competing with the
+                      main Send button below. */}
+                  <a
+                    href="https://docs.google.com/forms/d/e/1FAIpQLScnQgLQm4TupGcGZ2OYkTZlnUwUFRyFMaIyLnp_sgPupGVXdg/viewform?usp=publish-editor"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-2.5 rounded-lg border border-dashed px-3 py-2.5 hover:brightness-110 transition-all"
+                    style={{
+                      borderColor:     "var(--ats-border-accent)",
+                      backgroundColor: "var(--ats-bg-accent-soft)",
+                      color:           "var(--ats-fg-accent)",
+                    }}
+                  >
+                    <ClipboardCheck size={16} className="shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold">Take the full survey</p>
+                      <p className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
+                        A few minutes · shapes the product roadmap
+                      </p>
+                    </div>
+                    <ExternalLink size={12} className="shrink-0 opacity-70" />
+                  </a>
+                  <div
+                    className="flex items-center gap-2 text-[10px] uppercase tracking-wider"
+                    style={{ color: "var(--ats-fg-muted)" }}
+                  >
+                    <span className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+                    <span>or drop a quick note</span>
+                    <span className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+                  </div>
                   <div className="flex gap-1.5">
                     {(["bug", "feature", "general"] as const).map(c => {
                       const active = feedbackCategory === c;
