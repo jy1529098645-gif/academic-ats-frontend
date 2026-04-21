@@ -422,7 +422,7 @@ function DevControlsPanel({
     // the status banner. On narrow screens the columns stack vertically
     // because a single-column read-order makes more sense than scrolling
     // sideways through dev chrome.
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
         {/* Col 1 — warning + admin console link ───────────────────── */}
         <div className="space-y-3">
@@ -5237,8 +5237,10 @@ ${html}
               <button onClick={() => setUserPanel(null)} className="text-slate-500 hover:text-slate-300 transition-colors"><X size={16} /></button>
             </div>
 
-            {/* Body */}
-            <div className="px-6 py-5">
+            {/* Body — dev panel gets extra vertical breathing room
+                because its 3-column grid + editor rows otherwise feel
+                cramped against the modal header/footer borders. */}
+            <div className={`px-6 ${userPanel === "dev" ? "py-8" : "py-5"}`}>
 
               {userPanel === "profile" && (
                 <div className="space-y-4">
