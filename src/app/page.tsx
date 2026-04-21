@@ -1825,6 +1825,7 @@ export default function HomePage() {
   const requestBriefTranslation = useCallback(async () => {
     const source = (result?.brief || "").trim();
     if (!source) return;
+    // Cancel any in-flight translation so rapid double-clicks don't race.
     briefTransAbortRef.current?.abort();
     const ac = new AbortController();
     briefTransAbortRef.current = ac;
@@ -1834,6 +1835,12 @@ export default function HomePage() {
     setBriefShowTrans(true);
     try {
       const token = await getAuthToken();
+      // Non-streaming: the backend does the whole translation server-side
+      // and returns a single JSON blob with the finished markdown. The
+      // brief is ALWAYS fully streamed before this button is clickable
+      // (see !isStreamingBrief gate in the JSX), so a one-shot request
+      // makes more sense than SSE. No React + streaming-DOM conflict,
+      // no partial render, no flicker.
       const res = await fetch(buildApiUrl("/api/brief/translate"), {
         method: "POST",
         signal: ac.signal,
@@ -1846,34 +1853,13 @@ export default function HomePage() {
           target_language: _inferTargetLang(),
         }),
       });
-      if (!res.ok || !res.body) throw new Error(`translate HTTP ${res.status}`);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      // SSE parse loop: each message is separated by "\n\n" and
-      // carries a single `data: <json>` line. Accumulate token frames
-      // into briefTranslated; abort cleanly on `done` or `error`.
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const raw of parts) {
-          const line = raw.split("\n").find(l => l.startsWith("data: "));
-          if (!line) continue;
-          const payload = line.slice(6).trim();
-          if (!payload) continue;
-          try {
-            const obj = JSON.parse(payload);
-            if (typeof obj.token === "string") {
-              setBriefTranslated(prev => prev + obj.token);
-            } else if (obj.error) {
-              setBriefTransError(String(obj.error));
-            }
-          } catch { /* stray non-JSON data — ignore */ }
-        }
+      if (!res.ok) {
+        const bodyText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
       }
+      const data = await res.json() as { translated?: string; target_language?: string };
+      if (!data?.translated) throw new Error("Empty translation response");
+      setBriefTranslated(data.translated);
     } catch (e) {
       if ((e as { name?: string })?.name !== "AbortError") {
         setBriefTransError(e instanceof Error ? e.message : String(e));
@@ -3006,10 +2992,59 @@ ${html}
               <div ref={leftSectionRef as React.RefObject<HTMLDivElement>} className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5 ${leftTab === "brief" ? "" : "hidden"}`}>
                 {/* Research Brief section header — hidden while the panel is in
                     its idle empty state so the centred copy below can use the
-                    full panel height (matches the Synthesis Lab empty state). */}
+                    full panel height (matches the Synthesis Lab empty state).
+                    The Translate button sits INSIDE this title row (right of
+                    the title text) so it reads as a header control, not a
+                    footer action. It only appears once streaming has finished
+                    AND a brief is present — translating a half-written brief
+                    would give half-translated output. */}
                 {(researchBriefMarkdown || isSubmitting) && (
                   <div className="mb-3 flex items-center gap-2 text-base font-bold">
-                    <FileText size={16} /><span>Research Brief</span>
+                    <FileText size={16} />
+                    <span>Research Brief</span>
+                    {!isStreamingBrief && !!result?.brief && (
+                      <button
+                        onClick={() => {
+                          if (briefShowTrans && briefTranslated) {
+                            // Already translated, currently viewing it →
+                            // flip back to the original markdown.
+                            setBriefShowTrans(false);
+                            return;
+                          }
+                          if (briefTranslated && !briefTranslating) {
+                            // Have a cached translation, currently viewing
+                            // original → flip to translation without
+                            // re-requesting.
+                            setBriefShowTrans(true);
+                            return;
+                          }
+                          // No cached translation (or previous attempt
+                          // errored) → fire a non-streaming server-side
+                          // translation. Button flips to "Translating…"
+                          // until the response arrives.
+                          void requestBriefTranslation();
+                        }}
+                        disabled={briefTranslating}
+                        title={briefShowTrans ? "Show original brief" : "Translate this brief"}
+                        className="ml-2 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 disabled:opacity-60 disabled:cursor-wait"
+                        style={{
+                          borderColor:     "var(--ats-border-accent)",
+                          backgroundColor: "var(--ats-bg-accent-soft)",
+                          color:           "var(--ats-fg-accent)",
+                        }}
+                      >
+                        <Globe size={12} />
+                        <span>
+                          {briefTranslating
+                            ? "Translating…"
+                            : briefShowTrans
+                              ? "Show Original"
+                              : briefTranslated
+                                ? "Show Translation"
+                                : "Translate"}
+                        </span>
+                      </button>
+                    )}
                   </div>
                 )}
                 {researchBriefMarkdown && (briefStatus === "draft" || briefStatus === "final") && (
@@ -3049,7 +3084,7 @@ ${html}
                       <ReactMarkdown components={mdComponents}>
                         {briefShowTrans ? (briefTranslated || " ") : researchBriefMarkdown}
                       </ReactMarkdown>
-                      {(isStreamingBrief || (briefShowTrans && briefTranslating)) && (
+                      {isStreamingBrief && !briefShowTrans && (
                         <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
                       )}
                       {briefShowTrans && briefTransError && (
@@ -3062,49 +3097,6 @@ ${html}
                           onClick={() => void navigator.clipboard.writeText(result?.brief || "")}
                           className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
                         ><ClipboardList size={13} className="shrink-0" /><span className="truncate">Copy Brief</span></button>
-                        {/* Translate toggle — themed to match the Copy/Download
-                            chrome (border + hover-accent colour tokens). First
-                            click fires an SSE translation; subsequent clicks
-                            flip between Original and Translated views without
-                            re-requesting. "Show Original" when showing the
-                            translation, "Translate" / "Retry" otherwise. */}
-                        <button
-                          onClick={() => {
-                            if (briefShowTrans && briefTranslated) {
-                              // Already have a translation — flip back to original.
-                              setBriefShowTrans(false);
-                              return;
-                            }
-                            if (briefTranslated && !briefTranslating) {
-                              // Cached translation exists but we're showing
-                              // the original — just flip the toggle.
-                              setBriefShowTrans(true);
-                              return;
-                            }
-                            // No cached translation yet (or previous attempt
-                            // errored) — fire a fresh SSE request.
-                            void requestBriefTranslation();
-                          }}
-                          disabled={briefTranslating}
-                          title={briefShowTrans ? "Show original brief" : "Translate this brief"}
-                          className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border px-3 py-2 text-sm font-semibold transition-all disabled:opacity-60"
-                          style={{
-                            borderColor: "var(--ats-border-accent)",
-                            backgroundColor: "var(--ats-bg-accent-soft)",
-                            color:       "var(--ats-fg-accent)",
-                          }}
-                        >
-                          <Globe size={13} className="shrink-0" />
-                          <span className="truncate">
-                            {briefTranslating
-                              ? "Translating…"
-                              : briefShowTrans
-                                ? "Show Original"
-                                : briefTranslated
-                                  ? "Show Translation"
-                                  : "Translate"}
-                          </span>
-                        </button>
                         <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
                           <select
                             value={briefDownloadFmt}
