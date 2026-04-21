@@ -115,12 +115,54 @@ async function mintDevAccessToken(): Promise<string | null> {
   }
 }
 
-// Drop-in replacement for fetchWithAuth that uses a dev-session access
-// token instead of whatever the current `supabase.auth` session holds.
-// Keeps the admin dashboard working even when the user has switched
-// the main app to a normal Google account.
+// Drop-in replacement for fetchWithAuth that guarantees the outgoing
+// request carries a dev-account access token, regardless of who the
+// main app is currently signed in as.
+//
+// Priority order:
+//   1. LIVE session — if the current Supabase session belongs to a dev
+//      account (DEV_ACCTS), use its access token directly. This is the
+//      common case when the user is actively signed in as dev; no need
+//      to hit Supabase's refresh endpoint or read from localStorage at
+//      all. Also handles the "user opened /admin WITHOUT first visiting
+//      /" case where page.tsx's auth listener never ran to populate the
+//      per-email cache.
+//   2. CACHED session — if the current live session is a non-dev
+//      account (the user deliberately switched), fall back to the
+//      cached dev refresh token. Mint a fresh access token via a
+//      direct POST to Supabase's /auth/v1/token endpoint so the main
+//      app's current session isn't disturbed.
+//   3. Give up — surface a clear message asking the user to sign in.
+//
+// The live-session path ALSO refreshes the per-email cache as a
+// side-effect, so a future switch to a non-dev account still has a
+// valid refresh token to use.
 async function fetchAsDev(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = await mintDevAccessToken();
+  let token: string | null = null;
+
+  // Step 1: live session
+  try {
+    const { data } = await supabase.auth.getSession();
+    const sess = data.session;
+    const email = sess?.user?.email?.toLowerCase() ?? null;
+    if (email && DEV_ACCTS.includes(email) && sess?.access_token && sess.refresh_token) {
+      token = sess.access_token;
+      // Side-effect: seed the per-email cache so a future non-dev
+      // switch still has a refresh token to mint from.
+      try {
+        window.localStorage.setItem(
+          devSessionKey(email),
+          JSON.stringify({ access_token: sess.access_token, refresh_token: sess.refresh_token }),
+        );
+      } catch { /* quota — ignore */ }
+    }
+  } catch { /* getSession failed — continue to cached path */ }
+
+  // Step 2: cached refresh token
+  if (!token) {
+    token = await mintDevAccessToken();
+  }
+
   if (!token) {
     throw new Error("No cached dev session on this browser. Sign in with a dev account at least once, then come back here.");
   }
@@ -258,11 +300,25 @@ export default function AdminPage() {
       try {
         const { data } = await supabase.auth.getSession();
         if (cancelled) return;
-        setAuthEmail(data.session?.user?.email ?? null);
-        // Look for a fallback cached dev session regardless — if the
-        // current user is already a dev we'll prefer their live token,
-        // but if they've switched to a non-dev account the cache keeps
-        // the admin dashboard usable.
+        const sess = data.session;
+        const email = sess?.user?.email?.toLowerCase() ?? null;
+        setAuthEmail(email);
+        // If the current live session belongs to a dev account, SEED
+        // the per-email cache right now. The admin page might be the
+        // first page the user visits after login (bookmark, direct
+        // link), in which case page.tsx's auth listener never ran to
+        // populate the cache — without this seed, fetchAsDev's cache
+        // fallback would fail when the user later switches accounts.
+        if (email && DEV_ACCTS.includes(email) && sess?.access_token && sess.refresh_token) {
+          try {
+            window.localStorage.setItem(
+              devSessionKey(email),
+              JSON.stringify({ access_token: sess.access_token, refresh_token: sess.refresh_token }),
+            );
+          } catch { /* quota — ignore */ }
+        }
+        // Look for any cached dev session (including the one we just
+        // seeded above) — drives the impersonation banner copy.
         const cached = findCachedDevSession();
         setCachedDevEmail(cached?.email ?? null);
         setAuthChecked(true);

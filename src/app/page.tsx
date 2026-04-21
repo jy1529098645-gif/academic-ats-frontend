@@ -1223,12 +1223,49 @@ export default function HomePage() {
     localStorage.setItem("ats-saved-accounts", JSON.stringify(list));
     setSavedAccounts(list);
   };
-  const addSavedAccount = () => {
+  // Add a dev account manually via the Accounts input. Restricted to
+  // the seeded DEV_ACCTS emails — regular / Google accounts auto-
+  // register on login (see cacheAndRegister) and don't need manual
+  // entry. Triggers a password sign-in so the refresh token lands in
+  // the per-email cache immediately; the dev then shows up under
+  // "Mounted accounts" with admin-access enabled.
+  const addSavedAccount = async () => {
     const email = addAcctInput.trim().toLowerCase();
-    if (!email || savedAccounts.some(a => a.email === email)) { setAddAcctInput(""); return; }
-    const type: SavedAccount["type"] = DEV_ACCTS.includes(email) ? "dev" : "otp";
-    persistAccounts([...savedAccounts, { email, type }]);
+    if (!email) return;
+    if (!DEV_ACCTS.includes(email)) {
+      setAcctSwitchMsg({
+        text: `Only dev accounts can be added here (dev01 / dev02 / dev03 @academicats.com). Regular accounts auto-mount on login.`,
+        error: true,
+      });
+      return;
+    }
+    if (savedAccounts.some(a => a.email === email)) {
+      setAddAcctInput("");
+      setAcctSwitchMsg({ text: `${email} is already mounted.` });
+      return;
+    }
     setAddAcctInput("");
+    setAcctSwitchMsg(null);
+    setAcctSwitching(email);
+    try {
+      // Persist into the list first so the pill appears even if login
+      // is slow; the status pill will update to "Mounted" once the
+      // session lands via cacheAndRegister.
+      persistAccounts([...savedAccounts, { email, type: "dev" }]);
+      const { error } = await supabase.auth.signInWithPassword({ email, password: DEV_PWD });
+      if (error) {
+        // Roll back the list entry — login failed, don't keep a ghost.
+        persistAccounts(savedAccounts.filter(a => a.email !== email));
+        setAcctSwitchMsg({ text: error.message, error: true });
+      } else {
+        setAcctSwitchMsg({ text: `${email} mounted. Admin access is now available.` });
+      }
+    } catch (e) {
+      persistAccounts(savedAccounts.filter(a => a.email !== email));
+      setAcctSwitchMsg({ text: e instanceof Error ? e.message : String(e), error: true });
+    } finally {
+      setAcctSwitching(null);
+    }
   };
   const removeSavedAccount = (email: string) => {
     // Dropping the account also drops its cached session — no point
@@ -1480,14 +1517,17 @@ export default function HomePage() {
         access_token:  session.access_token,
         refresh_token: session.refresh_token,
       });
-      // Auto-register any email we see logged in, so it shows up in the
-      // Accounts → Switch list next time the user opens that panel.
-      // Dedup by email; tier is inferred from DEV_ACCTS / domain.
+      // Auto-register NON-dev accounts so a Google login lands in the
+      // mounted list without a manual step. Dev accounts are NOT
+      // auto-added here — they must be explicitly added via the dev
+      // input in the Accounts panel so the list doesn't accumulate the
+      // three seeded dev accounts by default. The token cache above
+      // still gets written for ALL accounts (including dev) so /admin
+      // impersonation still works once the dev signs in.
+      if (DEV_ACCTS.includes(email)) return;
       setSavedAccounts(prev => {
         if (prev.some(a => a.email === email)) return prev;
-        const type: SavedAccount["type"] = DEV_ACCTS.includes(email)
-          ? "dev"
-          : (email.endsWith("@gmail.com") ? "oauth" : "otp");
+        const type: SavedAccount["type"] = email.endsWith("@gmail.com") ? "oauth" : "otp";
         const next = [...prev, { email, type }];
         try { localStorage.setItem("ats-saved-accounts", JSON.stringify(next)); } catch { /* ignore */ }
         return next;
@@ -5861,20 +5901,31 @@ ${html}
                       <svg width="13" height="13" viewBox="0 0 48 48" fill="none"><path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/><path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/><path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/><path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/></svg>
                       Continue with Google
                     </button>
-                    <div className="flex gap-2 opacity-40 cursor-not-allowed">
+                    {/* Dev-account input — enabled, but validates that
+                        the typed email is one of the seeded dev accounts.
+                        Regular emails auto-mount on login via Google /
+                        magic link, so manual entry is reserved for the
+                        three dev accounts that don't have OAuth coverage. */}
+                    <div className="flex gap-2">
                       <input
                         type="email"
-                        disabled
-                        placeholder="email@example.com"
-                        className="flex-1 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs text-slate-500 placeholder-slate-700 cursor-not-allowed"
+                        value={addAcctInput}
+                        onChange={(e) => setAddAcctInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter" && !acctSwitching) void addSavedAccount(); }}
+                        placeholder="dev01@academicats.com"
+                        disabled={!!acctSwitching}
+                        className="flex-1 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 outline-none focus:border-[var(--ats-border-accent)] disabled:opacity-50 disabled:cursor-not-allowed"
                       />
                       <button
-                        disabled
-                        className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-600 cursor-not-allowed shrink-0"
-                      >Add</button>
+                        onClick={() => void addSavedAccount()}
+                        disabled={!addAcctInput.trim() || !!acctSwitching}
+                        className="rounded-lg border border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] px-3 py-1.5 text-xs font-semibold shrink-0 hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ color: "var(--ats-fg-accent)" }}
+                      >{acctSwitching ? "…" : "Add"}</button>
                     </div>
-                    <p className="text-[9px] text-slate-600 mt-1.5">
-                      Email login coming soon · use Google to sign in
+                    <p className="text-[9px] text-slate-600 mt-1.5 leading-relaxed">
+                      Dev accounts only (dev01 / dev02 / dev03 @academicats.com).
+                      Regular accounts auto-mount when you sign in via Google above.
                     </p>
                   </div>
                 </div>
