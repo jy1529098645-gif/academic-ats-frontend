@@ -1429,6 +1429,40 @@ export default function HomePage() {
   const [feedbackSending,  setFeedbackSending]  = useState(false);
   const [feedbackMsg,      setFeedbackMsg]      = useState<{ text: string; error?: boolean } | null>(null);
 
+  // ── Dev account sign-in (login-required overlay) ─────────────────────────
+  // Lets operators sign in as dev01/02/03 from the main login screen
+  // without routing through Google. Keeps the subset of dev tooling
+  // usable during local smoke tests and when Google OAuth is blocked
+  // (e.g. on a corp laptop). Uses the MAIN supabase client (not the
+  // isolated admin client) because we want these creds to grant the
+  // normal user session, not the /admin console session.
+  const [devLoginOpen,     setDevLoginOpen]     = useState(false);
+  const [devLoginEmail,    setDevLoginEmail]    = useState("dev01@academicats.com");
+  const [devLoginPassword, setDevLoginPassword] = useState("");
+  const [devLoginBusy,     setDevLoginBusy]     = useState(false);
+  const [devLoginErr,      setDevLoginErr]      = useState("");
+
+  const handleDevLogin = useCallback(async () => {
+    setDevLoginErr("");
+    const email = devLoginEmail.trim().toLowerCase();
+    if (!email) { setDevLoginErr("Pick a dev account."); return; }
+    if (!devLoginPassword) { setDevLoginErr("Password required."); return; }
+    setDevLoginBusy(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password: devLoginPassword,
+      });
+      if (error) setDevLoginErr(error.message);
+      // success → onAuthStateChange clears the overlay.
+    } catch (e) {
+      setDevLoginErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDevLoginBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devLoginEmail, devLoginPassword]);
+
   const submitFeedback = useCallback(async () => {
     const message = feedbackText.trim();
     if (message.length < 3) {
@@ -3070,6 +3104,92 @@ ${html}
               </svg>
               Continue with Google
             </button>
+
+            {/* Developer-account sign-in — hidden by default so regular
+                users aren't confused, revealed by a small "Developer
+                sign-in" link. Uses the MAIN supabase client so the
+                resulting session behaves like any other user login
+                (feature gating, quota, history). */}
+            <div className="mt-4 pt-4 border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
+              {!devLoginOpen ? (
+                <button
+                  onClick={() => setDevLoginOpen(true)}
+                  className="text-[11px] underline hover:opacity-80 transition-opacity"
+                  style={{ color: "var(--ats-fg-muted)" }}
+                >
+                  Developer sign-in
+                </button>
+              ) : (
+                <form
+                  onSubmit={(e) => { e.preventDefault(); void handleDevLogin(); }}
+                  className="space-y-2 text-left"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[10px] uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+                      Dev account
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => { setDevLoginOpen(false); setDevLoginErr(""); setDevLoginPassword(""); }}
+                      className="text-[10px] underline"
+                      style={{ color: "var(--ats-fg-muted)" }}
+                    >Cancel</button>
+                  </div>
+                  <select
+                    value={devLoginEmail}
+                    onChange={(e) => setDevLoginEmail(e.target.value)}
+                    disabled={devLoginBusy}
+                    className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--ats-border-accent)]"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-base)",
+                      color:           "var(--ats-fg-primary)",
+                    }}
+                  >
+                    {DEV_ACCTS.map(acct => (
+                      <option key={acct} value={acct}>{acct}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="password"
+                    value={devLoginPassword}
+                    onChange={(e) => setDevLoginPassword(e.target.value)}
+                    placeholder="Password"
+                    autoComplete="current-password"
+                    disabled={devLoginBusy}
+                    className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--ats-border-accent)]"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-base)",
+                      color:           "var(--ats-fg-primary)",
+                    }}
+                  />
+                  {devLoginErr && (
+                    <p
+                      className="text-[11px] rounded-md px-2 py-1.5 border"
+                      style={{
+                        borderColor:     "#ef444455",
+                        backgroundColor: "#ef44441a",
+                        color:           "#ef4444",
+                      }}
+                    >{devLoginErr}</p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={devLoginBusy}
+                    className="w-full rounded-lg px-4 py-2 text-sm font-bold shadow-sm hover:brightness-110 transition-all disabled:opacity-50 disabled:cursor-wait"
+                    style={{
+                      backgroundColor: "var(--ats-fg-accent)",
+                      color:           "#ffffff",
+                      border:          "1px solid var(--ats-fg-accent)",
+                    }}
+                  >
+                    {devLoginBusy ? "Signing in…" : "Sign in as developer"}
+                  </button>
+                </form>
+              )}
+            </div>
+
             <p className="mt-3 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
               We never sell your data. See{" "}
               <button onClick={() => setUserPanel("legal")} className="underline hover:opacity-80">Terms & Notices</button>.
