@@ -46,6 +46,26 @@ import {
 // a thin `explainFetchError` alias only so the dev-time API_BASE mention in
 // error copy stays accurate when NEXT_PUBLIC_API_BASE_URL is missing.
 
+// ── Lab writing-model catalogue ─────────────────────────────────────────────
+// The backend expects one of a small allow-list of provider model ids (see
+// _ALLOWED_WRITING_MODELS in academic-ats-backend/main.py). Users don't need
+// to see which vendor we're calling — instead we show descriptive aliases
+// and map to the real id only in the request payload. Keeping the mapping
+// here (not in a separate file) so the pair stays in one place and the
+// backend allow-list check still works without any translation step.
+type LabModelOption = {
+  id:      string;   // backend-visible model id (sent in writing_model)
+  label:   string;   // user-visible alias (never vendor-specific)
+  tagline: string;   // short one-line description shown in the picker
+};
+const LAB_MODEL_OPTIONS: LabModelOption[] = [
+  { id: "gpt-4o-mini",        label: "Swift Writer",   tagline: "Fastest · default" },
+  { id: "gpt-4o",             label: "Deep Writer",    tagline: "Broader reasoning · slower" },
+  { id: "claude-sonnet-4-6",  label: "Scholar Writer", tagline: "Citation-careful long form" },
+];
+const labModelLabel = (id: string): string =>
+  LAB_MODEL_OPTIONS.find(m => m.id === id)?.label ?? "Swift Writer";
+
 const DEFAULT_SOURCES = [
   "Semantic Scholar",
   "OpenAlex",
@@ -689,6 +709,11 @@ export default function HomePage() {
   const [labTranslateLang,   setLabTranslateLang]   = useState("Chinese (Simplified)");
   const [labTranslateFormat, setLabTranslateFormat] = useState<"pdf"|"md"|"txt">("pdf");
   const [labTranslating,     setLabTranslating]     = useState(false);
+  // Primary (non-translated) article download state. Mirrors labTranslating
+  // so a second click on the footer "Download" button cancels the in-flight
+  // request — matches the pause/cancel UX the user asked for.
+  const [labDownloading,     setLabDownloading]     = useState(false);
+  const labDownloadAbortRef = useRef<AbortController | null>(null);
   // AbortController held across renders so a second click on the button can
   // cancel the in-flight translation request.
   const labTranslateAbortRef = useRef<AbortController | null>(null);
@@ -714,6 +739,9 @@ export default function HomePage() {
   } | null>(null);
   const [labNotesOpen,      setLabNotesOpen]      = useState(true);
   const [labUserFiles,      setLabUserFiles]      = useState<File[]>([]);
+  // Stored as the real backend model id so the payload always carries a
+  // whitelisted value; the UI maps these ids to user-facing descriptive
+  // labels via LAB_MODEL_OPTIONS below so the vendor is never exposed.
   const [labWritingModel,   setLabWritingModel]   = useState("gpt-4o-mini");
   const [labModelOpen,      setLabModelOpen]      = useState(false);
 
@@ -730,12 +758,55 @@ export default function HomePage() {
   const [authUser, setAuthUser] = useState<{ email?: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | null>(null);
+  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | "usage" | null>(null);
 
   // Live quota snapshot — tier + current-month counters. Refreshes on mount,
   // window focus, and whenever a metered action completes (see usage.refresh()
   // calls after search / synthesize / deep-read success).
   const usage = useUsage(!!authUser?.email);
+
+  /**
+   * Pre-flight quota check. Call BEFORE any metered action (search /
+   * deep-read / synthesize). Returns true if the action is allowed; when it
+   * returns false, the Usage modal is already open so the user sees why
+   * they were blocked — no need for a separate toast. Unlimited tiers
+   * (scholar / dev) always allow. If usage data hasn't arrived yet we
+   * optimistically allow and rely on the server's HTTP 429 as the backstop.
+   */
+  const ensureQuota = useCallback((feature: keyof UsageSnapshot["limits"]): boolean => {
+    if (!usage.data) return true;
+    const limit = usage.data.limits[feature];
+    if (limit === null || limit === undefined) return true;
+    const used = (usage.data.used as any)[`${feature}_count`] ?? 0;
+    if (used < limit) return true;
+    // Exhausted — open the Usage modal and deny.
+    setUserPanel("usage");
+    setUiError(`You're out of ${USAGE_FEATURE_LABELS[feature]} for this month (${used}/${limit}). Upgrade or wait until next cycle.`);
+    return false;
+  }, [usage.data]);
+
+  /**
+   * Server-side quota backstop. If an HTTP 429 lands with the X-Quota-Tier
+   * header set (our backend's quota response signature, distinct from a
+   * plain rate-limiter 429), open the Usage modal so the user sees their
+   * counters and knows what to do. Returns `true` when the response was
+   * handled as a quota error (caller should stop), `false` otherwise.
+   */
+  const handleQuotaResponse = useCallback((res: Response): boolean => {
+    if (res.status !== 429) return false;
+    const tier = res.headers.get("X-Quota-Tier");
+    if (!tier) return false;
+    void usage.refresh();
+    setUserPanel("usage");
+    const limit = res.headers.get("X-Quota-Limit");
+    const used  = res.headers.get("X-Quota-Used");
+    setUiError(
+      limit && used
+        ? `Monthly limit reached (${used}/${limit}). Upgrade your plan or wait until next cycle.`
+        : "Monthly quota reached. Upgrade your plan or wait until next cycle."
+    );
+    return true;
+  }, [usage]);
 
   // ── Role & multi-account management ───────────────────────────────────────
   // Single source of truth for developer emails — used for role checks everywhere.
@@ -1313,7 +1384,13 @@ export default function HomePage() {
     return Boolean(backendPaper.pdf_url || backendPaper.oa_url || backendPaper.url);
   };
 
-  const triggerDownload = async (url: string, body: Record<string, any>, fallbackFilename: string, key: string) => {
+  const triggerDownload = async (
+    url: string,
+    body: Record<string, any>,
+    fallbackFilename: string,
+    key: string,
+    signal?: AbortSignal,
+  ) => {
     try {
       setOriginalErrors((prev) => ({ ...prev, [key]: "" }));
       setTranslateErrors((prev) => ({ ...prev, [key]: "" }));
@@ -1325,11 +1402,13 @@ export default function HomePage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
+            signal,
           }, true)
         : await fetch(pathOrUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
+            signal,
           });
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, `Download failed: ${res.status}`));
@@ -1583,6 +1662,10 @@ ${html}
       setUiError("Please select at least one source.");
       return;
     }
+    // Client-side quota preflight. Server is still the source of truth
+    // (HTTP 429 backstop) but a local short-circuit gives the user an
+    // immediate, in-modal explanation instead of a network round-trip.
+    if (!ensureQuota(fastMode ? "quick_search" : "deep_search")) return;
 
     const _usedUnderstand = directionData !== null;
     abortRef.current = new AbortController();
@@ -1874,6 +1957,7 @@ ${html}
 
   async function handleSynthesize() {
     if (labRefs.length === 0) return;
+    if (!ensureQuota("synthesis")) return;
     const ac = new AbortController();
     labAbortRef.current = ac;
     setLabGenerating(true);
@@ -1978,6 +2062,7 @@ ${html}
   }
 
   async function runDeepRead(paper: Paper, paperKey: string) {
+    if (!ensureQuota("deep_read")) return;
     setDeepReadLoading((prev) => ({ ...prev, [paperKey]: true }));
     setDeepReadErrors((prev) => ({ ...prev, [paperKey]: "" }));
     try {
@@ -1986,6 +2071,9 @@ ${html}
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paper: toBackendPaper(paper), user_query: selectedSearchQuery || query }),
       });
+      // Backend enforcement backstop — if it returned 429 with the quota
+      // header, the Usage modal has already been opened by the handler.
+      if (handleQuotaResponse(res)) return;
       if (!res.ok) throw new Error(await readErrorMessage(res, `Deep read failed: ${res.status}`));
       const data = await res.json();
       setDeepReadResults((prev) => ({ ...prev, [paperKey]: data || {} }));
@@ -2242,15 +2330,15 @@ ${html}
                   <>
                     {/* translate="no" — Google Translate rewrites text nodes, which collides
                         with the streamed markdown diff and crashes the page mid-generation. */}
-                    {/* Body text was 0.63rem (tiny) — bumped up two steps to
-                        0.85rem so paragraphs read comfortably. Headings keep
-                        their existing sizes (mdComponents' h2/h3) so hierarchy
-                        is preserved. Line-height nudged up to match. */}
+                    {/* Body text at 0.78rem — one step below the previous
+                        0.85rem — with tighter line-height/margins so the
+                        brief reads more densely without the headings
+                        (prose-h2 / h3 controlled by mdComponents) changing. */}
                     <div translate="no" className="notranslate fade-in prose prose-invert max-w-none break-words
-                      prose-p:text-[0.85rem] prose-p:leading-[1.65] prose-p:my-1 prose-p:text-slate-300
+                      prose-p:text-[0.78rem] prose-p:leading-[1.45] prose-p:my-0.5 prose-p:text-slate-300
                       prose-strong:text-slate-100 prose-strong:font-semibold
-                      prose-li:text-[0.85rem] prose-li:leading-[1.6] prose-li:text-slate-300 prose-li:my-0.5
-                      prose-ul:my-1.5 prose-ol:my-1.5 prose-ul:pl-4 prose-ol:pl-4">
+                      prose-li:text-[0.78rem] prose-li:leading-[1.4] prose-li:text-slate-300 prose-li:my-0
+                      prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4">
                       <ReactMarkdown components={mdComponents}>{researchBriefMarkdown}</ReactMarkdown>
                       {isStreamingBrief && (
                         <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
@@ -2308,13 +2396,23 @@ ${html}
                     pipeline is running or has produced any agent output / strategy
                     summary, and stays collapsed-by-default once visible. */}
                 {showAnalyticalTrace && (
-                  <details className="ats-details-reset mt-6 ats-card rounded-2xl px-4 py-3">
+                  // Auto-expand as soon as the Deep pipeline starts streaming
+                  // — users wanted to see agents in flight without clicking
+                  // the disclosure first. Once submitting stops, the user can
+                  // still collapse manually.
+                  <details
+                    open={isSubmitting && !fastMode}
+                    className="ats-details-reset mt-6 ats-card rounded-2xl px-4 py-3"
+                  >
                     <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-slate-300">
                       <Brain size={14} />
                       <span>Analytical Trace &amp; Retrieval Strategy</span>
                       <ChevronDown size={12} className="ml-auto transition-transform" />
                     </summary>
                     <div className="mt-4 space-y-4">
+                      {/* ANALYTICAL TRACE — deep-navy card with the multi-agent
+                          output. Neutral surface so agent sections (each with
+                          their own accent chrome) read as the focus. */}
                       <div className="ats-card rounded-3xl bg-slate-950/40 p-4">
                         <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
                         <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
@@ -2326,19 +2424,31 @@ ${html}
                         </div>
                       </div>
 
-                      <div className="ats-card rounded-3xl bg-[var(--ats-bg-emerald)] p-4">
-                        <div className="mb-2 flex items-center gap-2 text-base font-bold"><Compass size={16} /><span>Retrieval Strategy Summary</span></div>
-                        <p className="mb-4 text-sm text-slate-400">How the search was run, screened, and selected.</p>
+                      {/* RETRIEVAL STRATEGY SUMMARY — visually distinct from
+                          the analytical-trace card above: dashed double-border
+                          on the accent hue + inset accent-soft background, so
+                          the reader instantly sees "this is a different kind
+                          of artefact (retrieval meta-data, not agent output)". */}
+                      <div
+                        className="rounded-3xl border-2 border-dashed border-[var(--ats-border-accent)] bg-[var(--ats-bg-accent-soft)] p-4"
+                        style={{ boxShadow: "inset 0 0 0 1px var(--ats-border-subtle)" }}
+                      >
+                        <div className="mb-2 flex items-center gap-2 text-base font-bold text-[var(--ats-fg-accent)]">
+                          <Compass size={16} />
+                          <span>Retrieval Strategy Summary</span>
+                          <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.18em] text-[var(--ats-fg-muted)]">meta</span>
+                        </div>
+                        <p className="mb-4 text-sm text-[var(--ats-fg-secondary)]">How the search was run, screened, and selected.</p>
                         {result?.strategy_summary ? (
-                          <div className="space-y-2 text-xs text-slate-300">
+                          <div className="space-y-2 text-xs text-[var(--ats-fg-secondary)]">
                             {Array.isArray(result.strategy_summary.strategy_points) &&
                               result.strategy_summary.strategy_points.map((item: any, idx: number) => (
                                 <div key={idx} className="break-words">• {String(item)}</div>
                               ))}
                           </div>
                         ) : (
-                          <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">
-                            Run Search & Analysis to see the retrieval strategy summary here.
+                          <div className="rounded-2xl border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] p-4 text-sm text-[var(--ats-fg-muted)]">
+                            Run Search &amp; Analysis to see the retrieval strategy summary here.
                           </div>
                         )}
                       </div>
@@ -3244,13 +3354,16 @@ ${html}
                     const spec = labFieldSpec(labOutputType);
                     const pointsPh = labPointsPlaceholder(spec);
                     const hasPoints = spec.pointsLabel !== null && spec.pointsLabel !== undefined;
-                    // Subdued inline label — a small word rather than a chip,
-                    // so the required/optional hint reads as meta-data next to
-                    // the field name instead of a button.
+                    // Subdued inline label — only surfaces when a field is
+                    // strongly recommended. Optional fields get no annotation
+                    // (empty nodes render nothing) because "optional" is the
+                    // default expectation — adding it just adds visual noise.
                     const requiredBadge = (req: boolean) => (
-                      <span className={`ml-1.5 shrink-0 text-[10px] font-normal italic ${req ? "text-amber-400/80" : "text-slate-500/70"}`}>
-                        {req ? "required" : "optional"}
-                      </span>
+                      req
+                        ? <span className="ml-1.5 shrink-0 text-[10px] font-normal italic text-amber-400/80">
+                            strongly recommended
+                          </span>
+                        : null
                     );
                     return (
                       <>
@@ -3466,29 +3579,28 @@ ${html}
                     )}
                   </div>
 
-                  {/* Writing model selector (collapsible) */}
+                  {/* Writing model selector (collapsible).
+                      Displays user-facing aliases ("Swift Writer" / "Deep
+                      Writer" / "Scholar Writer"); the backend still receives
+                      the real provider model id under the hood. */}
                   <div>
                     <button
                       onClick={() => setLabModelOpen(o => !o)}
                       className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
                     >
                       <span>{labModelOpen ? "▾" : "▸"}</span>
-                      <span>Writing model: <span className="text-violet-400 font-semibold">{labWritingModel === "claude" ? "Claude Sonnet" : labWritingModel}</span></span>
+                      <span>Writing model: <span className="text-violet-400 font-semibold">{labModelLabel(labWritingModel)}</span></span>
                     </button>
                     {labModelOpen && (
                       <div className="mt-2 flex flex-nowrap items-center gap-2 overflow-hidden">
-                        {[
-                          { id: "gpt-4o-mini", label: "GPT-4o mini", desc: "Fast · default" },
-                          { id: "gpt-4o",      label: "GPT-4o",      desc: "Powerful · slower" },
-                          { id: "claude",      label: "Claude Sonnet", desc: "Anthropic" },
-                        ].map(m => (
+                        {LAB_MODEL_OPTIONS.map(m => (
                           <button
                             key={m.id}
                             onClick={() => setLabWritingModel(m.id)}
                             className={`shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${labWritingModel === m.id ? "border-violet-500/60 bg-violet-500/15 text-violet-300" : "border-slate-700 bg-slate-900/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"}`}
                           >
                             <span className="truncate">{m.label}</span>
-                            <span className="truncate font-normal text-slate-500">{m.desc}</span>
+                            <span className="truncate font-normal text-slate-500">{m.tagline}</span>
                           </button>
                         ))}
                       </div>
@@ -3588,12 +3700,41 @@ ${html}
                   )}
 
                   {/* Result */}
-                  {labResult && (
+                  {labResult && (() => {
+                    // Shared resolvers — used by every filename + PDF title in this block.
+                    const OUTPUT_LABELS_SLUG: Record<string,string> = {
+                      literature_review:     "Literature_Review",
+                      theoretical_framework: "Theoretical_Framework",
+                      research_proposal:     "Research_Proposal",
+                      discussion:            "Discussion",
+                      introduction:          "Introduction",
+                      conclusion:            "Conclusion",
+                      abstract:              "Abstract",
+                      argumentative_essay:   "Academic_Essay",
+                    };
+                    const OUTPUT_LABELS_TITLE: Record<string,string> = {
+                      literature_review:     "Literature Review",
+                      theoretical_framework: "Theoretical Framework",
+                      research_proposal:     "Research Proposal",
+                      discussion:            "Discussion",
+                      introduction:          "Introduction",
+                      conclusion:            "Conclusion",
+                      abstract:              "Abstract",
+                      argumentative_essay:   "Academic Essay",
+                    };
+                    const outputSlug  = OUTPUT_LABELS_SLUG[labOutputType] ?? "Output";
+                    const outputTitle = OUTPUT_LABELS_TITLE[labOutputType] ?? "Lab Output";
+                    const argSlug = (labCoreArg || "synthesis").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
+                    const filename = `${outputSlug}_${argSlug}`;
+                    return (
                     <div>
                       <div className="flex flex-nowrap items-center gap-2 mb-2 overflow-hidden">
                         <span className="shrink min-w-0 truncate text-sm font-semibold text-slate-200">Generated Text</span>
                         <div className="ml-auto flex flex-nowrap items-center gap-1.5 min-w-0">
-                          {/* Quick copy — flips to a "Copied" confirmation for 1.5s after click. */}
+                          {/* Quick copy — stays in the header because it's
+                              instantaneous and most users want it close to
+                              the title. Download / Translate are consolidated
+                              in the footer block below the article body. */}
                           <button
                             onClick={async () => {
                               try {
@@ -3606,45 +3747,6 @@ ${html}
                           >
                             {labCopied ? <><Check size={11} strokeWidth={3} className="shrink-0" /><span className="truncate">Copied</span></> : <><ClipboardList size={11} className="shrink-0" /><span className="truncate">Copy</span></>}
                           </button>
-                          {/* Format selector */}
-                          <select
-                            value={labDownloadFormat}
-                            onChange={e => setLabDownloadFormat(e.target.value as "pdf"|"html"|"txt"|"md")}
-                            className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-400 focus:outline-none focus:border-emerald-500/60"
-                          >
-                            <option value="pdf">PDF</option>
-                            <option value="html">HTML</option>
-                            <option value="md">Markdown</option>
-                            <option value="txt">TXT</option>
-                          </select>
-                          {/* Download */}
-                          {!labGenerating && (
-                            <button
-                              onClick={() => {
-                                const outputLabel = ({
-                                  literature_review:     "Literature_Review",
-                                  theoretical_framework: "Theoretical_Framework",
-                                  research_proposal:     "Research_Proposal",
-                                  discussion:            "Discussion",
-                                  introduction:          "Introduction",
-                                  conclusion:            "Conclusion",
-                                  abstract:              "Abstract",
-                                  argumentative_essay:   "Academic_Essay",
-                                } as Record<string,string>)[labOutputType] ?? "Output";
-                                const slug = (labCoreArg || "synthesis").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
-                                const filename = `${outputLabel}_${slug}`;
-                                if (labDownloadFormat === "pdf") {
-                                  void triggerDownload(buildApiUrl("/api/text/to-pdf"), {
-                                    text: labResult,
-                                    title: outputLabel.replace(/_/g, " "),
-                                  }, `${filename}.pdf`, "lab-download-pdf");
-                                } else {
-                                  downloadTextAs(labResult, filename, labDownloadFormat as "html"|"txt"|"md");
-                                }
-                              }}
-                              className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 transition-colors"
-                            ><span aria-hidden className="shrink-0">⬇</span><span className="truncate">Download</span></button>
-                          )}
                         </div>
                       </div>
                       <div translate="no" className="notranslate rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
@@ -3652,85 +3754,145 @@ ${html}
                         {labGenerating && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
 
-                      {/* Translated download — picks a target language + file format
-                          and hits /api/text/translate-export. Kept as a separate row
-                          so the plain-language download controls above remain clear. */}
+                      {/* ── Consolidated download footer ─────────────────────
+                          All download controls live below the article text so
+                          the reading flow is: title → article → actions. Two
+                          rows: (1) download the original, (2) download a
+                          translation. Each row has its own format picker and
+                          a single button that flips to "Cancel" while the
+                          request is in flight, so the user can pause a slow
+                          PDF render without hunting for a separate stop. */}
                       {!labGenerating && (
-                        <div className="mt-2 flex flex-nowrap items-center gap-1.5 overflow-hidden text-xs">
-                          <span className="shrink min-w-0 truncate text-slate-500">Translate &amp; download:</span>
-                          <select
-                            value={labTranslateLang}
-                            onChange={e => setLabTranslateLang(e.target.value)}
-                            className="shrink min-w-0 max-w-[9rem] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60 truncate"
-                          >
-                            {["Chinese (Simplified)", "Chinese (Traditional)", "English", "Japanese", "Korean", "Spanish", "French", "German", "Indonesian", "Arabic"].map(l => (
-                              <option key={l} value={l}>{l}</option>
-                            ))}
-                          </select>
-                          <select
-                            value={labTranslateFormat}
-                            onChange={e => setLabTranslateFormat(e.target.value as "pdf"|"md"|"txt")}
-                            className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60"
-                          >
-                            <option value="pdf">PDF</option>
-                            <option value="md">Markdown</option>
-                            <option value="txt">TXT</option>
-                          </select>
-                          <button
-                            onClick={async () => {
-                              // Second click cancels the in-flight request.
-                              if (labTranslating) {
-                                labTranslateAbortRef.current?.abort();
-                                labTranslateAbortRef.current = null;
-                                setLabTranslating(false);
-                                return;
-                              }
-                              const controller = new AbortController();
-                              labTranslateAbortRef.current = controller;
-                              try {
-                                setLabTranslating(true);
-                                const title = ({
-                                  literature_review:     "Literature Review",
-                                  theoretical_framework: "Theoretical Framework",
-                                  research_proposal:     "Research Proposal",
-                                  discussion:            "Discussion",
-                                  introduction:          "Introduction",
-                                  conclusion:            "Conclusion",
-                                  abstract:              "Abstract",
-                                  argumentative_essay:   "Academic Essay",
-                                } as Record<string,string>)[labOutputType] ?? "Lab Output";
-                                const res = await fetchWithApiFallback("/api/text/translate-export", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ text: labResult, target_language: labTranslateLang, title, file_format: labTranslateFormat }),
-                                  signal: controller.signal,
-                                }, true);
-                                if (!res.ok) throw new Error(`Translate failed: ${res.status}`);
-                                const blob = await res.blob();
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement("a");
-                                a.href = url;
-                                const ext = labTranslateFormat;
-                                a.download = `${title.replace(/\s+/g, "_")}_${labTranslateLang.replace(/[()\s]/g, "")}.${ext}`;
-                                a.click();
-                                URL.revokeObjectURL(url);
-                              } catch (err) {
-                                if ((err as { name?: string })?.name !== "AbortError") {
-                                  console.warn("[translate-export] failed:", err);
+                        <div className="mt-3 rounded-xl border border-slate-700/60 bg-slate-900/40 p-3 space-y-2.5 text-xs">
+                          <div className="flex items-center gap-2 text-slate-300 text-[11px] font-bold uppercase tracking-wide">
+                            <Download size={12} />
+                            <span>Download</span>
+                          </div>
+
+                          {/* Row 1: original article */}
+                          <div className="flex flex-nowrap items-center gap-1.5 overflow-hidden">
+                            <span className="shrink min-w-0 truncate text-slate-500">Article format:</span>
+                            <select
+                              value={labDownloadFormat}
+                              onChange={e => setLabDownloadFormat(e.target.value as "pdf"|"html"|"txt"|"md")}
+                              disabled={labDownloading}
+                              className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60 disabled:opacity-60"
+                            >
+                              <option value="pdf">PDF</option>
+                              <option value="html">HTML</option>
+                              <option value="md">Markdown</option>
+                              <option value="txt">TXT</option>
+                            </select>
+                            <button
+                              onClick={async () => {
+                                // Second click cancels an in-flight download.
+                                if (labDownloading) {
+                                  labDownloadAbortRef.current?.abort();
+                                  labDownloadAbortRef.current = null;
+                                  setLabDownloading(false);
+                                  return;
                                 }
-                              } finally {
-                                setLabTranslating(false);
-                                labTranslateAbortRef.current = null;
-                              }
-                            }}
-                            className={`shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors ${labTranslating ? "border-red-500/40 bg-red-500/10 text-red-300 animate-pulse" : "border-slate-700 text-slate-300 hover:border-emerald-500/50 hover:text-emerald-400"}`}
-                          >
-                            {labTranslating ? <><Square size={11} fill="currentColor" className="shrink-0" /><span className="truncate">Cancel</span></> : <><Globe size={11} className="shrink-0" /><span className="truncate">Download translation</span></>}
-                          </button>
+                                if (labDownloadFormat === "pdf") {
+                                  const ac = new AbortController();
+                                  labDownloadAbortRef.current = ac;
+                                  setLabDownloading(true);
+                                  try {
+                                    await triggerDownload(
+                                      buildApiUrl("/api/text/to-pdf"),
+                                      { text: labResult, title: outputSlug.replace(/_/g, " ") },
+                                      `${filename}.pdf`,
+                                      "lab-download-pdf",
+                                      ac.signal,
+                                    );
+                                  } finally {
+                                    setLabDownloading(false);
+                                    labDownloadAbortRef.current = null;
+                                  }
+                                } else {
+                                  // Text formats are synchronous client-side — no
+                                  // pause needed because there's nothing to wait on.
+                                  downloadTextAs(labResult, filename, labDownloadFormat as "html"|"txt"|"md");
+                                }
+                              }}
+                              className={`ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${labDownloading ? "border-red-500/40 bg-red-500/10 text-red-300 animate-pulse" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60"}`}
+                            >
+                              {labDownloading
+                                ? <><Square size={11} fill="currentColor" className="shrink-0" /><span className="truncate">Pause</span></>
+                                : <><Download size={11} className="shrink-0" /><span className="truncate">Download article</span></>}
+                            </button>
+                          </div>
+
+                          {/* Row 2: translated article */}
+                          <div className="flex flex-nowrap items-center gap-1.5 overflow-hidden">
+                            <span className="shrink min-w-0 truncate text-slate-500">Translate to:</span>
+                            <select
+                              value={labTranslateLang}
+                              onChange={e => setLabTranslateLang(e.target.value)}
+                              disabled={labTranslating}
+                              className="shrink min-w-0 max-w-[10rem] rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60 truncate disabled:opacity-60"
+                            >
+                              {["Chinese (Simplified)", "Chinese (Traditional)", "English", "Japanese", "Korean", "Spanish", "French", "German", "Indonesian", "Arabic"].map(l => (
+                                <option key={l} value={l}>{l}</option>
+                              ))}
+                            </select>
+                            <select
+                              value={labTranslateFormat}
+                              onChange={e => setLabTranslateFormat(e.target.value as "pdf"|"md"|"txt")}
+                              disabled={labTranslating}
+                              className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/60 disabled:opacity-60"
+                            >
+                              <option value="pdf">PDF</option>
+                              <option value="md">Markdown</option>
+                              <option value="txt">TXT</option>
+                            </select>
+                            <button
+                              onClick={async () => {
+                                // Second click cancels the in-flight translate.
+                                if (labTranslating) {
+                                  labTranslateAbortRef.current?.abort();
+                                  labTranslateAbortRef.current = null;
+                                  setLabTranslating(false);
+                                  return;
+                                }
+                                const controller = new AbortController();
+                                labTranslateAbortRef.current = controller;
+                                try {
+                                  setLabTranslating(true);
+                                  const res = await fetchWithApiFallback("/api/text/translate-export", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ text: labResult, target_language: labTranslateLang, title: outputTitle, file_format: labTranslateFormat }),
+                                    signal: controller.signal,
+                                  }, true);
+                                  if (!res.ok) throw new Error(`Translate failed: ${res.status}`);
+                                  const blob = await res.blob();
+                                  const url = URL.createObjectURL(blob);
+                                  const a = document.createElement("a");
+                                  a.href = url;
+                                  a.download = `${outputTitle.replace(/\s+/g, "_")}_${labTranslateLang.replace(/[()\s]/g, "")}.${labTranslateFormat}`;
+                                  a.click();
+                                  URL.revokeObjectURL(url);
+                                } catch (err) {
+                                  if ((err as { name?: string })?.name !== "AbortError") {
+                                    console.warn("[translate-export] failed:", err);
+                                  }
+                                } finally {
+                                  setLabTranslating(false);
+                                  labTranslateAbortRef.current = null;
+                                }
+                              }}
+                              className={`ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${labTranslating ? "border-red-500/40 bg-red-500/10 text-red-300 animate-pulse" : "border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 hover:border-blue-500/60"}`}
+                            >
+                              {labTranslating
+                                ? <><Square size={11} fill="currentColor" className="shrink-0" /><span className="truncate">Pause</span></>
+                                : <><Globe size={11} className="shrink-0" /><span className="truncate">Download translation</span></>}
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Reviewer Notes — collapsible improvement feedback */}
                   {labReviewerNotes && (
@@ -3886,50 +4048,45 @@ ${html}
                       </div>
                     </div>
 
-                    {/* Quota snapshot — live per-month usage vs. tier limit.
-                        Hidden until the first fetch completes so the menu
-                        doesn't flash placeholders; omitted entirely for
-                        tiers that are unlimited across the board. */}
+                    {/* Usage — its own dedicated button at the top of the menu,
+                        separated from the profile/settings/... list below.
+                        Shows a compact remaining-minimum summary on the right
+                        so the user sees immediately whether quota is tight;
+                        full breakdown lives in the Usage modal. */}
                     {usage.data && (() => {
                       const rows = (Object.keys(USAGE_FEATURE_LABELS) as Array<keyof UsageSnapshot["limits"]>)
                         .map((feature) => {
                           const limit = usage.data!.limits[feature] ?? null;
-                          const used = (usage.data!.used as any)[`${feature}_count`] ?? 0;
-                          return { feature, limit, used };
-                        })
-                        // Hide rows that are unlimited for this tier — reduces clutter on Scholar/dev.
-                        .filter(r => r.limit !== null);
-                      if (rows.length === 0) return null;
+                          const used  = (usage.data!.used as any)[`${feature}_count`] ?? 0;
+                          const remaining = limit === null ? Number.POSITIVE_INFINITY : Math.max(0, limit - used);
+                          return { feature, limit, used, remaining };
+                        });
+                      const bounded = rows.filter(r => r.limit !== null);
+                      const tightest = bounded.length === 0 ? null : bounded.reduce((m, r) => r.remaining < m.remaining ? r : m);
+                      const empty = tightest?.remaining === 0;
                       return (
-                        <div className="border-t border-slate-700/50 px-4 py-2.5 space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <p className="text-[10px] text-slate-500 uppercase tracking-wide">Usage · {usage.data!.year_month}</p>
-                            <button
-                              onClick={() => { setUserPanel("subscription"); setUserMenuOpen(false); }}
-                              className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
-                            >Details</button>
-                          </div>
-                          {rows.map(({ feature, limit, used }) => {
-                            const ratio = usageRatio(used, limit);
-                            const full = limit !== null && used >= limit;
-                            return (
-                              <div key={feature}>
-                                <div className="flex items-center justify-between text-[10px]">
-                                  <span className="text-slate-400">{USAGE_FEATURE_LABELS[feature]}</span>
-                                  <span className={`tabular-nums ${full ? "text-rose-400" : "text-slate-500"}`}>
-                                    {formatUsage(used, limit)}
-                                  </span>
-                                </div>
-                                <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                                  <div
-                                    className={`h-full rounded-full transition-all duration-500 ${full ? "bg-rose-500" : "bg-blue-500"}`}
-                                    style={{ width: `${Math.round(ratio * 100)}%` }}
-                                  />
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
+                        <button
+                          onClick={() => { setUserPanel("usage"); setUserMenuOpen(false); }}
+                          className={`w-full flex items-center justify-between gap-2 px-4 py-2.5 border-y transition-colors text-left ${
+                            empty
+                              ? "border-rose-500/40 bg-rose-500/10 hover:bg-rose-500/15 text-rose-300"
+                              : "border-slate-700/50 hover:bg-slate-800/60 text-slate-200"
+                          }`}
+                          aria-label="Open usage dashboard"
+                        >
+                          <span className="flex items-center gap-2 text-sm font-semibold">
+                            <BarChart2 size={14} className={empty ? "text-rose-400" : "text-blue-400"} />
+                            Usage
+                            {empty && <span className="text-[10px] font-bold uppercase tracking-wide text-rose-400">Limit reached</span>}
+                          </span>
+                          <span className={`text-[11px] tabular-nums ${empty ? "text-rose-300" : "text-slate-400"}`}>
+                            {tightest
+                              ? (tightest.limit === null
+                                  ? "Unlimited"
+                                  : `${tightest.remaining} / ${tightest.limit} ${USAGE_FEATURE_LABELS[tightest.feature].toLowerCase()} left`)
+                              : "Unlimited · all features"}
+                          </span>
+                        </button>
                       );
                     })()}
 
@@ -4209,9 +4366,9 @@ ${html}
             // streaming regions still opt out individually via translate="no".
             translate="yes"
             className={`w-full rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
-              // Subscription + Legal need more horizontal room for side-by-side layouts;
-              // other panels keep the compact modal.
-              userPanel === "subscription" || userPanel === "legal" ? "max-w-3xl" : "max-w-md"
+              // Subscription / Legal / Usage want more horizontal room for
+              // the multi-column grids; compact modal otherwise.
+              userPanel === "subscription" || userPanel === "legal" || userPanel === "usage" ? "max-w-3xl" : "max-w-md"
             }`}
             onClick={e => e.stopPropagation()}
           >
@@ -4224,6 +4381,7 @@ ${html}
                 {userPanel === "subscription" && <CreditCard size={16} />}
                 {userPanel === "legal"        && <FileText size={16} />}
                 {userPanel === "help"         && <HelpCircle size={16} />}
+                {userPanel === "usage"        && <BarChart2 size={16} />}
               </span>
               <h2 className="flex-1 text-base font-semibold text-slate-100">
                 {userPanel === "profile"      && "Profile"}
@@ -4232,6 +4390,7 @@ ${html}
                 {userPanel === "subscription" && "Subscription"}
                 {userPanel === "legal"        && "Terms & Notices"}
                 {userPanel === "help"         && "Help"}
+                {userPanel === "usage"        && "Usage"}
               </h2>
               <button onClick={() => setUserPanel(null)} className="text-slate-500 hover:text-slate-300 transition-colors"><X size={16} /></button>
             </div>
@@ -4380,6 +4539,96 @@ ${html}
                 </div>
               )}
 
+              {userPanel === "usage" && (
+                // Dedicated Usage dashboard — shows remaining quota per
+                // feature, current tier, and a path to the Subscription
+                // modal for upgrade. This is the full view the compact
+                // menu-button above links into.
+                <div className="space-y-4">
+                  {usage.loading && !usage.data && (
+                    <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 px-4 py-6 text-sm text-slate-400 text-center animate-pulse">
+                      Loading your usage…
+                    </div>
+                  )}
+                  {usage.error && !usage.data && (
+                    <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+                      Couldn&apos;t load usage: {usage.error}. Your quotas still apply server-side.
+                    </div>
+                  )}
+                  {usage.data && (
+                    <>
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                          <p className="text-xs font-bold text-slate-200">
+                            Current plan: <span className="capitalize text-blue-300">{usage.data.tier}</span>
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            Counters reset on the 1st of each month · current cycle {usage.data.year_month}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => { void usage.refresh(); }}
+                          className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
+                        >↻ Refresh</button>
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        {usage.data.enforced
+                          ? "Quotas are enforced. When a counter hits zero, the corresponding action returns an error until next month or plan upgrade."
+                          : "Quota enforcement is OFF during Alpha — the counters shown are what we'll cap at once we flip enforcement on."}
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {(Object.keys(USAGE_FEATURE_LABELS) as Array<keyof UsageSnapshot["limits"]>).map((feature) => {
+                          const limit = usage.data!.limits[feature] ?? null;
+                          const used  = (usage.data!.used as any)[`${feature}_count`] ?? 0;
+                          const remaining = limit === null ? null : Math.max(0, limit - used);
+                          const empty = remaining === 0;
+                          // Remaining bar — starts full, shrinks with use.
+                          const remainingRatio = limit === null || limit <= 0 ? 1 : Math.max(0, Math.min(1, (limit - used) / limit));
+                          return (
+                            <div
+                              key={feature}
+                              className={`rounded-xl border px-4 py-3 ${empty ? "border-rose-500/40 bg-rose-500/10" : "border-slate-700/60 bg-slate-900/40"}`}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-sm font-semibold text-slate-200">{USAGE_FEATURE_LABELS[feature]}</span>
+                                <span className={`text-[11px] font-semibold tabular-nums ${empty ? "text-rose-300" : "text-slate-300"}`}>
+                                  {limit === null
+                                    ? "Unlimited"
+                                    : `${remaining} left / ${limit}`}
+                                </span>
+                              </div>
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${empty ? "bg-rose-500" : remainingRatio < 0.2 ? "bg-amber-500" : "bg-blue-500"}`}
+                                  style={{ width: `${Math.round(remainingRatio * 100)}%` }}
+                                />
+                              </div>
+                              <p className="mt-1 text-[10px] text-slate-500">
+                                {limit === null
+                                  ? "Your tier has no cap on this feature."
+                                  : `${used} used this month.`}
+                              </p>
+                              {empty && (
+                                <p className="mt-1 text-[10px] text-rose-400">
+                                  Monthly limit reached — upgrade or wait until next cycle.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 border-t border-slate-700/50 pt-2">
+                        <span>Total LLM cost this month: ≈ ${usage.data.used.llm_cost_usd.toFixed(3)} USD</span>
+                        <button
+                          onClick={() => setUserPanel("subscription")}
+                          className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors"
+                        >View plans →</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
               {userPanel === "subscription" && (
                 <div className="space-y-4">
                   {/* Alpha banner — during alpha, every tier below is unlocked for everyone. */}
@@ -4420,20 +4669,24 @@ ${html}
                         {(Object.keys(USAGE_FEATURE_LABELS) as Array<keyof UsageSnapshot["limits"]>).map((feature) => {
                           const limit = usage.data!.limits[feature] ?? null;
                           const used  = (usage.data!.used as any)[`${feature}_count`] ?? 0;
-                          const full  = limit !== null && used >= limit;
-                          const ratio = usageRatio(used, limit);
+                          const remaining = limit === null ? null : Math.max(0, limit - used);
+                          const empty = remaining === 0;
+                          // Bar shows REMAINING — starts full, shrinks with
+                          // use. Matches the "starts full, drains" spec in
+                          // the Usage modal and the menu summary.
+                          const remainingRatio = limit === null || limit <= 0 ? 1 : Math.max(0, Math.min(1, (limit - used) / limit));
                           return (
                             <div key={feature} className="rounded-lg border border-slate-800/60 bg-slate-900/40 px-3 py-2">
                               <div className="flex items-center justify-between text-[11px]">
                                 <span className="font-semibold text-slate-300">{USAGE_FEATURE_LABELS[feature]}</span>
-                                <span className={`tabular-nums ${full ? "text-rose-400" : "text-slate-400"}`}>
-                                  {formatUsage(used, limit)}
+                                <span className={`tabular-nums ${empty ? "text-rose-400" : "text-slate-400"}`}>
+                                  {limit === null ? "Unlimited" : `${remaining} left / ${limit}`}
                                 </span>
                               </div>
                               <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-slate-800">
                                 <div
-                                  className={`h-full rounded-full transition-all duration-500 ${full ? "bg-rose-500" : "bg-blue-500"}`}
-                                  style={{ width: limit === null ? "100%" : `${Math.round(ratio * 100)}%` }}
+                                  className={`h-full rounded-full transition-all duration-500 ${empty ? "bg-rose-500" : remainingRatio < 0.2 ? "bg-amber-500" : "bg-blue-500"}`}
+                                  style={{ width: `${Math.round(remainingRatio * 100)}%` }}
                                 />
                               </div>
                             </div>
@@ -4512,7 +4765,7 @@ ${html}
                           "Unlimited Deep Reads",
                           "Up to 200 papers per search",
                           "6-agent multi-agent reasoning",
-                          "Synthesis Lab with Claude Sonnet writer",
+                          "Synthesis Lab with Scholar Writer access",
                           "Citation & author tracking · PDF + Word export",
                           "Priority support · early access",
                         ],
