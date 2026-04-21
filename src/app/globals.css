@@ -75,6 +75,30 @@ body {
 }
 .click-hint-blink { animation: clickHintBlink 1.6s ease-in-out infinite; }
 
+/* Announcement megaphone breathing ring — a translucent accent-tinted halo
+   that expands and fades every few seconds so the eye catches that the
+   announcement strip carries live content without being visually noisy.
+   The keyframe uses box-shadow so we can layer two rings at different
+   phases, and relies on --ats-bg-accent so the halo inherits the active
+   theme palette (blue / amber / emerald / rose / pink). */
+@keyframes megaphoneBreath {
+  0%   { box-shadow: 0 0 0 0   rgb(from var(--ats-bg-accent) r g b / 0.55),
+                     0 0 0 0   rgb(from var(--ats-bg-accent) r g b / 0.30); }
+  70%  { box-shadow: 0 0 0 10px rgb(from var(--ats-bg-accent) r g b / 0.00),
+                     0 0 0 16px rgb(from var(--ats-bg-accent) r g b / 0.00); }
+  100% { box-shadow: 0 0 0 0   rgb(from var(--ats-bg-accent) r g b / 0.00),
+                     0 0 0 0   rgb(from var(--ats-bg-accent) r g b / 0.00); }
+}
+.megaphone-breath {
+  border-radius: 9999px;
+  animation: megaphoneBreath 2.8s ease-out infinite;
+}
+/* Browsers without relative-color syntax get a hardcoded accent-like
+   fallback so the animation still runs (just without per-theme tint). */
+@supports not (box-shadow: 0 0 0 1px rgb(from red r g b / 0.5)) {
+  .megaphone-breath { box-shadow: none; }
+}
+
 /* Danmu (bullet comment) flow animation */
 @keyframes danmuFloat {
   from { transform: translateX(120vw); }
@@ -701,13 +725,15 @@ select option {
    reads clearly against the #F4F8FB panel.                        */
 [data-tone="day"] .score-chip-strong   { color: #047857 !important; border-color: rgba(5,150,105,0.40) !important; background-color: rgba(16,185,129,0.12) !important; }
 [data-tone="day"] .score-chip-good     { color: #1d4ed8 !important; border-color: rgba(37,99,235,0.40) !important; background-color: rgba(59,130,246,0.10) !important; }
-/* Moderate chip shares the amber-400 palette the "required" label uses.
-   In day mode the text is darkened to amber-600 so it reads on a light panel. */
-[data-tone="day"] .score-chip-moderate { color: #CA8A04 !important; border-color: rgba(202,138,4,0.45) !important; background-color: rgba(251,191,36,0.22) !important; }
-/* Day mode: same amber applied to the faint "required" helper label so the two
-   visually match (requested by the user). */
+/* Moderate chip shares the amber palette the "strongly recommended" label
+   uses. In day mode we punch up saturation + brightness (amber-600
+   -> orange-500 territory) so the chip stands out on the light panel
+   without reading as beige. */
+[data-tone="day"] .score-chip-moderate { color: #D97706 !important; border-color: rgba(217,119,6,0.55) !important; background-color: rgba(251,146,60,0.28) !important; }
+/* Day mode: brighter amber for the "strongly recommended" helper label so
+   it reads as a live, warm signal rather than muted umber. */
 [data-tone="day"] .text-amber-400,
-[data-tone="day"] .text-amber-400\/80 { color: #CA8A04 !important; }
+[data-tone="day"] .text-amber-400\/80 { color: #EA580C !important; }
 [data-tone="day"] .score-chip-weak     { color: #be123c !important; border-color: rgba(225,29,72,0.45) !important; background-color: rgba(244,63,94,0.12) !important; }
 
 /* ── Lab region (Synthesis Lab) — all frame fills share ONE token ──

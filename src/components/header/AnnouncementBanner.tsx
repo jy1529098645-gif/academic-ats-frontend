@@ -111,7 +111,11 @@ export function AnnouncementBanner({
     return (
       <div className="h-full rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)] overflow-hidden flex flex-col">
         <div className="flex items-center gap-2 px-3 pr-10 shrink-0" style={{ height: "20px" }}>
-          <Megaphone size={11} className="shrink-0 text-blue-400/60" />
+          {/* Breathing ring wraps the icon so a semi-transparent accent halo
+              pulses out from the megaphone, signalling live announcements. */}
+          <span className="megaphone-breath shrink-0 flex items-center justify-center">
+            <Megaphone size={11} className="shrink-0 text-blue-400/60" />
+          </span>
           <div className="flex-1 h-px bg-gradient-to-r from-blue-500/25 via-purple-500/20 to-blue-500/25" />
           <button
             onClick={onExpand}
@@ -155,7 +159,9 @@ export function AnnouncementBanner({
     <div className="h-full flex flex-col justify-between overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
       {/* Ticker row */}
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
-        <Megaphone size={13} className="shrink-0 text-blue-400/70" />
+        <span className="megaphone-breath shrink-0 flex items-center justify-center">
+          <Megaphone size={13} className="shrink-0 text-blue-400/70" />
+        </span>
         <div className="min-w-0 flex-1 overflow-hidden">
           <TickerTrack />
         </div>

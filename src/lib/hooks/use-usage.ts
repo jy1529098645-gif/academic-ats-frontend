@@ -15,10 +15,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { buildApiUrl, fetchWithAuth } from "@/lib/api";
 
-/** Shape returned by /api/usage/me — mirrors backend `quota.snapshot()`. */
+/** Shape returned by /api/usage/me — mirrors backend `quota.snapshot()`.
+ *
+ * Quotas were previously monthly; as of this build they are PER DAY and
+ * reset at 00:00 UTC. `next_reset_utc` / `now_utc` are ISO-8601 timestamps
+ * the frontend uses to render a live countdown without needing its own
+ * notion of server time. `year_month` is kept as an optional legacy alias
+ * so old clients don't crash while they bounce and refetch.
+ */
 export type UsageSnapshot = {
   tier: "free" | "basic" | "scholar" | "dev" | "anonymous" | string;
-  year_month: string;   // "YYYY-MM"
+  day_utc?:         string;   // "YYYY-MM-DD"
+  next_reset_utc?:  string;   // ISO-8601
+  now_utc?:         string;   // ISO-8601
+  year_month?:      string;   // legacy
   /** null = unlimited for that feature. */
   limits: {
     quick_search: number | null;

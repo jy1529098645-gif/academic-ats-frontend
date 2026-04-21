@@ -4083,7 +4083,7 @@ ${html}
                             {tightest
                               ? (tightest.limit === null
                                   ? "Unlimited"
-                                  : `${tightest.remaining} / ${tightest.limit} ${USAGE_FEATURE_LABELS[tightest.feature].toLowerCase()} left`)
+                                  : `${tightest.remaining} / ${tightest.limit} ${USAGE_FEATURE_LABELS[tightest.feature].toLowerCase()} left today`)
                               : "Unlimited · all features"}
                           </span>
                         </button>
@@ -4180,19 +4180,20 @@ ${html}
                 </>
               )}
 
-              {/* Avatar button + History button — bumped one size (px-3→px-4,
-                  py-1→py-1.5, text-xs→text-sm, avatar 6→7) so they read as
-                  proper controls at a glance. */}
+              {/* Avatar button + History button. Compact sizing matches the
+                  original spec — text-xs, avatar 6x6 — so the widget sits
+                  quietly in the bottom-left without competing with the
+                  main workspace controls. */}
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => setUserMenuOpen(o => !o)}
                   aria-label="Open user menu"
-                  className="flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/90 pl-1.5 pr-4 py-1.5 shadow-lg backdrop-blur-sm hover:border-blue-500/40 transition-all"
+                  className="flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/90 pl-1 pr-3 py-1 shadow-lg backdrop-blur-sm hover:border-blue-500/40 transition-all"
                 >
-                  <div className="h-7 w-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
+                  <div className="h-6 w-6 rounded-full bg-blue-600 flex items-center justify-center text-white text-[10px] font-bold">
                     {(authUser.email?.[0] ?? "U").toUpperCase()}
                   </div>
-                  <span className="max-w-[160px] truncate text-sm text-slate-300">{authUser.email}</span>
+                  <span className="max-w-[140px] truncate text-xs text-slate-400">{authUser.email}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -4208,10 +4209,10 @@ ${html}
                       setHistoryLoading(false);
                     }
                   }}
-                  className={`rounded-full border px-4 py-1.5 text-sm shadow-lg backdrop-blur-sm transition-all ${
+                  className={`rounded-full border px-3 py-1 text-xs shadow-lg backdrop-blur-sm transition-all ${
                     historyPanelOpen
                       ? "border-blue-500/60 bg-blue-500/10 text-blue-400"
-                      : "border-slate-700/60 bg-slate-900/90 text-slate-300 hover:border-blue-500/40 hover:text-blue-400"
+                      : "border-slate-700/60 bg-slate-900/90 text-slate-400 hover:border-blue-500/40 hover:text-blue-400"
                   }`}
                 >
                   History
@@ -4221,7 +4222,7 @@ ${html}
           ) : (
             <button
               onClick={() => router.push("/login")}
-              className="rounded-full border border-slate-700/60 bg-slate-900/90 px-5 py-2 text-sm font-semibold text-slate-300 shadow-lg backdrop-blur-sm hover:border-blue-500/50 hover:text-blue-400 transition-all"
+              className="rounded-full border border-slate-700/60 bg-slate-900/90 px-4 py-1.5 text-xs font-medium text-slate-400 shadow-lg backdrop-blur-sm hover:border-blue-500/50 hover:text-blue-400 transition-all"
             >
               Sign in
             </button>
@@ -4539,11 +4540,25 @@ ${html}
                 </div>
               )}
 
-              {userPanel === "usage" && (
+              {userPanel === "usage" && (() => {
+                // Live countdown. `nowMs` ticks every second; when the card
+                // renders we diff against next_reset_utc to render
+                // "Resets in Xh Ym Zs" + the exact wall-clock time.
+                const resetIso = usage.data?.next_reset_utc;
+                const resetMs = resetIso ? Date.parse(resetIso) : NaN;
+                const remainingMs = Number.isFinite(resetMs) ? Math.max(0, resetMs - nowMs) : 0;
+                const rh = Math.floor(remainingMs / 3_600_000);
+                const rm = Math.floor((remainingMs % 3_600_000) / 60_000);
+                const rs = Math.floor((remainingMs % 60_000) / 1000);
+                const resetLocal = resetIso ? new Date(resetIso).toLocaleString() : "";
+                const resetUtc   = resetIso ? new Date(resetIso).toUTCString()    : "";
+                return (
                 // Dedicated Usage dashboard — shows remaining quota per
                 // feature, current tier, and a path to the Subscription
-                // modal for upgrade. This is the full view the compact
-                // menu-button above links into.
+                // modal for upgrade. Hover on any card lifts the border so
+                // the panel feels interactive even though the cards
+                // themselves are read-only — that addresses the "I clicked
+                // and nothing happened" feedback from the Alpha test.
                 <div className="space-y-4">
                   {usage.loading && !usage.data && (
                     <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 px-4 py-6 text-sm text-slate-400 text-center animate-pulse">
@@ -4557,24 +4572,50 @@ ${html}
                   )}
                   {usage.data && (
                     <>
-                      <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-start justify-between flex-wrap gap-2">
                         <div>
                           <p className="text-xs font-bold text-slate-200">
                             Current plan: <span className="capitalize text-blue-300">{usage.data.tier}</span>
                           </p>
                           <p className="text-[11px] text-slate-500">
-                            Counters reset on the 1st of each month · current cycle {usage.data.year_month}
+                            Every counter below resets daily at 00:00 UTC · today ({usage.data.day_utc ?? usage.data.year_month ?? "—"})
                           </p>
                         </div>
                         <button
                           onClick={() => { void usage.refresh(); }}
-                          className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
-                        >↻ Refresh</button>
+                          disabled={usage.loading}
+                          className="inline-flex items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
+                          aria-label="Refresh usage snapshot"
+                        >
+                          <span aria-hidden className={usage.loading ? "inline-block animate-spin" : "inline-block"}>↻</span>
+                          Refresh
+                        </button>
                       </div>
+
+                      {/* Countdown + exact reset time. Lives in its own
+                          accent-tinted strip so the user can't miss when
+                          the next bucket fill will land. */}
+                      {resetIso && (
+                        <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <div className="text-xs">
+                              <p className="font-bold text-blue-300">Next refresh in</p>
+                              <p className="tabular-nums text-[13px] text-blue-100 mt-0.5">
+                                {rh}h {String(rm).padStart(2,"0")}m {String(rs).padStart(2,"0")}s
+                              </p>
+                            </div>
+                            <div className="text-right text-[11px] text-slate-400">
+                              <p>Local: <span className="tabular-nums text-slate-200">{resetLocal}</span></p>
+                              <p>UTC: <span className="tabular-nums text-slate-200">{resetUtc}</span></p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       <p className="text-[11px] text-slate-500">
                         {usage.data.enforced
-                          ? "Quotas are enforced. When a counter hits zero, the corresponding action returns an error until next month or plan upgrade."
-                          : "Quota enforcement is OFF during Alpha — the counters shown are what we'll cap at once we flip enforcement on."}
+                          ? "Quotas are enforced. When a counter hits zero, the action returns an error until the daily refresh."
+                          : "Quota enforcement is OFF during Alpha — numbers shown are the caps we'll flip on once we go live."}
                       </p>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {(Object.keys(USAGE_FEATURE_LABELS) as Array<keyof UsageSnapshot["limits"]>).map((feature) => {
@@ -4582,12 +4623,15 @@ ${html}
                           const used  = (usage.data!.used as any)[`${feature}_count`] ?? 0;
                           const remaining = limit === null ? null : Math.max(0, limit - used);
                           const empty = remaining === 0;
-                          // Remaining bar — starts full, shrinks with use.
                           const remainingRatio = limit === null || limit <= 0 ? 1 : Math.max(0, Math.min(1, (limit - used) / limit));
                           return (
                             <div
                               key={feature}
-                              className={`rounded-xl border px-4 py-3 ${empty ? "border-rose-500/40 bg-rose-500/10" : "border-slate-700/60 bg-slate-900/40"}`}
+                              className={`rounded-xl border px-4 py-3 transition-all cursor-default hover:-translate-y-0.5 hover:shadow-lg ${
+                                empty
+                                  ? "border-rose-500/40 bg-rose-500/10 hover:border-rose-400"
+                                  : "border-slate-700/60 bg-slate-900/40 hover:border-blue-500/60"
+                              }`}
                             >
                               <div className="flex items-center justify-between mb-1">
                                 <span className="text-sm font-semibold text-slate-200">{USAGE_FEATURE_LABELS[feature]}</span>
@@ -4606,11 +4650,11 @@ ${html}
                               <p className="mt-1 text-[10px] text-slate-500">
                                 {limit === null
                                   ? "Your tier has no cap on this feature."
-                                  : `${used} used this month.`}
+                                  : `${used} used today.`}
                               </p>
                               {empty && (
                                 <p className="mt-1 text-[10px] text-rose-400">
-                                  Monthly limit reached — upgrade or wait until next cycle.
+                                  Daily limit reached — wait for the refresh above or upgrade.
                                 </p>
                               )}
                             </div>
@@ -4618,7 +4662,7 @@ ${html}
                         })}
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-500 border-t border-slate-700/50 pt-2">
-                        <span>Total LLM cost this month: ≈ ${usage.data.used.llm_cost_usd.toFixed(3)} USD</span>
+                        <span>Total LLM cost today: ≈ ${usage.data.used.llm_cost_usd.toFixed(3)} USD</span>
                         <button
                           onClick={() => setUserPanel("subscription")}
                           className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors"
@@ -4627,7 +4671,8 @@ ${html}
                     </>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
               {userPanel === "subscription" && (
                 <div className="space-y-4">
@@ -4644,25 +4689,30 @@ ${html}
 
                   {/* Live usage — per-feature counters with progress bars, grouped as a single panel
                       so the user sees the same quota numbers whether they open this modal or the
-                      menu popup. Server is always the source of truth. */}
+                      menu popup. Server is always the source of truth.
+                      Quotas are DAILY — bucket refreshes at 00:00 UTC each day. */}
                   {usage.data && (
                     <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 px-4 py-3">
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
                           <BarChart2 size={13} className="text-blue-400" />
                           <span className="text-xs font-bold text-slate-200">
-                            Usage this month · {usage.data.year_month}
+                            Usage today · {usage.data.day_utc ?? usage.data.year_month ?? "—"}
                           </span>
                         </div>
                         <button
                           onClick={() => { void usage.refresh(); }}
-                          className="text-[10px] text-slate-500 hover:text-blue-400 transition-colors"
+                          disabled={usage.loading}
+                          className="text-[10px] text-slate-500 hover:text-blue-400 transition-colors disabled:opacity-50"
                           title="Refresh"
-                        >↻</button>
+                          aria-label="Refresh usage snapshot"
+                        >
+                          <span aria-hidden className={usage.loading ? "inline-block animate-spin" : "inline-block"}>↻</span>
+                        </button>
                       </div>
                       <p className="text-[10px] text-slate-500 mb-2">
                         {usage.data.enforced
-                          ? "Quotas are enforced — requests beyond the limit return HTTP 429."
+                          ? "Quotas are enforced — requests beyond the daily limit return HTTP 429 until 00:00 UTC."
                           : "Alpha mode: we log usage but don't block. Limits shown are the future caps."}
                       </p>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
