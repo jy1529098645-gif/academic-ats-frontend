@@ -360,22 +360,30 @@ export default function AdminPage() {
     tierLimits.refresh();
   };
 
-  // PATCH a single (tier, feature) quota override. `limit` of null resets
-  // that cell to the code default; -1 stores "unlimited". Refreshes the
-  // polling state immediately so the editor updates without waiting on
-  // the 60s tick.
-  const saveTierLimit = async (tier: string, feature: string, limit: number | null) => {
-    try {
+  // Batch-save every pending tier-limit edit. The editor accumulates
+  // drafts locally; clicking Save builds one PATCH per dirty cell,
+  // awaits them all, then refreshes the polled data so the live
+  // "effective" values redraw. Any individual PATCH failing throws
+  // back to the editor's error state so the user sees which save
+  // didn't take.
+  //
+  // `limit` semantics (mirror backend): null → reset override to code
+  // default; -1 → "unlimited" (stored as NULL); >= 0 → numeric cap.
+  const saveTierLimitsBatch = async (
+    updates: Array<{ tier: string; feature: string; limit: number | null }>,
+  ): Promise<void> => {
+    for (const u of updates) {
       const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/tier-limits"), {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ tier, feature, limit_value: limit }),
+        body:    JSON.stringify({ tier: u.tier, feature: u.feature, limit_value: u.limit }),
       });
-      if (!res.ok) throw new Error(`PATCH tier-limits HTTP ${res.status}`);
-      tierLimits.refresh();
-    } catch (e) {
-      console.error("[admin] saveTierLimit:", e);
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
     }
+    tierLimits.refresh();
   };
 
   // Resolve / unresolve a feedback row (dev action — flips the flag).
@@ -772,7 +780,7 @@ export default function AdminPage() {
               <RefreshCw size={10} /> Refresh
             </button>
           </div>
-          <TierLimitsEditor data={tierLimits.data} onSave={saveTierLimit} />
+          <TierLimitsEditor data={tierLimits.data} onSaveAll={saveTierLimitsBatch} />
         </section>
 
         {/* Feedback inbox — full width so long messages are readable */}
@@ -1558,34 +1566,151 @@ function ErrorLogPanel({ rows }: { rows: AdminError[] }) {
 // A "Reset" button deletes the override row so the cell falls back to
 // the code default; visual indicator distinguishes overridden cells.
 
+// Deferred-save tier limits editor. Edits accumulate in a LOCAL draft
+// map; nothing hits the backend until the operator clicks the Save
+// button. That gives explicit confirmation ("I know my change took
+// effect") that auto-save-on-blur didn't — users couldn't tell whether
+// typing a number actually persisted.
+//
+// Draft value semantics (mirror backend):
+//   ""   → resets to code default (PATCH with limit_value=null deletes the override)
+//   "0+" → explicit numeric cap
+//   "-1" → reserved magic value meaning "unlimited" (stored as NULL override)
+// Empty input box is shown as the placeholder "∞" — matches the display
+// convention: no cap = unlimited.
+
+type DraftMap = Record<string, Record<string, string>>; // tier → feature → draft text
+
 function TierLimitsEditor({
-  data, onSave,
+  data, onSaveAll,
 }: {
   data: TierLimitsResponse | null;
-  onSave: (tier: string, feature: string, limit: number | null) => void;
+  onSaveAll: (
+    updates: Array<{ tier: string; feature: string; limit: number | null }>,
+  ) => Promise<void>;
 }) {
-  if (!data) {
-    return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
-  }
-  // Only the 4 user-facing tiers are editable here: 3 subscription
-  // levels (free / basic / scholar) + the internal dev tier. The
-  // "anonymous" limits (for unauthenticated endpoint access) stay in
-  // the backend quota.TIER_LIMITS code default and are deliberately
-  // NOT surfaced here — operators rarely tune them, and exposing them
-  // in the dashboard invites confusion with paid-subscription tiers.
-  const TIERS: string[]    = ["free", "basic", "scholar", "dev"];
+  const TIERS: string[] = ["free", "basic", "scholar", "dev"];
   const FEATURES: { key: string; label: string }[] = [
     { key: "quick_search", label: "Quick Search" },
     { key: "deep_search",  label: "Deep Search"  },
     { key: "synthesis",    label: "Synthesis"    },
     { key: "deep_read",    label: "Deep Read"    },
   ];
-  // Helper: is this cell overridden (vs fallback to code default)?
+
+  // Draft state keyed by tier → feature. Seed + re-seed from `data.effective`
+  // every time the polled data refreshes, so the displayed values mirror
+  // what the backend actually thinks is effective. The user's in-flight
+  // edits are layered on top via the `draft` state.
+  const [draft,       setDraft]       = useState<DraftMap>({});
+  const [lastSeedKey, setLastSeedKey] = useState<string>("");
+  const [saving,      setSaving]      = useState(false);
+  const [saveMsg,     setSaveMsg]     = useState<{ text: string; kind: "ok" | "err" } | null>(null);
+
+  useEffect(() => {
+    if (!data) return;
+    // Re-seed only when the effective matrix identity actually changes —
+    // otherwise every 60 s poll would reset the user's in-flight edits.
+    const seedKey = JSON.stringify(data.effective);
+    if (seedKey === lastSeedKey) return;
+    const next: DraftMap = {};
+    for (const tier of TIERS) {
+      next[tier] = {};
+      for (const f of FEATURES) {
+        const v = data.effective[tier]?.[f.key];
+        next[tier][f.key] = (v === null || v === undefined) ? "" : String(v);
+      }
+    }
+    setDraft(next);
+    setLastSeedKey(seedKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, lastSeedKey]);
+
+  if (!data) {
+    return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
+  }
+
   const overrideMap: Record<string, Record<string, boolean>> = {};
   for (const row of data.overrides) {
     if (!overrideMap[row.tier]) overrideMap[row.tier] = {};
     overrideMap[row.tier][row.feature] = true;
   }
+
+  // Compute which cells have been edited away from the live value. Used
+  // for the orange "unsaved" dot and the Save button's change count.
+  const dirtyCells: Array<{ tier: string; feature: string; draft: string; live: string }> = [];
+  for (const tier of TIERS) {
+    for (const f of FEATURES) {
+      const liveVal = data.effective[tier]?.[f.key];
+      const live    = (liveVal === null || liveVal === undefined) ? "" : String(liveVal);
+      const d       = draft[tier]?.[f.key] ?? "";
+      if (d.trim() !== live) {
+        dirtyCells.push({ tier, feature: f.key, draft: d, live });
+      }
+    }
+  }
+  const dirtyCount  = dirtyCells.length;
+  const canSave     = dirtyCount > 0 && !saving;
+
+  const setCell = (tier: string, feature: string, value: string) => {
+    setDraft(prev => ({
+      ...prev,
+      [tier]: { ...(prev[tier] ?? {}), [feature]: value },
+    }));
+  };
+
+  // Revert every draft back to the live effective value. Used by both
+  // the Cancel button and after a successful save (the draft should
+  // match the newly-persisted live values).
+  const revertAll = () => {
+    const next: DraftMap = {};
+    for (const tier of TIERS) {
+      next[tier] = {};
+      for (const f of FEATURES) {
+        const v = data.effective[tier]?.[f.key];
+        next[tier][f.key] = (v === null || v === undefined) ? "" : String(v);
+      }
+    }
+    setDraft(next);
+  };
+
+  // Validate each dirty cell then PATCH them all. Validation rules:
+  //   ""             → reset override (limit=null on the PATCH)
+  //   "-1"           → unlimited (limit=-1 → backend stores NULL override)
+  //   "0", "1", …    → numeric cap
+  // Non-numeric / negative (other than -1) → flagged, save aborts with
+  // an inline error so the operator knows which cell was bad.
+  const save = async () => {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      const updates: Array<{ tier: string; feature: string; limit: number | null }> = [];
+      for (const d of dirtyCells) {
+        const t = d.draft.trim();
+        if (t === "") {
+          // Back to code default.
+          updates.push({ tier: d.tier, feature: d.feature, limit: null });
+          continue;
+        }
+        const n = Number(t);
+        if (!Number.isFinite(n)) {
+          throw new Error(`"${d.draft}" is not a number (${d.tier} / ${d.feature})`);
+        }
+        if (n < -1) {
+          throw new Error(`Negative values are not allowed (${d.tier} / ${d.feature})`);
+        }
+        updates.push({ tier: d.tier, feature: d.feature, limit: Math.floor(n) });
+      }
+      await onSaveAll(updates);
+      setSaveMsg({ text: `Saved ${updates.length} change${updates.length === 1 ? "" : "s"}.`, kind: "ok" });
+      // Auto-clear success after ~3 s so stale "Saved" doesn't linger.
+      window.setTimeout(() => setSaveMsg(null), 3000);
+    } catch (e) {
+      setSaveMsg({ text: e instanceof Error ? e.message : String(e), kind: "err" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
@@ -1614,17 +1739,42 @@ function TierLimitsEditor({
                 </span>
               </td>
               {FEATURES.map(f => {
-                const val          = data.effective[tier]?.[f.key] ?? null;
+                const liveVal = data.effective[tier]?.[f.key];
+                const live    = (liveVal === null || liveVal === undefined) ? "" : String(liveVal);
+                const d       = draft[tier]?.[f.key] ?? "";
+                const dirty   = d.trim() !== live;
                 const isOverridden = !!overrideMap[tier]?.[f.key];
                 return (
                   <td key={f.key} className="py-2 pr-3 align-top">
-                    <TierLimitCell
-                      tier={tier}
-                      feature={f.key}
-                      value={val}
-                      isOverridden={isOverridden}
-                      onSave={onSave}
-                    />
+                    <div className="flex items-center gap-1">
+                      <span
+                        className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                        title={
+                          dirty        ? "Unsaved change (click Save below)" :
+                          isOverridden ? "Overridden via admin dashboard"    :
+                                         "Using code default"
+                        }
+                        style={{
+                          backgroundColor:
+                            dirty        ? "#f59e0b"                 :
+                            isOverridden ? "var(--ats-fg-accent)"    :
+                                           "var(--ats-fg-muted)",
+                        }}
+                      />
+                      <input
+                        type="number"
+                        min={-1}
+                        value={d}
+                        onChange={(e) => setCell(tier, f.key, e.target.value)}
+                        placeholder="∞"
+                        className="w-16 rounded border px-1.5 py-0.5 text-xs tabular-nums outline-none focus:border-[var(--ats-border-accent)]"
+                        style={{
+                          borderColor:     dirty ? "#f59e0b55" : "var(--ats-border-subtle)",
+                          backgroundColor: "var(--ats-bg-base)",
+                          color:           "var(--ats-fg-primary)",
+                        }}
+                      />
+                    </div>
                   </td>
                 );
               })}
@@ -1632,76 +1782,62 @@ function TierLimitsEditor({
           ))}
         </tbody>
       </table>
-      <p className="text-[10px] mt-2" style={{ color: "var(--ats-fg-muted)" }}>
-        Empty = unlimited. <span style={{ color: "var(--ats-fg-accent)" }}>●</span> Overridden
-        (not the code default) · <span style={{ color: "var(--ats-fg-muted)" }}>○</span> Default value.
-      </p>
-    </div>
-  );
-}
 
-function TierLimitCell({
-  tier, feature, value, isOverridden, onSave,
-}: {
-  tier:         string;
-  feature:      string;
-  value:        number | null;
-  isOverridden: boolean;
-  onSave:       (tier: string, feature: string, limit: number | null) => void;
-}) {
-  const [draft, setDraft] = useState<string>(value === null ? "" : String(value));
-  // Keep input in sync when `value` refreshes from the 60 s poll.
-  useEffect(() => {
-    setDraft(value === null ? "" : String(value));
-  }, [value]);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    if (trimmed === "") {
-      // Empty input → send -1 which the backend maps to NULL = unlimited.
-      onSave(tier, feature, -1);
-      return;
-    }
-    const n = Number(trimmed);
-    if (!Number.isFinite(n) || n < 0) {
-      // Invalid — reset display to the current committed value.
-      setDraft(value === null ? "" : String(value));
-      return;
-    }
-    onSave(tier, feature, Math.floor(n));
-  };
-
-  return (
-    <div className="flex items-center gap-1">
-      <span
-        className="inline-block w-1.5 h-1.5 rounded-full"
-        title={isOverridden ? "Overridden via admin dashboard" : "Using code default"}
-        style={{ backgroundColor: isOverridden ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
-      />
-      <input
-        type="number"
-        min={0}
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => { if (draft !== (value === null ? "" : String(value))) commit(); }}
-        onKeyDown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
-        placeholder="∞"
-        className="w-16 rounded border px-1.5 py-0.5 text-xs tabular-nums outline-none focus:border-[var(--ats-border-accent)]"
-        style={{
-          borderColor:     "var(--ats-border-subtle)",
-          backgroundColor: "var(--ats-bg-base)",
-          color:           "var(--ats-fg-primary)",
-        }}
-      />
-      {isOverridden && (
+      {/* Save / revert footer — always visible so the operator sees that
+          changes are deferred, not auto-saved. Save button is explicitly
+          bright on dirty to advertise "click me"; dims to disabled when
+          there's nothing to persist. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <p className="text-[10px] flex-1 min-w-0" style={{ color: "var(--ats-fg-muted)" }}>
+          Empty = unlimited (—1 also works). <span style={{ color: "#f59e0b" }}>●</span> Unsaved ·
+          <span style={{ color: "var(--ats-fg-accent)" }}> ●</span> Overridden ·
+          <span style={{ color: "var(--ats-fg-muted)" }}> ○</span> Default.
+        </p>
+        {dirtyCount > 0 && (
+          <button
+            onClick={revertAll}
+            disabled={saving}
+            className="rounded-md border px-3 py-1 text-xs transition-colors disabled:opacity-40"
+            style={{
+              borderColor: "var(--ats-border-subtle)",
+              color:       "var(--ats-fg-secondary)",
+            }}
+          >Discard</button>
+        )}
         <button
-          onClick={() => onSave(tier, feature, null)}
-          title="Reset to code default"
-          className="text-[9px] underline"
-          style={{ color: "var(--ats-fg-muted)" }}
+          onClick={() => void save()}
+          disabled={!canSave}
+          className="rounded-md px-4 py-1 text-xs font-bold shadow-sm transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{
+            backgroundColor: "var(--ats-fg-accent)",
+            color:           "#ffffff",
+            border:          "1px solid var(--ats-fg-accent)",
+          }}
         >
-          reset
+          {saving
+            ? "Saving…"
+            : dirtyCount > 0
+              ? `Save ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`
+              : "Save"}
         </button>
+      </div>
+
+      {saveMsg && (
+        <p
+          className="mt-2 text-[11px] rounded-md px-3 py-1.5 border"
+          style={{
+            borderColor:     saveMsg.kind === "ok" ? "#10b98155" : "#ef444455",
+            backgroundColor: saveMsg.kind === "ok" ? "#10b9811a" : "#ef44441a",
+            color:           saveMsg.kind === "ok" ? "#10b981"   : "#ef4444",
+          }}
+        >
+          {saveMsg.kind === "ok" ? "✓ " : "⚠ "}{saveMsg.text}
+          {saveMsg.kind === "ok" && (
+            <span className="ml-1" style={{ color: "var(--ats-fg-muted)" }}>
+              Applied globally — new requests use the new limits within ~30 s.
+            </span>
+          )}
+        </p>
       )}
     </div>
   );
