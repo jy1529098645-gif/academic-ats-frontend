@@ -25,9 +25,8 @@ import {
 } from "@/lib/api";
 import {
   AnnouncementBanner,
-  makeMsg,
-  type DanmuMsg,
 } from "@/components/header/AnnouncementBanner";
+import { useAnnouncements } from "@/lib/hooks/use-announcements";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
   Zap, FlaskConical, SlidersHorizontal, BookOpen, Upload, FolderOpen,
@@ -670,10 +669,14 @@ export default function HomePage() {
   const [leftTab, setLeftTab] = useState<"brief" | "analytics">("brief");
 
   // ── Announcement / messaging state ─────────────────────────────────────────
+  // The shared public ticker feed comes from useAnnouncements (REST seed +
+  // Supabase Realtime INSERT subscription). Local `publicMsgs` / danmu state
+  // was removed when the per-tab localStorage scheme was replaced by the
+  // server-backed feed — every open tab now sees the same list.
+  const announcementsFeed = useAnnouncements();
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
   const [msgInput, setMsgInput] = useState("");
   const [msgPublic, setMsgPublic] = useState(true);
-  const [publicMsgs, setPublicMsgs] = useState<DanmuMsg[]>([]);
   const [msgSending, setMsgSending] = useState(false);
   const [msgSentOk, setMsgSentOk] = useState(false);
 
@@ -1036,13 +1039,12 @@ export default function HomePage() {
     });
   }, [authUser?.email]);
 
-  // Danmu messages are now cleared on mount — the announcement bar should
-  // start empty regardless of what was persisted in localStorage previously.
-  // We still leave the send/receive pipeline intact; only the initial restore
-  // is skipped and any stale persisted payload is removed.
+  // Legacy per-tab danmu storage — the announcement feed is now server-
+  // backed (see useAnnouncements), so the old localStorage key is stale
+  // noise. Clean it up once on mount so we don't leave the key sitting in
+  // the browser forever.
   useEffect(() => {
     try { localStorage.removeItem("ats-public-msgs"); } catch { /* ignore */ }
-    setPublicMsgs([]);
   }, []);
 
   useEffect(() => {
@@ -1064,21 +1066,24 @@ export default function HomePage() {
     if (!text || msgSending) return;
     setMsgSending(true);
     try {
-      // Best-effort API call — silently continues if endpoint is not configured
-      await fetch("/api/send-message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, isPublic: msgPublic }),
-      }).catch(() => {/* no email config — that's OK */});
-
       if (msgPublic) {
-        setPublicMsgs((prev) => {
-          const updated = [...prev, makeMsg(text, prev.length)].slice(-60);
-          try {
-            localStorage.setItem("ats-public-msgs", JSON.stringify(updated.map((m) => m.text)));
-          } catch { /* ignore */ }
-          return updated;
-        });
+        // Public: post to the shared ticker. The server-side trigger trims
+        // the table to the 50 newest rows, and Supabase Realtime pushes the
+        // new insert to every open tab so everyone sees it within a second.
+        const { ok, error } = await announcementsFeed.post(text);
+        if (!ok) {
+          setUiError(error ?? "Could not broadcast announcement.");
+          return;
+        }
+      } else {
+        // Private: legacy email relay (Next.js /api/send-message route).
+        // Kept best-effort because email config is not guaranteed in all
+        // environments — a failure here shouldn't break the UX.
+        await fetch("/api/send-message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, isPublic: false }),
+        }).catch(() => { /* no email config — that's OK */ });
       }
       setMsgInput("");
       setMsgSentOk(true);
@@ -2188,7 +2193,7 @@ ${html}
               collapsed={announcementCollapsed}
               onCollapse={() => setAnnouncementCollapsed(true)}
               onExpand={() => setAnnouncementCollapsed(false)}
-              publicMsgs={publicMsgs}
+              announcements={announcementsFeed.items}
               msgInput={msgInput}
               setMsgInput={setMsgInput}
               msgPublic={msgPublic}

@@ -1,42 +1,62 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // AnnouncementBanner — the thin strip at the top of the Workspace that
-// carries the developer's ticker + lets users drop a message back.
+// carries the SHARED PUBLIC ticker.
 //
-// Extracted out of src/app/page.tsx so the 4800-line god-component keeps
-// shrinking. The banner has three moving parts:
-//   - TickerTrack   — continuously scrolling dev copy (translate="no" so
-//                     Google Translate doesn't fight the keyframe animation).
-//   - DanmuMsg / makeMsg — bullet-comment shape + deterministic factory.
-//   - AnnouncementBanner — the visible component, rendered in two modes
-//                     (collapsed: thin bar with danmu only; expanded: ticker
-//                     + message input row).
-// The parent owns message state and the send handler; the banner is purely
-// presentational so it re-renders only when props actually change.
+// Every public message anyone posts lands in the announcements Supabase
+// table, the trigger caps it at 50 rows, and every open tab gets the new
+// row via Supabase Realtime (see src/lib/hooks/use-announcements.ts).
+// The banner just renders whatever array the parent passes in — it has no
+// opinion about where the data came from.
+//
+// Two display modes:
+//   - Expanded  (default): horizontal marquee scrolling every announcement
+//                          left-to-right, looped twice so the wrap is seamless.
+//   - Collapsed: translucent strip where the same announcements float across
+//                as bullet-comments (danmu-style), so users still get a
+//                peripheral signal that activity is happening.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Megaphone, MessageSquare, Check } from "lucide-react";
+import type { Announcement } from "@/lib/hooks/use-announcements";
 
 // ── Ticker ───────────────────────────────────────────────────────────────────
 
-const TICKER_ITEMS: React.ReactNode[] = [
-  <>👋 Hi everyone! I&apos;m Zest, the developer. Together with my team β lyrea, we built AcademiCats to empower researchers. 🐾</>,
-  <>🎯 Our goal is to improve efficiency and output quality throughout the academic research process — from literature discovery to deep analysis. 📚</>,
-  <>💌 Feedback is always welcome! Email <a href="mailto:jy1529098645@gmail.com" className="underline underline-offset-2 decoration-blue-400/60 text-blue-400 hover:text-blue-300 transition-colors">jy1529098645@gmail.com</a> or drop a note below. Thank you! 🙏</>,
-];
+function TickerTrack({ items }: { items: Announcement[] }) {
+  // Fallback copy — only shown when no announcements exist at all (fresh DB
+  // before seed insert). The DDL seeds three welcome rows, so in practice
+  // users should always see real content.
+  const fallback: Announcement[] = items.length > 0 ? [] : [{
+    id:           "fallback",
+    author_email: "system",
+    text:         "Welcome to AcademiCats — this is where team + user announcements scroll live.",
+    created_at:   new Date().toISOString(),
+  }];
+  const list = items.length > 0 ? items : fallback;
 
-function TickerTrack() {
   const segment = (
     <span className="inline-flex items-center gap-0">
-      {TICKER_ITEMS.map((item, i) => (
-        <span key={i} className="inline-block shrink-0 pr-16 text-xs leading-relaxed text-slate-300">
-          {item}
-        </span>
-      ))}
+      {list.map((item) => {
+        const author = item.author_email && !item.author_email.includes("dev@")
+          ? item.author_email.split("@")[0]
+          : null;
+        return (
+          <span key={`${item.id}-${item.created_at}`} className="inline-block shrink-0 pr-16 text-xs leading-relaxed text-slate-300">
+            {author && (
+              <span className="mr-1 text-blue-400/80 font-semibold">{author}:</span>
+            )}
+            {item.text}
+          </span>
+        );
+      })}
     </span>
   );
+  // Speed scales loosely with payload length so bigger feeds don't zip by.
+  const baseSecs = 24;
+  const perItemSecs = 4;
+  const duration = Math.max(baseSecs, Math.min(120, baseSecs + list.length * perItemSecs));
   return (
-    // translate="no" — the ticker is continuously re-composed by a CSS
-    // keyframe; letting Google Translate rewrite its text nodes mid-flight
+    // translate="no" — the marquee content is continuously re-composed by the
+    // CSS keyframe; letting Google Translate rewrite its text nodes mid-flight
     // produces a "removeChild" DOM mismatch and crashes the tab.
     <div
       translate="no"
@@ -45,7 +65,7 @@ function TickerTrack() {
     >
       <div
         className="flex shrink-0 whitespace-nowrap"
-        style={{ animation: "ticker 38s linear infinite" }}
+        style={{ animation: `ticker ${duration}s linear infinite` }}
       >
         {segment}{segment}
       </div>
@@ -56,63 +76,65 @@ function TickerTrack() {
 // ── Danmu (bullet-comment) message shape ────────────────────────────────────
 
 export type DanmuMsg = {
-  id: string;
-  text: string;
-  y: number;
-  speed: number;
-  delay: number;
-  color: string;
+  id:     string;
+  text:   string;
+  y:      number;
+  speed:  number;
+  delay:  number;
+  color:  string;
+  author: string;
 };
 
-/**
- * Deterministic per-index layout so the same message text always lands at the
- * same Y/speed/colour — important for the list to feel stable when the user
- * refreshes or the publicMsgs array re-indexes after a trim.
- */
-export function makeMsg(text: string, idx: number): DanmuMsg {
+/** Deterministic per-item layout so the same announcement always lands at the
+ *  same Y/speed/colour — important for the feed to feel stable across reloads. */
+function makeDanmuMsg(a: Announcement, idx: number): DanmuMsg {
   const colors = ["#60a5fa", "#a78bfa", "#34d399", "#fb923c", "#f472b6", "#38bdf8", "#facc15"];
   const h = (Math.imul(idx + 1, 2654435761) >>> 0);
   return {
-    id: `msg-${idx}-${Date.now()}`,
-    text,
-    y: 6 + (h % 72),                 // 6 % – 78 % vertical
-    speed: 35 + ((h >> 8) % 10),     // 35 s – 45 s
+    id:    a.id,
+    text:  a.text,
+    y:     6 + (h % 72),
+    speed: 35 + ((h >> 8) % 10),
     color: colors[(h >> 4) % colors.length],
-    delay: -(((h >> 12) % 20)),      // stagger starting positions
+    delay: -(((h >> 12) % 20)),
+    author: a.author_email && !a.author_email.includes("dev@")
+      ? a.author_email.split("@")[0]
+      : "",
   };
 }
 
 // ── Banner props ────────────────────────────────────────────────────────────
 
 export type AnnouncementBannerProps = {
-  collapsed:   boolean;
-  onCollapse:  () => void;
-  onExpand:    () => void;
-  publicMsgs:  DanmuMsg[];
-  msgInput:    string;
-  setMsgInput: (v: string) => void;
-  msgPublic:   boolean;
-  setMsgPublic:(v: boolean) => void;
-  msgSending:  boolean;
-  msgSentOk:   boolean;
-  onSend:      () => void;
+  collapsed:    boolean;
+  onCollapse:   () => void;
+  onExpand:     () => void;
+  /** Shared public ticker feed (newest-first) — comes from useAnnouncements. */
+  announcements: Announcement[];
+  msgInput:     string;
+  setMsgInput:  (v: string) => void;
+  msgPublic:    boolean;
+  setMsgPublic: (v: boolean) => void;
+  msgSending:   boolean;
+  msgSentOk:    boolean;
+  onSend:       () => void;
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 export function AnnouncementBanner({
   collapsed, onCollapse, onExpand,
-  publicMsgs,
+  announcements,
   msgInput, setMsgInput,
   msgPublic, setMsgPublic,
   msgSending, msgSentOk, onSend,
 }: AnnouncementBannerProps) {
+  const danmu = announcements.map((a, idx) => makeDanmuMsg(a, idx));
+
   if (collapsed) {
     return (
       <div className="h-full rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)] overflow-hidden flex flex-col">
         <div className="flex items-center gap-2 px-3 pr-10 shrink-0" style={{ height: "20px" }}>
-          {/* Breathing ring wraps the icon so a semi-transparent accent halo
-              pulses out from the megaphone, signalling live announcements. */}
           <span className="megaphone-breath shrink-0 flex items-center justify-center">
             <Megaphone size={11} className="shrink-0 text-blue-400/60" />
           </span>
@@ -120,6 +142,7 @@ export function AnnouncementBanner({
           <button
             onClick={onExpand}
             title="Expand announcements"
+            aria-label="Expand announcements"
             className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
           >▼</button>
         </div>
@@ -127,12 +150,12 @@ export function AnnouncementBanner({
             re-rendered via a keyframe; Google Translate rewriting text nodes
             mid-flight produces a DOM mismatch crash. */}
         <div translate="no" className="notranslate relative flex-1 overflow-hidden">
-          {publicMsgs.length === 0 ? (
+          {danmu.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-600 opacity-50 select-none pointer-events-none">
               Public messages will flow here as danmu ✦
             </div>
           ) : (
-            publicMsgs.map((msg) => (
+            danmu.map((msg) => (
               <span
                 key={msg.id}
                 className="absolute whitespace-nowrap text-[11px] font-medium select-none pointer-events-none"
@@ -146,6 +169,7 @@ export function AnnouncementBanner({
                   textShadow: "0 1px 4px rgba(0,0,0,0.35)",
                 }}
               >
+                {msg.author && <span className="mr-1 opacity-80">{msg.author}:</span>}
                 {msg.text}
               </span>
             ))
@@ -163,11 +187,12 @@ export function AnnouncementBanner({
           <Megaphone size={13} className="shrink-0 text-blue-400/70" />
         </span>
         <div className="min-w-0 flex-1 overflow-hidden">
-          <TickerTrack />
+          <TickerTrack items={announcements} />
         </div>
         <button
           onClick={onCollapse}
           title="Collapse announcements"
+          aria-label="Collapse announcements"
           className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[10px] text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 transition select-none"
         >▲</button>
       </div>
@@ -176,7 +201,7 @@ export function AnnouncementBanner({
       <div className="flex items-center gap-1.5 border-t border-slate-800/50 px-3 py-1.5">
         <button
           onClick={() => setMsgPublic(!msgPublic)}
-          title={msgPublic ? "Public — will appear as danmu" : "Private — only emailed to developer"}
+          title={msgPublic ? "Public — will broadcast to the live ticker" : "Private — only emailed to the developer"}
           className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide transition select-none ${
             msgPublic
               ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
@@ -191,7 +216,8 @@ export function AnnouncementBanner({
           value={msgInput}
           onChange={(e) => setMsgInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !msgSending) void onSend(); }}
-          placeholder="Leave a message for the team…"
+          placeholder={msgPublic ? "Broadcast to every open tab…" : "Send a private note to the team…"}
+          maxLength={280}
           className="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-slate-300 outline-none placeholder:text-slate-700"
         />
         <button
@@ -211,3 +237,6 @@ export function AnnouncementBanner({
     </div>
   );
 }
+
+/** Back-compat re-export — old imports of makeMsg expected a plain text factory. */
+export { makeDanmuMsg as makeMsg };
