@@ -50,10 +50,14 @@ function TickerTrack({ items }: { items: Announcement[] }) {
       })}
     </span>
   );
-  // Speed scales loosely with payload length so bigger feeds don't zip by.
-  const baseSecs = 24;
-  const perItemSecs = 4;
-  const duration = Math.max(baseSecs, Math.min(120, baseSecs + list.length * perItemSecs));
+  // Animation duration is FIXED. When a new announcement arrives the
+  // segment content changes but the `animation` CSS property stays
+  // byte-for-byte identical, so the browser continues the in-progress
+  // loop seamlessly instead of restarting from 0 (which previously
+  // manifested as a "stutter" the moment a user sent a message).
+  // Longer feeds simply pack more content into each 50 s cycle; the
+  // segment is duplicated below so the wrap is always seamless.
+  const TICKER_DURATION = "50s";
   return (
     // translate="no" — the marquee content is continuously re-composed by the
     // CSS keyframe; letting Google Translate rewrite its text nodes mid-flight
@@ -65,7 +69,7 @@ function TickerTrack({ items }: { items: Announcement[] }) {
     >
       <div
         className="flex shrink-0 whitespace-nowrap"
-        style={{ animation: `ticker ${duration}s linear infinite` }}
+        style={{ animation: `ticker ${TICKER_DURATION} linear infinite` }}
       >
         {segment}{segment}
       </div>

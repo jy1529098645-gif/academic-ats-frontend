@@ -280,6 +280,92 @@ function scoreChip(score: number | undefined | null): { label: string; cls: stri
 // components/header/AnnouncementBanner.tsx. See the `AnnouncementBanner`
 // import at the top of this file — the component itself is fully extracted.
 
+// ── Developer controls panel ────────────────────────────────────────────────
+// Rendered inside the user modal only when the caller's tier is "dev".
+// Currently exposes two announcement-cleanup actions; add new privileged
+// operations here as they come up instead of sprinkling `isDeveloper`
+// conditionals across the page.
+function DevControlsPanel({ onError }: { onError: (msg: string) => void }) {
+  const [busy, setBusy]   = useState<"" | "user" | "all">("");
+  const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  async function run(kind: "user" | "all") {
+    const path = kind === "user" ? "/api/announcements/user" : "/api/announcements/all";
+    const confirmText = kind === "user"
+      ? "Delete every user-posted announcement? Seeded dev messages will remain."
+      : "NUKE every announcement in the feed — including the seeded dev welcome messages. Continue?";
+    if (!window.confirm(confirmText)) return;
+    setBusy(kind);
+    setStatus(null);
+    try {
+      const res = await fetchWithAuth(buildApiUrl(path), { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const json = (await res.json()) as { deleted: number };
+      setStatus({ kind: "ok", text: `Deleted ${json.deleted ?? 0} row(s).` });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus({ kind: "err", text: msg });
+      onError(msg);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+        <p className="text-xs font-bold text-amber-300">Developer-only controls</p>
+        <p className="text-[11px] text-slate-400 mt-1">
+          These actions affect every user. Use sparingly — the Realtime channel
+          pushes the changes to every open session immediately.
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-4 py-3 space-y-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-200">Announcement feed</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            Two cleanup levels. The &ldquo;user-posted&rdquo; option preserves the three
+            seeded welcome messages so the ticker always has opening copy;
+            the &ldquo;all&rdquo; option wipes the table clean (clients fall back to the
+            empty-state hint until someone posts again).
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => void run("user")}
+            disabled={busy !== ""}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+          >
+            <Trash2 size={12} />
+            {busy === "user" ? "Clearing…" : "Clear user-posted"}
+          </button>
+          <button
+            onClick={() => void run("all")}
+            disabled={busy !== ""}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+          >
+            <Trash2 size={12} />
+            {busy === "all" ? "Nuking…" : "Clear ALL (incl. seeds)"}
+          </button>
+        </div>
+        {status && (
+          <p className={`text-[11px] rounded-lg px-3 py-1.5 ${
+            status.kind === "ok"
+              ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+              : "bg-red-500/10 text-red-400 border border-red-500/30"
+          }`}>
+            {status.text}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AgentSection({ title, payload, running = false }: { title: string; payload?: AgentPayload; running?: boolean }) {
   const hasData = payload && Object.keys(payload).filter(k => {
     const v = payload[k];
@@ -761,7 +847,7 @@ export default function HomePage() {
   const [authUser, setAuthUser] = useState<{ email?: string } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | "usage" | null>(null);
+  const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | "usage" | "dev" | null>(null);
 
   // Live quota snapshot — tier + current-month counters. Refreshes on mount,
   // window focus, and whenever a metered action completes (see usage.refresh()
@@ -959,11 +1045,16 @@ export default function HomePage() {
     || (job?.status === "done")
     || (!fastMode && (streamPapers.length > 0 || job?.status === "done"))
     || (fastMode && Math.min(100, job?.progress ?? 0) >= 100);
+  // Second gate: the Usage dashboard renders a live "Next refresh in …"
+  // countdown; it needs the same 1 s tick so the digits actually update.
+  // We OR the two conditions into a single `_needsTick` flag — the
+  // interval runs whenever EITHER surface needs fresh seconds.
+  const _needsTick = !_timerBarFull || userPanel === "usage";
   useEffect(() => {
-    if (_timerBarFull) return;
+    if (!_needsTick) return;
     const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [_timerBarFull]);
+  }, [_needsTick]);
 
   // ── Auth: load current session + subscribe to changes ─────────────────────
   useEffect(() => {
@@ -4095,7 +4186,10 @@ ${html}
                       );
                     })()}
 
-                    {/* Menu items */}
+                    {/* Menu items. Developer accounts (userRole === "dev"
+                        / email in DEV_ACCTS) get an extra "Developer" entry
+                        routing to the dev control panel — hidden entirely
+                        for regular users so the menu stays clean. */}
                     <div className="py-1.5">
                       {([
                         { key: "profile",      label: "Profile",      icon: <User size={14} /> },
@@ -4104,13 +4198,18 @@ ${html}
                         { key: "subscription", label: "Subscription", icon: <CreditCard size={14} /> },
                         { key: "legal",        label: "Terms & Notices", icon: <FileText size={14} /> },
                         { key: "help",         label: "Help",         icon: <HelpCircle size={14} /> },
+                        ...(isDeveloper ? [{ key: "dev" as const, label: "Developer", icon: <Sparkles size={14} /> }] : []),
                       ] as const).map(({ key, label, icon }) => (
                         <button
                           key={key}
                           onClick={() => { setUserPanel(key); setUserMenuOpen(false); }}
-                          className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800/60 hover:text-slate-100 transition-colors text-left"
+                          className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm transition-colors text-left ${
+                            key === "dev"
+                              ? "text-amber-300 hover:bg-amber-500/10 hover:text-amber-200 border-t border-slate-700/50"
+                              : "text-slate-300 hover:bg-slate-800/60 hover:text-slate-100"
+                          }`}
                         >
-                          <span className="text-slate-500">{icon}</span>
+                          <span className={key === "dev" ? "text-amber-400" : "text-slate-500"}>{icon}</span>
                           {label}
                         </button>
                       ))}
@@ -4388,6 +4487,7 @@ ${html}
                 {userPanel === "legal"        && <FileText size={16} />}
                 {userPanel === "help"         && <HelpCircle size={16} />}
                 {userPanel === "usage"        && <BarChart2 size={16} />}
+                {userPanel === "dev"          && <Sparkles size={16} />}
               </span>
               <h2 className="flex-1 text-base font-semibold text-slate-100">
                 {userPanel === "profile"      && "Profile"}
@@ -4397,6 +4497,7 @@ ${html}
                 {userPanel === "legal"        && "Terms & Notices"}
                 {userPanel === "help"         && "Help"}
                 {userPanel === "usage"        && "Usage"}
+                {userPanel === "dev"          && "Developer Controls"}
               </h2>
               <button onClick={() => setUserPanel(null)} className="text-slate-500 hover:text-slate-300 transition-colors"><X size={16} /></button>
             </div>
@@ -4597,21 +4698,33 @@ ${html}
                         </button>
                       </div>
 
-                      {/* Countdown + exact reset time. Lives in its own
-                          accent-tinted strip so the user can't miss when
-                          the next bucket fill will land. */}
+                      {/* Countdown + exact reset time. Uses the theme
+                          accent tokens so colours follow the active palette
+                          (blue / amber / emerald / rose / umber / pink),
+                          and the digits use --ats-fg-primary for maximum
+                          contrast against the accent-soft background in
+                          both day and night modes. */}
                       {resetIso && (
-                        <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3">
+                        <div
+                          className="rounded-xl border px-4 py-3"
+                          style={{
+                            borderColor: "var(--ats-border-accent)",
+                            backgroundColor: "var(--ats-bg-accent-soft)",
+                          }}
+                        >
                           <div className="flex items-center justify-between flex-wrap gap-2">
                             <div className="text-xs">
-                              <p className="font-bold text-blue-300">Next refresh in</p>
-                              <p className="tabular-nums text-[13px] text-blue-100 mt-0.5">
+                              <p className="font-bold" style={{ color: "var(--ats-fg-accent)" }}>Next refresh in</p>
+                              <p
+                                className="tabular-nums font-bold mt-0.5"
+                                style={{ color: "var(--ats-fg-primary)", fontSize: "1rem", letterSpacing: "0.01em" }}
+                              >
                                 {rh}h {String(rm).padStart(2,"0")}m {String(rs).padStart(2,"0")}s
                               </p>
                             </div>
-                            <div className="text-right text-[11px] text-slate-400">
-                              <p>Local: <span className="tabular-nums text-slate-200">{resetLocal}</span></p>
-                              <p>UTC: <span className="tabular-nums text-slate-200">{resetUtc}</span></p>
+                            <div className="text-right text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
+                              <p>Local: <span className="tabular-nums" style={{ color: "var(--ats-fg-primary)" }}>{resetLocal}</span></p>
+                              <p>UTC: <span className="tabular-nums" style={{ color: "var(--ats-fg-primary)" }}>{resetUtc}</span></p>
                             </div>
                           </div>
                         </div>
@@ -5031,6 +5144,8 @@ ${html}
                   <p className="md:col-span-2 text-[10px] text-slate-600 text-center">Last updated 2026-04-19 · Alpha build v1.6.0</p>
                 </div>
               )}
+
+              {userPanel === "dev" && isDeveloper && <DevControlsPanel onError={setUiError} />}
 
               {userPanel === "help" && (
                 <div className="space-y-3">
