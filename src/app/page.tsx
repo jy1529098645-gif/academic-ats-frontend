@@ -1250,20 +1250,16 @@ export default function HomePage() {
     window.setTimeout(() => setGridTransitioning(false), 950);
   }, []);
 
-  // Trigger the snap exactly once per search, as soon as the pipeline
-  // produces something visible — whether that's the first streamed paper
-  // (Deep mode streams candidates progressively) or the final result
-  // object (Quick mode resolves in one shot). The ref resets on every
-  // new submission so a second search can re-snap if the user has
-  // dragged the layout elsewhere.
+  // Layout-snap guard. The Run button owns the happy path: handleSearch()
+  // flips this ref to true BEFORE kicking off the SSE so the grid
+  // transition finishes before the panels fill with content (prevents the
+  // grid reflow from colliding with streamed-paper/agent renders).
+  //
+  // The effect below is a fallback for entry points that don't go through
+  // handleSearch — e.g. restoring a history item directly sets `job` /
+  // `result` without touching isSubmitting. In that case we still want
+  // the layout to snap into place when the restored papers render.
   const _autoSnappedRef = useRef(false);
-  useEffect(() => {
-    if (isSubmitting) _autoSnappedRef.current = false;
-  }, [isSubmitting]);
-  // Inline the `!!job?.result` check — the memoised `result = job?.result ||
-  // null` derivation is declared further down in the component, so
-  // referencing it here would produce a TDZ error. Using the same
-  // underlying expression works before any TDZ barrier.
   useEffect(() => {
     const hasPhaseResult =
       streamPapers.length > 0 ||
@@ -1790,6 +1786,20 @@ ${html}
     // (HTTP 429 backstop) but a local short-circuit gives the user an
     // immediate, in-modal explanation instead of a network round-trip.
     if (!ensureQuota(fastMode ? "quick_search" : "deep_search")) return;
+
+    // Start the 1:3:1 snap immediately on Run. Waiting until the first
+    // phase result lands meant the user saw the grid reflow at the same
+    // moment the panels were pushing streamed papers / agent cards into
+    // their new homes — too much happening at once. Kicking off the
+    // ~1 s grid transition here, BEFORE the SSE connection even opens,
+    // lets the layout settle into position by the time content starts
+    // streaming. Ref marked snapped so the result-watching fallback
+    // effect doesn't fire a second time for this search. The ref is
+    // reset first (not relying on initial `false`) so users who dragged
+    // the dividers after a previous search still get a fresh snap now.
+    _autoSnappedRef.current = false;
+    snapToWorkingLayout();
+    _autoSnappedRef.current = true;
 
     const _usedUnderstand = directionData !== null;
     abortRef.current = new AbortController();
