@@ -5553,7 +5553,28 @@ ${html}
                     {/* Sign out */}
                     <div className="border-t border-slate-700/50 py-1.5">
                       <button
-                        onClick={() => { supabase.auth.signOut(); setAuthUser(null); setUserMenuOpen(false); }}
+                        onClick={async () => {
+                          // 1) Close the popup so it doesn't flash on the
+                          //    now-logged-out overlay.
+                          setUserMenuOpen(false);
+                          // 2) AWAIT signOut so Supabase's localStorage
+                          //    slot is actually cleared before anything
+                          //    else runs. Previous bug: fire-and-forget
+                          //    signOut + sync setAuthUser(null) triggered
+                          //    the reload-on-auth-change effect BEFORE
+                          //    signOut finished. After reload getSession
+                          //    still saw the old token → user appeared
+                          //    logged back in.
+                          try { await supabase.auth.signOut(); } catch {
+                            /* offline sign-outs still clear local storage */
+                          }
+                          // 3) onAuthStateChange fires with session=null
+                          //    → setAuthUser(null) runs there → the
+                          //    prevAuthEmailRef effect reloads the page
+                          //    automatically. No need to reload / setAuthUser
+                          //    manually here (doing so re-introduces the
+                          //    race condition we just fixed).
+                        }}
                         className="w-full flex items-center gap-3 px-4 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors text-left"
                       >
                         <span className="text-base w-5 text-center">→</span>
