@@ -10,6 +10,13 @@ import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
 import {
+  useUsage,
+  USAGE_FEATURE_LABELS,
+  formatUsage,
+  usageRatio,
+  type UsageSnapshot,
+} from "@/lib/hooks/use-usage";
+import {
   buildApiUrl,
   fetchWithApiFallback,
   fetchWithAuth,
@@ -724,6 +731,11 @@ export default function HomePage() {
   const [authLoading, setAuthLoading] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | null>(null);
+
+  // Live quota snapshot — tier + current-month counters. Refreshes on mount,
+  // window focus, and whenever a metered action completes (see usage.refresh()
+  // calls after search / synthesize / deep-read success).
+  const usage = useUsage(!!authUser?.email);
 
   // ── Role & multi-account management ───────────────────────────────────────
   // Single source of truth for developer emails — used for role checks everywhere.
@@ -1731,6 +1743,9 @@ ${html}
               result: data.result ?? null,
               finished_at: Date.now() / 1000,
             }));
+            // Metered action finished server-side; refresh the quota snapshot
+            // so subscription + user-menu counters update without a reload.
+            void usage.refresh();
             // ── Optimistic timeline insert; cloud is authoritative ─────────
             // The search endpoint writes its own history row server-side via
             // _write_history(); we just show immediate UI feedback and then refetch
@@ -1956,6 +1971,9 @@ ${html}
       labAbortRef.current = null;
       setLabGenerating(false);
       setLabStatus("");
+      // Synthesis run just wrapped up (success or error). Refresh quota so
+      // the counter in the user menu / subscription modal stays current.
+      void usage.refresh();
     }
   }
 
@@ -1971,6 +1989,7 @@ ${html}
       if (!res.ok) throw new Error(await readErrorMessage(res, `Deep read failed: ${res.status}`));
       const data = await res.json();
       setDeepReadResults((prev) => ({ ...prev, [paperKey]: data || {} }));
+      void usage.refresh();
     } catch (error) {
       setDeepReadErrors((prev) => ({
         ...prev,
@@ -2035,6 +2054,7 @@ ${html}
       <button
         onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
         title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
+        aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
         className={`fixed top-4 right-4 z-50 flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:shadow-[0_0_12px_var(--ats-border-accent)] border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-[var(--ats-fg-secondary)] hover:text-[var(--ats-fg-accent)]`}
       >
         {themeMode === "night" ? (
@@ -2144,6 +2164,7 @@ ${html}
             <button
               onClick={() => setLeftVisible(true)}
               title="Show panel"
+              aria-label="Show left panel"
               style={{
                 opacity: leftVisible ? 0 : 1,
                 pointerEvents: leftVisible ? "none" : "auto",
@@ -2164,6 +2185,7 @@ ${html}
               <button
                 onClick={() => setLeftVisible(false)}
                 title="Hide panel"
+                aria-label="Hide left panel"
                 className="absolute top-[11px] left-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
               ><PanelLeftClose size={15} /></button>
               {/* Tab bar — leading padding reserves space for the absolute collapse button. */}
@@ -2220,11 +2242,15 @@ ${html}
                   <>
                     {/* translate="no" — Google Translate rewrites text nodes, which collides
                         with the streamed markdown diff and crashes the page mid-generation. */}
+                    {/* Body text was 0.63rem (tiny) — bumped up two steps to
+                        0.85rem so paragraphs read comfortably. Headings keep
+                        their existing sizes (mdComponents' h2/h3) so hierarchy
+                        is preserved. Line-height nudged up to match. */}
                     <div translate="no" className="notranslate fade-in prose prose-invert max-w-none break-words
-                      prose-p:text-[0.63rem] prose-p:leading-[1.55] prose-p:my-0.5 prose-p:text-slate-300
+                      prose-p:text-[0.85rem] prose-p:leading-[1.65] prose-p:my-1 prose-p:text-slate-300
                       prose-strong:text-slate-100 prose-strong:font-semibold
-                      prose-li:text-[0.63rem] prose-li:text-slate-300 prose-li:my-0
-                      prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4">
+                      prose-li:text-[0.85rem] prose-li:leading-[1.6] prose-li:text-slate-300 prose-li:my-0.5
+                      prose-ul:my-1.5 prose-ol:my-1.5 prose-ul:pl-4 prose-ol:pl-4">
                       <ReactMarkdown components={mdComponents}>{researchBriefMarkdown}</ReactMarkdown>
                       {isStreamingBrief && (
                         <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
@@ -2466,6 +2492,7 @@ ${html}
                     <button
                       onClick={handleStop}
                       title="Stop search"
+                      aria-label="Stop search"
                       className="flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
                     >
                       <Square size={13} fill="currentColor" />
@@ -2475,6 +2502,7 @@ ${html}
                       onClick={() => void handleSearch()}
                       disabled={!query.trim()}
                       title="Start search"
+                      aria-label="Start search"
                       className="flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <ArrowRight size={15} />
@@ -3058,6 +3086,7 @@ ${html}
             <button
               onClick={() => setAnalyticsVisible(true)}
               title="Show Synthesis Lab"
+              aria-label="Show Synthesis Lab panel"
               style={{
                 opacity: analyticsVisible ? 0 : 1,
                 pointerEvents: analyticsVisible ? "none" : "auto",
@@ -3078,6 +3107,7 @@ ${html}
               <button
                 onClick={() => setAnalyticsVisible(false)}
                 title="Hide panel"
+                aria-label="Hide Synthesis Lab panel"
                 className="absolute top-[11px] right-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
               ><PanelRightClose size={15} /></button>
               {/* Header bar — trailing padding reserves space for the absolute collapse button. */}
@@ -3849,10 +3879,59 @@ ${html}
                         </div>
                         <div className="min-w-0">
                           <p className="text-xs font-semibold text-slate-200 truncate">{authUser.email}</p>
-                          <p className="text-[10px] text-blue-400 mt-0.5">Alpha Member</p>
+                          <p className="text-[10px] text-blue-400 mt-0.5 capitalize">
+                            {usage.data?.tier ? `${usage.data.tier} · Alpha` : "Alpha Member"}
+                          </p>
                         </div>
                       </div>
                     </div>
+
+                    {/* Quota snapshot — live per-month usage vs. tier limit.
+                        Hidden until the first fetch completes so the menu
+                        doesn't flash placeholders; omitted entirely for
+                        tiers that are unlimited across the board. */}
+                    {usage.data && (() => {
+                      const rows = (Object.keys(USAGE_FEATURE_LABELS) as Array<keyof UsageSnapshot["limits"]>)
+                        .map((feature) => {
+                          const limit = usage.data!.limits[feature] ?? null;
+                          const used = (usage.data!.used as any)[`${feature}_count`] ?? 0;
+                          return { feature, limit, used };
+                        })
+                        // Hide rows that are unlimited for this tier — reduces clutter on Scholar/dev.
+                        .filter(r => r.limit !== null);
+                      if (rows.length === 0) return null;
+                      return (
+                        <div className="border-t border-slate-700/50 px-4 py-2.5 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] text-slate-500 uppercase tracking-wide">Usage · {usage.data!.year_month}</p>
+                            <button
+                              onClick={() => { setUserPanel("subscription"); setUserMenuOpen(false); }}
+                              className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
+                            >Details</button>
+                          </div>
+                          {rows.map(({ feature, limit, used }) => {
+                            const ratio = usageRatio(used, limit);
+                            const full = limit !== null && used >= limit;
+                            return (
+                              <div key={feature}>
+                                <div className="flex items-center justify-between text-[10px]">
+                                  <span className="text-slate-400">{USAGE_FEATURE_LABELS[feature]}</span>
+                                  <span className={`tabular-nums ${full ? "text-rose-400" : "text-slate-500"}`}>
+                                    {formatUsage(used, limit)}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-slate-800">
+                                  <div
+                                    className={`h-full rounded-full transition-all duration-500 ${full ? "bg-rose-500" : "bg-blue-500"}`}
+                                    style={{ width: `${Math.round(ratio * 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
 
                     {/* Menu items */}
                     <div className="py-1.5">
@@ -3944,16 +4023,19 @@ ${html}
                 </>
               )}
 
-              {/* Avatar button + History button */}
+              {/* Avatar button + History button — bumped one size (px-3→px-4,
+                  py-1→py-1.5, text-xs→text-sm, avatar 6→7) so they read as
+                  proper controls at a glance. */}
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => setUserMenuOpen(o => !o)}
-                  className="flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/90 pl-1 pr-3 py-1 shadow-lg backdrop-blur-sm hover:border-blue-500/40 transition-all"
+                  aria-label="Open user menu"
+                  className="flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/90 pl-1.5 pr-4 py-1.5 shadow-lg backdrop-blur-sm hover:border-blue-500/40 transition-all"
                 >
-                  <div className="h-6 w-6 rounded-full bg-blue-600 flex items-center justify-center text-white text-[10px] font-bold">
+                  <div className="h-7 w-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
                     {(authUser.email?.[0] ?? "U").toUpperCase()}
                   </div>
-                  <span className="max-w-[140px] truncate text-xs text-slate-400">{authUser.email}</span>
+                  <span className="max-w-[160px] truncate text-sm text-slate-300">{authUser.email}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -3969,10 +4051,10 @@ ${html}
                       setHistoryLoading(false);
                     }
                   }}
-                  className={`rounded-full border px-3 py-1 text-xs shadow-lg backdrop-blur-sm transition-all ${
+                  className={`rounded-full border px-4 py-1.5 text-sm shadow-lg backdrop-blur-sm transition-all ${
                     historyPanelOpen
                       ? "border-blue-500/60 bg-blue-500/10 text-blue-400"
-                      : "border-slate-700/60 bg-slate-900/90 text-slate-400 hover:border-blue-500/40 hover:text-blue-400"
+                      : "border-slate-700/60 bg-slate-900/90 text-slate-300 hover:border-blue-500/40 hover:text-blue-400"
                   }`}
                 >
                   History
@@ -3982,7 +4064,7 @@ ${html}
           ) : (
             <button
               onClick={() => router.push("/login")}
-              className="rounded-full border border-slate-700/60 bg-slate-900/90 px-4 py-1.5 text-xs font-medium text-slate-400 shadow-lg backdrop-blur-sm hover:border-blue-500/50 hover:text-blue-400 transition-all"
+              className="rounded-full border border-slate-700/60 bg-slate-900/90 px-5 py-2 text-sm font-semibold text-slate-300 shadow-lg backdrop-blur-sm hover:border-blue-500/50 hover:text-blue-400 transition-all"
             >
               Sign in
             </button>
@@ -4304,10 +4386,70 @@ ${html}
                   <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3">
                     <div className="flex items-center gap-2 mb-1">
                       <Gem size={14} className="text-blue-400" />
-                      <span className="text-xs font-bold text-blue-300">Alpha Access — all tiers unlocked</span>
+                      <span className="text-xs font-bold text-blue-300">
+                        Alpha Access{usage.data ? ` · your tier: ${usage.data.tier}` : ""}
+                      </span>
                     </div>
                     <p className="text-[11px] text-slate-400">Every plan below is free to use during Alpha. Pricing goes live once we exit beta.</p>
                   </div>
+
+                  {/* Live usage — per-feature counters with progress bars, grouped as a single panel
+                      so the user sees the same quota numbers whether they open this modal or the
+                      menu popup. Server is always the source of truth. */}
+                  {usage.data && (
+                    <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 px-4 py-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <BarChart2 size={13} className="text-blue-400" />
+                          <span className="text-xs font-bold text-slate-200">
+                            Usage this month · {usage.data.year_month}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => { void usage.refresh(); }}
+                          className="text-[10px] text-slate-500 hover:text-blue-400 transition-colors"
+                          title="Refresh"
+                        >↻</button>
+                      </div>
+                      <p className="text-[10px] text-slate-500 mb-2">
+                        {usage.data.enforced
+                          ? "Quotas are enforced — requests beyond the limit return HTTP 429."
+                          : "Alpha mode: we log usage but don't block. Limits shown are the future caps."}
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {(Object.keys(USAGE_FEATURE_LABELS) as Array<keyof UsageSnapshot["limits"]>).map((feature) => {
+                          const limit = usage.data!.limits[feature] ?? null;
+                          const used  = (usage.data!.used as any)[`${feature}_count`] ?? 0;
+                          const full  = limit !== null && used >= limit;
+                          const ratio = usageRatio(used, limit);
+                          return (
+                            <div key={feature} className="rounded-lg border border-slate-800/60 bg-slate-900/40 px-3 py-2">
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="font-semibold text-slate-300">{USAGE_FEATURE_LABELS[feature]}</span>
+                                <span className={`tabular-nums ${full ? "text-rose-400" : "text-slate-400"}`}>
+                                  {formatUsage(used, limit)}
+                                </span>
+                              </div>
+                              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-slate-800">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${full ? "bg-rose-500" : "bg-blue-500"}`}
+                                  style={{ width: limit === null ? "100%" : `${Math.round(ratio * 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-2 text-[10px] text-slate-600">
+                        Total LLM cost this month: ≈ ${usage.data.used.llm_cost_usd.toFixed(3)} USD
+                      </p>
+                    </div>
+                  )}
+                  {usage.error && !usage.data && (
+                    <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-300">
+                      Couldn&apos;t load usage ({usage.error}). Try reloading — your quota will still apply server-side.
+                    </div>
+                  )}
 
                   {(() => {
                     type PlanTier = {
@@ -4319,6 +4461,11 @@ ${html}
                       accent: string;
                       activeDuringAlpha: boolean;
                     };
+                    // Plan perks are aligned to backend TIER_LIMITS in quota.py
+                    // so the card copy matches the real per-month caps the
+                    // server enforces. Update both sides together if either
+                    // changes — the Usage panel above shows live counters
+                    // sourced from the same values.
                     const plans: PlanTier[] = [
                       {
                         id: "free",
@@ -4326,8 +4473,10 @@ ${html}
                         price: "0",
                         tagline: "Kick the tyres",
                         perks: [
-                          "5 Quick Searches / day",
-                          "Up to 10 papers per search",
+                          "150 Quick Searches / month",
+                          "10 Deep Analyses / month",
+                          "5 Synthesis Lab runs / month",
+                          "30 Deep Reads / month",
                           "Fast-mode Literature Brief",
                           "Community support",
                         ],
@@ -4340,11 +4489,12 @@ ${html}
                         price: "0",
                         tagline: "For daily research work",
                         perks: [
-                          "50 Quick Searches / day",
-                          "20 Curated deep analyses / month",
+                          "1,500 Quick Searches / month",
+                          "60 Deep Analyses / month",
+                          "40 Synthesis Lab runs / month",
+                          "300 Deep Reads / month",
                           "Up to 40 papers per search",
-                          "Full Synthesis Lab",
-                          "PDF export",
+                          "Full Synthesis Lab · PDF export",
                           "Email support",
                         ],
                         accent: "border-blue-500/40",
@@ -4357,12 +4507,13 @@ ${html}
                         tagline: "Deep, unlimited, priority",
                         perks: [
                           "Unlimited Quick Searches",
-                          "Unlimited Curated deep analyses",
+                          "Unlimited Deep Analyses",
+                          "Unlimited Synthesis Lab",
+                          "Unlimited Deep Reads",
                           "Up to 200 papers per search",
                           "6-agent multi-agent reasoning",
                           "Synthesis Lab with Claude Sonnet writer",
-                          "Citation & author tracking",
-                          "PDF + Word export",
+                          "Citation & author tracking · PDF + Word export",
                           "Priority support · early access",
                         ],
                         accent: "border-amber-400/50",
@@ -4373,29 +4524,44 @@ ${html}
                       // Three-column grid on wide screens; collapses to one column
                       // below `sm` so the modal stays usable on narrow viewports.
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        {plans.map(plan => (
-                          <div key={plan.id} className={`flex flex-col rounded-xl border bg-slate-900/40 px-4 py-3 ${plan.accent}`}>
-                            <div className="flex items-baseline justify-between gap-2 mb-1">
-                              <span className="text-sm font-bold text-slate-100">{plan.name}</span>
-                              <span className="text-xs font-semibold text-slate-300 tabular-nums">{plan.price}</span>
-                            </div>
-                            <p className="text-[11px] text-slate-500 mb-2">{plan.tagline}</p>
-                            <ul className="flex-1 space-y-1">
-                              {plan.perks.map(perk => (
-                                <li key={perk} className="flex items-start gap-1.5 text-[11px] text-slate-400">
-                                  <Check size={11} className="mt-0.5 text-emerald-400 shrink-0" />
-                                  <span>{perk}</span>
-                                </li>
-                              ))}
-                            </ul>
-                            {plan.activeDuringAlpha && (
-                              <div className="mt-2 inline-flex items-center gap-1 self-start rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-300">
-                                <Check size={9} strokeWidth={3} />
-                                Included in Alpha
+                        {plans.map(plan => {
+                          const isCurrent = usage.data?.tier === plan.id;
+                          return (
+                            <div
+                              key={plan.id}
+                              className={`flex flex-col rounded-xl border bg-slate-900/40 px-4 py-3 transition-all ${
+                                isCurrent ? "border-blue-500 ring-2 ring-blue-500/30" : plan.accent
+                              }`}
+                            >
+                              <div className="flex items-baseline justify-between gap-2 mb-1">
+                                <span className="text-sm font-bold text-slate-100">{plan.name}</span>
+                                <span className="text-xs font-semibold text-slate-300 tabular-nums">{plan.price}</span>
                               </div>
-                            )}
-                          </div>
-                        ))}
+                              <p className="text-[11px] text-slate-500 mb-2">{plan.tagline}</p>
+                              <ul className="flex-1 space-y-1">
+                                {plan.perks.map(perk => (
+                                  <li key={perk} className="flex items-start gap-1.5 text-[11px] text-slate-400">
+                                    <Check size={11} className="mt-0.5 text-emerald-400 shrink-0" />
+                                    <span>{perk}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                {isCurrent && (
+                                  <div className="inline-flex items-center gap-1 rounded-full bg-blue-500/25 px-2 py-0.5 text-[10px] font-bold text-blue-200">
+                                    Current plan
+                                  </div>
+                                )}
+                                {plan.activeDuringAlpha && (
+                                  <div className="inline-flex items-center gap-1 rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-300">
+                                    <Check size={9} strokeWidth={3} />
+                                    Included in Alpha
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     );
                   })()}

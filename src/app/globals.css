@@ -618,6 +618,20 @@ body {
 [data-tone="day"] .bg-blue-400,
 [data-tone="day"] .bg-blue-500 *,
 [data-tone="day"] .bg-blue-600 * { color: var(--ats-fg-on-accent) !important; }
+
+/* Day mode — functional buttons painted with the accent background MUST keep
+   white (on-accent) text so they remain readable. The generic `.text-white`
+   override farther down retints every white label to near-black, which
+   applied to the avatar chip, the filled primary buttons, etc. The selectors
+   below are more specific (combined class + descendant) so they win over
+   that retint and the user gets "accent + white" on every filled button,
+   matching the night-mode look. */
+[data-tone="day"] .bg-blue-500.text-white,
+[data-tone="day"] .bg-blue-600.text-white,
+[data-tone="day"] .bg-blue-400.text-white,
+[data-tone="day"] .bg-blue-500 .text-white,
+[data-tone="day"] .bg-blue-600 .text-white,
+[data-tone="day"] .bg-blue-400 .text-white { color: var(--ats-fg-on-accent) !important; }
 .hover\:bg-blue-500:hover,
 .hover\:bg-blue-600:hover { background-color: var(--ats-bg-accent) !important; filter: brightness(1.05); }
 .bg-blue-500\/5    { background-color: rgb(from var(--ats-bg-accent) r g b / 0.05) !important; }
