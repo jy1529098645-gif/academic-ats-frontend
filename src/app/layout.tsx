@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "AcademiCats",
-  description: "Where every question finds its sources.",
+  description: "I think, therefore I am.",
 };
 
 export default function RootLayout({
