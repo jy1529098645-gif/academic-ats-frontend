@@ -285,7 +285,18 @@ function scoreChip(score: number | undefined | null): { label: string; cls: stri
 // Currently exposes two announcement-cleanup actions; add new privileged
 // operations here as they come up instead of sprinkling `isDeveloper`
 // conditionals across the page.
-function DevControlsPanel({ onError }: { onError: (msg: string) => void }) {
+function DevControlsPanel({
+  onError,
+  onCleared,
+}: {
+  onError:    (msg: string) => void;
+  /** Fired after a successful delete so the parent can re-fetch the
+   *  announcements feed as a belt-and-suspenders against Realtime DELETE
+   *  events not being enabled in the current Supabase publication. The
+   *  Realtime subscription normally handles this on its own, but a manual
+   *  refresh guarantees the acting dev sees the change immediately. */
+  onCleared?: () => void;
+}) {
   const [busy, setBusy]   = useState<"" | "user" | "all">("");
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
@@ -305,6 +316,7 @@ function DevControlsPanel({ onError }: { onError: (msg: string) => void }) {
       }
       const json = (await res.json()) as { deleted: number };
       setStatus({ kind: "ok", text: `Deleted ${json.deleted ?? 0} row(s).` });
+      onCleared?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setStatus({ kind: "err", text: msg });
@@ -5190,7 +5202,12 @@ ${html}
                 </div>
               )}
 
-              {userPanel === "dev" && isDeveloper && <DevControlsPanel onError={setUiError} />}
+              {userPanel === "dev" && isDeveloper && (
+                <DevControlsPanel
+                  onError={setUiError}
+                  onCleared={() => { void announcementsFeed.refresh(); }}
+                />
+              )}
 
               {userPanel === "help" && (
                 <div className="space-y-3">

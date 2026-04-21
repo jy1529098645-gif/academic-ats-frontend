@@ -1,18 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // useAnnouncements — live feed of the shared public ticker.
 //
-// Two channels feed this state:
+// Three channels feed this state:
 //   1. GET /api/announcements — one-shot REST fetch on mount to seed the
 //      latest 50 messages so a brand-new tab isn't empty while Realtime is
 //      still warming up.
-//   2. Supabase Realtime (postgres_changes INSERT on `public.announcements`)
-//      — a persistent channel that pushes new rows to every connected
-//      session in near-real-time. The server-side trigger trims the table
-//      to 50 rows, but the client also caps its local state at 50 so an
-//      out-of-order event (unlikely) can't grow the list.
+//   2. Supabase Realtime INSERT — pushes new rows to every connected
+//      session in near-real-time.
+//   3. Supabase Realtime DELETE — drops removed rows from every session's
+//      state so dev-tier "Clear user-posted" / "Clear all" operations
+//      propagate without requiring a page reload. The DELETE payload
+//      carries only the primary key by default (REPLICA IDENTITY DEFAULT),
+//      which is enough because we filter local state by id.
 //
-// Auth isn't required to read the feed (endpoint is public); posting is
-// separate and goes through src/app/page.tsx → /api/announcements.
+// Auth isn't required to read the feed (endpoint is public); posting and
+// deletion go through backend-auth'd endpoints elsewhere.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useState } from "react";
@@ -47,8 +49,9 @@ export function useAnnouncements() {
   useEffect(() => { void refresh(); }, [refresh]);
 
   useEffect(() => {
-    // Live subscription — every INSERT prepends to the list; dedup by id in
-    // case the REST refresh + Realtime echo each deliver the same row.
+    // Live subscription — INSERT prepends, DELETE drops. Dedup on id in
+    // both directions so REST refresh + Realtime echo of the same row
+    // stay consistent.
     const channel = supabase
       .channel("announcements-live")
       .on(
@@ -61,6 +64,15 @@ export function useAnnouncements() {
             if (prev.some(p => p.id === row.id)) return prev;
             return [row, ...prev].slice(0, FEED_LIMIT);
           });
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "announcements" },
+        (payload: { old: { id?: string } }) => {
+          const oldId = payload.old?.id;
+          if (!oldId) return;
+          setItems(prev => prev.filter(p => p.id !== oldId));
         },
       )
       .subscribe();
