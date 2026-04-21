@@ -172,11 +172,16 @@ body {
    changes. We don't touch `transition-property` globally (that would
    stomp on hover animations elsewhere); we just *add* durations for
    these properties via a shorthand. */
+/* Theme cross-fade duration is a user preference (Settings → Behaviour →
+   Theme transition). The prefs store writes `--ats-theme-transition-ms`
+   on the <main> element at mount + on slider change. The fallback value
+   here matches DEFAULT_THEME_TRANSITION_MS in prefs-store.ts so the
+   first paint (before hydration) uses the same 400ms. */
 *,
 *::before,
 *::after {
   transition-property: color, background-color, border-color, fill, stroke, box-shadow;
-  transition-duration: 400ms;
+  transition-duration: var(--ats-theme-transition-ms, 400ms);
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
 /* Restore snappy feedback on elements the user is directly interacting

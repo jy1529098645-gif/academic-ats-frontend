@@ -2,10 +2,14 @@
 // /admin — dev-only commercial monitoring dashboard.
 //
 // Access control happens in two places:
-//   1. Client-side: we check `authUser.email` against the DEV_ACCTS list
-//      from page.tsx. If the visitor isn't a dev we render an "access
-//      denied" screen instead of firing the API calls. This is a UX
-//      gate only — anyone with a JWT could hit the endpoints directly.
+//   1. Client-side: access is granted if EITHER the current Supabase
+//      session OR a previously-cached dev session (see `ats-session::*`
+//      keys written by page.tsx's auth listener) belongs to a
+//      DEV_ACCTS email. This lets the user switch to a non-dev account
+//      in the main app and still keep admin access here — the page
+//      will use the cached dev refresh-token to mint fresh access
+//      tokens for every /api/admin/* call, without disturbing the
+//      current app's session.
 //   2. Server-side: every /api/admin/* endpoint re-runs `_require_dev`
 //      which enforces tier == "dev" or membership in the email allowlist.
 //
@@ -25,7 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
-import { buildApiUrl, fetchWithAuth } from "@/lib/api";
+import { buildApiUrl } from "@/lib/api";
 import {
   BarChart as BarChartIcon, Users, Activity, MessageSquare, Zap,
   DollarSign, RefreshCw, ArrowLeft, AlertTriangle, Sparkles,
@@ -38,6 +42,96 @@ const DEV_ACCTS = [
   "dev02@academicats.com",
   "dev03@academicats.com",
 ];
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
+
+// Per-email session cache key — must match _sessionKey() in page.tsx.
+function devSessionKey(email: string): string {
+  return `ats-session::${email.toLowerCase()}`;
+}
+
+// Read any cached dev session from localStorage, newest first. Returns
+// null if none of the three seed accounts have ever been signed in on
+// this browser, OR all of their cached refresh tokens have been wiped.
+function findCachedDevSession(): { email: string; refresh_token: string; access_token: string } | null {
+  if (typeof window === "undefined") return null;
+  for (const email of DEV_ACCTS) {
+    try {
+      const raw = window.localStorage.getItem(devSessionKey(email));
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (parsed?.refresh_token && parsed?.access_token) {
+        return { email, refresh_token: parsed.refresh_token, access_token: parsed.access_token };
+      }
+    } catch { /* bad JSON — keep scanning */ }
+  }
+  return null;
+}
+
+// Exchange a cached refresh token for a fresh access token by POSTing
+// directly to Supabase's /auth/v1/token endpoint. This bypasses the
+// `supabase.auth` client entirely so the current session (which may
+// belong to a completely different, non-dev user) is NOT overwritten.
+// Updates the cache with the rotated refresh token so the next call
+// picks up the new one.
+async function mintDevAccessToken(): Promise<string | null> {
+  const cached = findCachedDevSession();
+  if (!cached || !SUPABASE_URL || !SUPABASE_KEY) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey:         SUPABASE_KEY,
+          Authorization:  `Bearer ${SUPABASE_KEY}`,
+        },
+        body: JSON.stringify({ refresh_token: cached.refresh_token }),
+      },
+    );
+    if (!res.ok) {
+      // Refresh token revoked or expired — drop the cache so we don't
+      // keep hitting Supabase for a dead token every 10 s.
+      try { window.localStorage.removeItem(devSessionKey(cached.email)); } catch { /* ignore */ }
+      return null;
+    }
+    const json = await res.json();
+    if (!json?.access_token) return null;
+    // Persist the rotated refresh token so subsequent mints succeed.
+    try {
+      window.localStorage.setItem(
+        devSessionKey(cached.email),
+        JSON.stringify({
+          access_token:  json.access_token,
+          refresh_token: json.refresh_token ?? cached.refresh_token,
+        }),
+      );
+    } catch { /* quota — ignore */ }
+    return json.access_token;
+  } catch {
+    return null;
+  }
+}
+
+// Drop-in replacement for fetchWithAuth that uses a dev-session access
+// token instead of whatever the current `supabase.auth` session holds.
+// Keeps the admin dashboard working even when the user has switched
+// the main app to a normal Google account.
+async function fetchAsDev(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = await mintDevAccessToken();
+  if (!token) {
+    throw new Error("No cached dev session on this browser. Sign in with a dev account at least once, then come back here.");
+  }
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers as Record<string, string> | undefined ?? {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+}
 
 const OVERVIEW_POLL_MS = 10_000; // hot KPIs
 const DETAIL_POLL_MS   = 60_000; // time-series / users / announcements
@@ -152,16 +246,25 @@ export default function AdminPage() {
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
   const [authEmail,   setAuthEmail]   = useState<string | null>(null);
+  // Separate state for the cached-dev path so we can tell the user
+  // "you're impersonating a dev account from cache" vs "you're actively
+  // signed in as a dev account right now".
+  const [cachedDevEmail, setCachedDevEmail] = useState<string | null>(null);
 
-  // Gate — only dev accounts get past here.
+  // Gate — dev accounts OR any cached dev session can enter.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const { data } = await supabase.auth.getSession();
         if (cancelled) return;
-        const email = data.session?.user?.email ?? null;
-        setAuthEmail(email);
+        setAuthEmail(data.session?.user?.email ?? null);
+        // Look for a fallback cached dev session regardless — if the
+        // current user is already a dev we'll prefer their live token,
+        // but if they've switched to a non-dev account the cache keeps
+        // the admin dashboard usable.
+        const cached = findCachedDevSession();
+        setCachedDevEmail(cached?.email ?? null);
         setAuthChecked(true);
       } catch {
         setAuthChecked(true);
@@ -170,30 +273,38 @@ export default function AdminPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const isDev = authEmail ? DEV_ACCTS.includes(authEmail) : false;
+  const isCurrentUserDev = authEmail ? DEV_ACCTS.includes(authEmail) : false;
+  // Entry is allowed if EITHER path is available. Both are verified
+  // server-side on every request, so the worst case of a stale cache
+  // is a single 401 from the backend.
+  const isDev   = isCurrentUserDev || !!cachedDevEmail;
   const enabled = authChecked && isDev;
 
   // ── Fetchers ────────────────────────────────────────────────────────────
+  // Always use fetchAsDev — it mints a fresh access token from whichever
+  // dev refresh-token is cached. When the current user IS a dev, their
+  // own session was cached by the main app's auth listener, so this
+  // still works (and stays consistent with the non-dev case).
   const fetchOverview = useCallback(async (): Promise<Overview> => {
-    const res = await fetchWithAuth(buildApiUrl("/api/admin/overview"));
+    const res = await fetchAsDev(buildApiUrl("/api/admin/overview"));
     if (!res.ok) throw new Error(`overview HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchTimeseries = useCallback(async (): Promise<{ data: TimeSeriesPoint[] }> => {
-    const res = await fetchWithAuth(buildApiUrl("/api/admin/usage-timeseries?days=30"));
+    const res = await fetchAsDev(buildApiUrl("/api/admin/usage-timeseries?days=30"));
     if (!res.ok) throw new Error(`timeseries HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchUsers = useCallback(async (): Promise<{ users: AdminUser[] }> => {
-    const res = await fetchWithAuth(buildApiUrl("/api/admin/users?limit=50"));
+    const res = await fetchAsDev(buildApiUrl("/api/admin/users?limit=50"));
     if (!res.ok) throw new Error(`users HTTP ${res.status}`);
     return res.json();
   }, []);
 
   const fetchAnnouncements = useCallback(async (): Promise<{ announcements: AdminAnnouncement[] }> => {
-    const res = await fetchWithAuth(buildApiUrl("/api/admin/announcements-all"));
+    const res = await fetchAsDev(buildApiUrl("/api/admin/announcements-all"));
     if (!res.ok) throw new Error(`announcements HTTP ${res.status}`);
     return res.json();
   }, []);
@@ -258,7 +369,13 @@ export default function AdminPage() {
           <h1 className="text-lg font-bold mb-2" style={{ color: "var(--ats-fg-primary)" }}>Access denied</h1>
           <p className="text-sm" style={{ color: "var(--ats-fg-secondary)" }}>
             The admin console is restricted to developer accounts. You&apos;re signed in as
-            <code className="ml-1" style={{ color: "var(--ats-fg-primary)" }}>{authEmail}</code>.
+            <code className="ml-1" style={{ color: "var(--ats-fg-primary)" }}>{authEmail}</code>,
+            and no cached dev session was found on this browser.
+          </p>
+          <p className="mt-3 text-xs" style={{ color: "var(--ats-fg-muted)" }}>
+            Sign in as a dev account at least once (the main app&apos;s Accounts panel) —
+            the admin console will then stay accessible even after you switch back to
+            your regular account.
           </p>
           <Link href="/" className="inline-block mt-4 text-xs underline" style={{ color: "var(--ats-fg-muted)" }}>
             ← Back to the main app
@@ -267,6 +384,12 @@ export default function AdminPage() {
       </div>
     );
   }
+
+  // Flag that we're running on a cached dev session rather than the
+  // current live one — surface it in the header so the user isn't
+  // surprised by admin access while "signed in" as a non-dev account
+  // in the main app. Purely informational.
+  const usingCachedDev = !isCurrentUserDev && !!cachedDevEmail;
 
   // ── Authorised render ───────────────────────────────────────────────────
   const ov = overview.data;
@@ -351,6 +474,24 @@ export default function AdminPage() {
       </header>
 
       <main className="max-w-[1600px] mx-auto px-6 py-6 space-y-6">
+        {/* ── Cached-dev impersonation banner ───────────────────────── */}
+        {usingCachedDev && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs flex items-start gap-2">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />
+            <div>
+              <p className="font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                Impersonating cached dev session: <code>{cachedDevEmail}</code>
+              </p>
+              <p className="mt-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
+                Main app is signed in as <code>{authEmail ?? "(guest)"}</code>. Admin API
+                calls use the cached dev refresh-token and do NOT affect the main app&apos;s
+                session. If the cache expires you&apos;ll be asked to sign in as a dev
+                account again.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* ── Global errors ─────────────────────────────────────────── */}
         {(overview.error || timeseries.error || users.error || announcements.error) && (
           <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-700 dark:text-red-300 space-y-1">

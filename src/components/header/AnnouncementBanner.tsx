@@ -39,9 +39,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Megaphone, MessageSquare, Check, ChevronLeft, ChevronRight, Sparkles } from "lucide-react";
 import type { Announcement } from "@/lib/hooks/use-announcements";
+import { usePrefsStore } from "@/lib/stores/prefs-store";
 
-const ROTATE_INTERVAL_MS = 6000;
-const DOT_LIMIT          = 10;
+const DOT_LIMIT = 10;
 
 function formatAuthor(a: Announcement): string | null {
   const email = (a.author_email || "").toLowerCase();
@@ -342,13 +342,41 @@ export function AnnouncementBanner({
   const [idx, setIdx] = useState(0);
   const count = announcements.length;
 
+  // Rotate interval is user-tunable via Settings → Behaviour → Announcement
+  // rotation. Pulls from the shared prefs store so a slider change takes
+  // effect on the next interval tick (re-subscribes the effect).
+  const rotatorIntervalMs = usePrefsStore(s => s.rotatorIntervalMs);
+
   // Auto-advance. Pauses when the user hovers the banner OR when the feed
   // has at most one item (nothing to rotate through).
   useEffect(() => {
     if (collapsed || hoverPaused || count <= 1) return;
-    const id = window.setInterval(() => setIdx(i => (i + 1) % count), ROTATE_INTERVAL_MS);
+    const id = window.setInterval(() => setIdx(i => (i + 1) % count), rotatorIntervalMs);
     return () => window.clearInterval(id);
-  }, [collapsed, hoverPaused, count]);
+  }, [collapsed, hoverPaused, count, rotatorIntervalMs]);
+
+  // Jump to the newest message whenever the head of the list changes.
+  // The announcements feed (useAnnouncements hook) prepends new rows —
+  // both from local optimistic posts and from Realtime INSERT events —
+  // so `announcements[0].id` changing means someone (possibly the user
+  // themselves) just posted. We snap idx back to 0 so the rotator
+  // shows the fresh content immediately instead of waiting up to 6s
+  // for the auto-advance to cycle around.
+  //
+  // Guard with a ref against the first render / empty-feed transitions,
+  // otherwise the effect would "jump to latest" on initial mount and
+  // cause the auto-advance to feel reset every time the feed hydrates.
+  const prevHeadIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const headId = announcements[0]?.id ?? null;
+    const prev = prevHeadIdRef.current;
+    prevHeadIdRef.current = headId;
+    // Only jump if we had a previous head AND it actually changed.
+    // This skips the first-ever render and feed-hydration paints.
+    if (prev !== null && headId !== null && prev !== headId) {
+      setIdx(0);
+    }
+  }, [announcements]);
 
   // Stable danmu payload — derived from user-posted rows only. Seed
   // messages (author_email = DEV_SEED_EMAIL) are the "system welcome"

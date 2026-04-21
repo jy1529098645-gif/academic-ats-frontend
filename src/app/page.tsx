@@ -10,6 +10,11 @@ import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
 import {
+  usePrefsStore, hydratePrefsStore,
+  ROTATOR_INTERVAL_MIN, ROTATOR_INTERVAL_MAX,
+  THEME_TRANSITION_MIN, THEME_TRANSITION_MAX,
+} from "@/lib/stores/prefs-store";
+import {
   useUsage,
   USAGE_FEATURE_LABELS,
   formatUsage,
@@ -782,11 +787,18 @@ export default function HomePage() {
   const theme = themeMode === "day" ? dayThemeId : nightThemeId;
 
   useEffect(() => {
-    // One-shot hydration from localStorage on mount. The store's default
+    // One-shot hydration from localStorage on mount. The stores' default
     // initial state matches SSR output, so React never sees a hydration
     // mismatch; the real persisted values land after first paint.
     hydrateThemeStore();
+    hydratePrefsStore();
   }, []);
+
+  // User-tunable behaviour preferences (Settings → Behaviour).
+  const rotatorIntervalMs    = usePrefsStore(s => s.rotatorIntervalMs);
+  const themeTransitionMs    = usePrefsStore(s => s.themeTransitionMs);
+  const setRotatorIntervalMs = usePrefsStore(s => s.setRotatorIntervalMs);
+  const setThemeTransitionMs = usePrefsStore(s => s.setThemeTransitionMs);
 
   // Per-panel translucency (0.4–1.0). Applied to the three main panel backgrounds
   // via `rgb(from <token> r g b / <alpha>)` — lets the page gradient bleed through
@@ -2582,6 +2594,10 @@ ${html}
         ["--ats-alpha-workspace" as any]: panelAlpha.workspace,
         ["--ats-alpha-synthesis" as any]: panelAlpha.synthesis,
         ["--ats-alpha-lab" as any]:       panelAlpha.lab,
+        // Theme cross-fade duration — read in globals.css `*,::before,::after`
+        // rule as `transition-duration: var(--ats-theme-transition-ms, 400ms)`.
+        // User-tunable via Settings → Behaviour → Theme transition.
+        ["--ats-theme-transition-ms" as any]: `${themeTransitionMs}ms`,
       }}
     >
       {/* First-click click-catcher: swallows every initial click and turns it
@@ -5002,6 +5018,58 @@ ${html}
                       <span className={`text-xs font-semibold px-2 py-1 rounded-full ${fastMode ? "bg-blue-500/20 text-blue-400" : "bg-slate-700 text-slate-400"}`}>
                         {fastMode ? "On" : "Off"}
                       </span>
+                    </div>
+
+                    {/* Announcement rotation interval — how fast the ticker cycles */}
+                    <div className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-200">Announcement rotation</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">How long each message stays before cycling</p>
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-300 tabular-nums">
+                          {(rotatorIntervalMs / 1000).toFixed(1)}s
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={ROTATOR_INTERVAL_MIN}
+                        max={ROTATOR_INTERVAL_MAX}
+                        step={500}
+                        value={rotatorIntervalMs}
+                        onChange={(e) => setRotatorIntervalMs(Number(e.target.value))}
+                        className="w-full accent-blue-500 cursor-pointer mt-1"
+                      />
+                      <div className="flex justify-between text-[9px] text-slate-600 mt-0.5 font-mono">
+                        <span>{(ROTATOR_INTERVAL_MIN / 1000).toFixed(0)}s</span>
+                        <span>{(ROTATOR_INTERVAL_MAX / 1000).toFixed(0)}s</span>
+                      </div>
+                    </div>
+
+                    {/* Theme cross-fade duration — how slowly day/night transitions */}
+                    <div className="rounded-xl bg-slate-800/50 px-4 py-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-200">Theme transition</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">Cross-fade duration when switching day/night</p>
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-300 tabular-nums">
+                          {themeTransitionMs}ms
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={THEME_TRANSITION_MIN}
+                        max={THEME_TRANSITION_MAX}
+                        step={50}
+                        value={themeTransitionMs}
+                        onChange={(e) => setThemeTransitionMs(Number(e.target.value))}
+                        className="w-full accent-blue-500 cursor-pointer mt-1"
+                      />
+                      <div className="flex justify-between text-[9px] text-slate-600 mt-0.5 font-mono">
+                        <span>{THEME_TRANSITION_MIN}ms</span>
+                        <span>{(THEME_TRANSITION_MAX / 1000).toFixed(1)}s</span>
+                      </div>
                     </div>
                   </div>
                 </div>
