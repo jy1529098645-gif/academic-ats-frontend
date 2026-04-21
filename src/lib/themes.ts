@@ -36,8 +36,8 @@ export const THEME_REGISTRY: ThemeDescriptor[] = [
     id: "day-sand",
     label: "Warm Paper",
     mode: "day",
-    swatches: ["#F2EBDA", "#FBF6E8", "#B45309"],
-    blurb: "Warm sand canvas with umber accents — archival library feel.",
+    swatches: ["#F2EBDA", "#FBF6E8", "#E59616"],
+    blurb: "Warm sand canvas with bright orange accents — archival library feel with more pop.",
   },
   {
     id: "day-mint",

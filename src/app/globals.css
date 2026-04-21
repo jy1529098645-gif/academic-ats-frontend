@@ -230,25 +230,28 @@ body {
 }
 
 [data-theme="day-sand"] {
-  /* Warm Paper — warm sand canvas with umber accents.                */
+  /* Warm Paper — warm sand canvas with bright orange (#E59616) accents.
+     Every alpha-derived accent token below is rebased onto the new RGB
+     (229,150,22) so hover tints, scroll thumbs, and borders all pick up
+     the fresh hue without us having to hand-tune each one. */
   --ats-bg-page:        #F2EBDA;
   --ats-bg-panel:       #FBF6E8;
   --ats-bg-card:        #F2EBDA;
   --ats-bg-card-muted:  #F2EBDA;
   --ats-bg-input:       #FBF6E8;
-  --ats-bg-accent-soft: rgba(180,83,9,0.10);
-  --ats-bg-accent:      #B45309;
+  --ats-bg-accent-soft: rgba(229,150,22,0.10);
+  --ats-bg-accent:      #E59616;
   --ats-bg-emerald:     #EAF4E4;
 
   --ats-fg-primary:     #3F2A1C;
   --ats-fg-secondary:   #5B3F2A;
   --ats-fg-muted:       #8B7355;
-  --ats-fg-accent:      #7C2D12;
+  --ats-fg-accent:      #A85E00;
   --ats-fg-on-accent:   #FBF6E8;
 
   --ats-border-subtle:  #D8CBA8;
   --ats-border-strong:  #B89F73;
-  --ats-border-accent:  rgba(180,83,9,0.45);
+  --ats-border-accent:  rgba(229,150,22,0.50);
 
   --ats-success:        #047857;
   --ats-danger:         #B91C1C;
@@ -257,8 +260,8 @@ body {
   --ats-shadow-panel:   0 6px 20px rgba(90,50,20,0.09), 0 1px 3px rgba(90,50,20,0.05),
                         0 0 0 1px rgba(255,255,255,0.85), inset 0 1px 0 rgba(255,255,255,1);
 
-  --ats-scroll-thumb:       rgba(124,45,18,0.28);
-  --ats-scroll-thumb-hover: rgba(124,45,18,0.50);
+  --ats-scroll-thumb:       rgba(229,150,22,0.28);
+  --ats-scroll-thumb-hover: rgba(229,150,22,0.50);
 
   --ats-placeholder-fg: rgba(63,42,28,0.82);
 
