@@ -1118,6 +1118,31 @@ export default function HomePage() {
   const [briefShowTrans,   setBriefShowTrans]   = useState(false);
   const [briefTransError,  setBriefTransError]  = useState("");
   const briefTransAbortRef = useRef<AbortController | null>(null);
+  // Target language for the Translate button. Hydrated from
+  // navigator.language on first render (see effect below); user can
+  // override via the dropdown next to the button. Cached translations
+  // are keyed by (brief_text, target_language) via briefTranslatedLang
+  // so switching language triggers a fresh request rather than showing
+  // a stale result in the wrong language.
+  const [briefTargetLang,  setBriefTargetLang]  = useState("Chinese (Simplified)");
+  const [briefTranslatedLang, setBriefTranslatedLang] = useState("");
+
+  // The languages offered in the picker — curated common set. Add more
+  // here and the LLM will happily translate; the backend prompt just
+  // interpolates the string.
+  const BRIEF_LANG_OPTIONS: { value: string; label: string }[] = [
+    { value: "Chinese (Simplified)",  label: "简体中文" },
+    { value: "Chinese (Traditional)", label: "繁體中文" },
+    { value: "English",               label: "English"  },
+    { value: "Japanese",              label: "日本語"    },
+    { value: "Korean",                label: "한국어"    },
+    { value: "Spanish",               label: "Español"  },
+    { value: "French",                label: "Français" },
+    { value: "German",                label: "Deutsch"  },
+    { value: "Portuguese",            label: "Português"},
+    { value: "Russian",               label: "Русский"  },
+    { value: "Arabic",                label: "العربية"   },
+  ];
   const [labAgentLogOpen,   setLabAgentLogOpen]   = useState(true);
   const [labReviewerNotes,  setLabReviewerNotes]  = useState<{
     missing_inputs?: string[];
@@ -1941,22 +1966,32 @@ export default function HomePage() {
   // ── Brief translation logic (continued from the state declarations above) ──
   // Defined here (after `result` is derived from `job`) so the
   // useCallback below can safely close over `result?.brief`.
-  const _inferTargetLang = useCallback((): string => {
-    if (typeof navigator === "undefined") return "Chinese (Simplified)";
+  // On first mount, infer the user's preferred translation language from
+  // navigator.language so the dropdown isn't always sitting on Chinese
+  // (Simplified) for English speakers.
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
     const lang = (navigator.language || "").toLowerCase();
-    if (lang.startsWith("zh-tw") || lang.startsWith("zh-hk")) return "Chinese (Traditional)";
-    if (lang.startsWith("zh"))    return "Chinese (Simplified)";
-    if (lang.startsWith("ja"))    return "Japanese";
-    if (lang.startsWith("ko"))    return "Korean";
-    if (lang.startsWith("es"))    return "Spanish";
-    if (lang.startsWith("fr"))    return "French";
-    if (lang.startsWith("de"))    return "German";
-    if (lang.startsWith("pt"))    return "Portuguese";
-    if (lang.startsWith("ru"))    return "Russian";
-    if (lang.startsWith("ar"))    return "Arabic";
-    return "Chinese (Simplified)";
+    let inferred = "Chinese (Simplified)";
+    if (lang.startsWith("zh-tw") || lang.startsWith("zh-hk")) inferred = "Chinese (Traditional)";
+    else if (lang.startsWith("zh"))    inferred = "Chinese (Simplified)";
+    else if (lang.startsWith("ja"))    inferred = "Japanese";
+    else if (lang.startsWith("ko"))    inferred = "Korean";
+    else if (lang.startsWith("es"))    inferred = "Spanish";
+    else if (lang.startsWith("fr"))    inferred = "French";
+    else if (lang.startsWith("de"))    inferred = "German";
+    else if (lang.startsWith("pt"))    inferred = "Portuguese";
+    else if (lang.startsWith("ru"))    inferred = "Russian";
+    else if (lang.startsWith("ar"))    inferred = "Arabic";
+    else if (lang.startsWith("en"))    inferred = "English";
+    setBriefTargetLang(inferred);
   }, []);
 
+  // SSE-streaming translation. Each {"token":"..."} frame is appended
+  // to briefTranslated, so the user sees the translation render
+  // progressively into the markdown pane. Aborts cleanly on new
+  // requests or unmount. After completion (or error), briefTranslatedLang
+  // gets set so UI can detect "cached translation for current language".
   const requestBriefTranslation = useCallback(async () => {
     const source = (result?.brief || "").trim();
     if (!source) return;
@@ -1968,14 +2003,9 @@ export default function HomePage() {
     setBriefTransError("");
     setBriefTranslating(true);
     setBriefShowTrans(true);
+    const targetLang = briefTargetLang;
     try {
       const token = await getAuthToken();
-      // Non-streaming: the backend does the whole translation server-side
-      // and returns a single JSON blob with the finished markdown. The
-      // brief is ALWAYS fully streamed before this button is clickable
-      // (see !isStreamingBrief gate in the JSX), so a one-shot request
-      // makes more sense than SSE. No React + streaming-DOM conflict,
-      // no partial render, no flicker.
       const res = await fetch(buildApiUrl("/api/brief/translate"), {
         method: "POST",
         signal: ac.signal,
@@ -1985,16 +2015,46 @@ export default function HomePage() {
         },
         body: JSON.stringify({
           brief_text:      source,
-          target_language: _inferTargetLang(),
+          target_language: targetLang,
         }),
       });
-      if (!res.ok) {
-        const bodyText = await res.text();
+      if (!res.ok || !res.body) {
+        const bodyText = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
       }
-      const data = await res.json() as { translated?: string; target_language?: string };
-      if (!data?.translated) throw new Error("Empty translation response");
-      setBriefTranslated(data.translated);
+
+      // SSE parse loop: each message is separated by "\n\n" and carries
+      // a single `data: <json>` line (plus heartbeat comments we ignore).
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let sawError = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const raw of parts) {
+          const line = raw.split("\n").find(l => l.startsWith("data: "));
+          if (!line) continue;
+          const payload = line.slice(6).trim();
+          if (!payload) continue;
+          try {
+            const obj = JSON.parse(payload);
+            if (typeof obj.token === "string") {
+              setBriefTranslated(prev => prev + obj.token);
+            } else if (obj.error) {
+              setBriefTransError(String(obj.error));
+              sawError = true;
+            }
+            // obj.done — nothing to do, next read() returns done.
+          } catch { /* non-JSON data line — ignore (heartbeat etc.) */ }
+        }
+      }
+      if (!sawError) {
+        setBriefTranslatedLang(targetLang);
+      }
     } catch (e) {
       if ((e as { name?: string })?.name !== "AbortError") {
         setBriefTransError(e instanceof Error ? e.message : String(e));
@@ -2002,7 +2062,7 @@ export default function HomePage() {
     } finally {
       setBriefTranslating(false);
     }
-  }, [result?.brief, _inferTargetLang]);
+  }, [result?.brief, briefTargetLang]);
 
   // Reset translation state whenever a new brief arrives (new search).
   // Prevents a stale translation from leaking under the toggle for the
@@ -2011,6 +2071,7 @@ export default function HomePage() {
     setBriefTranslated("");
     setBriefShowTrans(false);
     setBriefTransError("");
+    setBriefTranslatedLang("");
     briefTransAbortRef.current?.abort();
   }, [result?.brief]);
 
@@ -3134,51 +3195,75 @@ ${html}
                     AND a brief is present — translating a half-written brief
                     would give half-translated output. */}
                 {(researchBriefMarkdown || isSubmitting) && (
-                  <div className="mb-3 flex items-center gap-2 text-base font-bold">
+                  <div className="mb-3 flex items-center gap-2 text-base font-bold flex-wrap">
                     <FileText size={16} />
                     <span>Research Brief</span>
                     {!isStreamingBrief && !!result?.brief && (
-                      <button
-                        onClick={() => {
-                          if (briefShowTrans && briefTranslated) {
-                            // Already translated, currently viewing it →
-                            // flip back to the original markdown.
-                            setBriefShowTrans(false);
-                            return;
-                          }
-                          if (briefTranslated && !briefTranslating) {
-                            // Have a cached translation, currently viewing
-                            // original → flip to translation without
-                            // re-requesting.
-                            setBriefShowTrans(true);
-                            return;
-                          }
-                          // No cached translation (or previous attempt
-                          // errored) → fire a non-streaming server-side
-                          // translation. Button flips to "Translating…"
-                          // until the response arrives.
-                          void requestBriefTranslation();
-                        }}
-                        disabled={briefTranslating}
-                        title={briefShowTrans ? "Show original brief" : "Translate this brief"}
-                        className="ml-2 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 disabled:opacity-60 disabled:cursor-wait"
-                        style={{
-                          borderColor:     "var(--ats-border-accent)",
-                          backgroundColor: "var(--ats-bg-accent-soft)",
-                          color:           "var(--ats-fg-accent)",
-                        }}
+                      <div className="ml-2 inline-flex items-stretch rounded-lg border overflow-hidden"
+                        style={{ borderColor: "var(--ats-border-accent)" }}
                       >
-                        <Globe size={12} />
-                        <span>
-                          {briefTranslating
-                            ? "Translating…"
-                            : briefShowTrans
-                              ? "Show Original"
-                              : briefTranslated
-                                ? "Show Translation"
-                                : "Translate"}
-                        </span>
-                      </button>
+                        {/* Language picker — changes the target locale.
+                            Changing it while a cached translation exists
+                            in a DIFFERENT language automatically flips the
+                            button back to "Translate" (see comparison
+                            below) so the user knows they need to refetch. */}
+                        <select
+                          value={briefTargetLang}
+                          onChange={(e) => setBriefTargetLang(e.target.value)}
+                          disabled={briefTranslating}
+                          title="Target language"
+                          className="bg-[var(--ats-bg-accent-soft)] text-xs font-semibold px-2 py-1 outline-none border-r disabled:opacity-60"
+                          style={{
+                            borderColor: "var(--ats-border-accent)",
+                            color:       "var(--ats-fg-accent)",
+                          }}
+                        >
+                          {BRIEF_LANG_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value} className="bg-slate-900 text-slate-100">
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => {
+                            // Three paths:
+                            //  a) Currently viewing translation in the
+                            //     selected language → flip back to original.
+                            //  b) Have a cached translation in the selected
+                            //     language but viewing original → flip to it.
+                            //  c) Otherwise → fire a fresh SSE request.
+                            const cachedMatches =
+                              !!briefTranslated && briefTranslatedLang === briefTargetLang;
+                            if (briefShowTrans && cachedMatches) {
+                              setBriefShowTrans(false);
+                              return;
+                            }
+                            if (cachedMatches && !briefTranslating) {
+                              setBriefShowTrans(true);
+                              return;
+                            }
+                            void requestBriefTranslation();
+                          }}
+                          disabled={briefTranslating}
+                          title={briefShowTrans ? "Show original brief" : "Translate this brief"}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 disabled:opacity-60 disabled:cursor-wait"
+                          style={{
+                            backgroundColor: "var(--ats-bg-accent-soft)",
+                            color:           "var(--ats-fg-accent)",
+                          }}
+                        >
+                          <Globe size={12} />
+                          <span>
+                            {briefTranslating
+                              ? "Translating…"
+                              : (briefShowTrans && briefTranslatedLang === briefTargetLang)
+                                ? "Show Original"
+                                : (briefTranslated && briefTranslatedLang === briefTargetLang)
+                                  ? "Show Translation"
+                                  : "Translate"}
+                          </span>
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
@@ -3219,7 +3304,7 @@ ${html}
                       <ReactMarkdown components={mdComponents}>
                         {briefShowTrans ? (briefTranslated || " ") : researchBriefMarkdown}
                       </ReactMarkdown>
-                      {isStreamingBrief && !briefShowTrans && (
+                      {((isStreamingBrief && !briefShowTrans) || (briefShowTrans && briefTranslating)) && (
                         <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
                       )}
                       {briefShowTrans && briefTransError && (

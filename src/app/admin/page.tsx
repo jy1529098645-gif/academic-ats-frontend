@@ -167,6 +167,12 @@ type SystemHealth = {
   workers:  number;
 };
 
+type TierLimitsResponse = {
+  defaults:  Record<string, Record<string, number | null>>;
+  effective: Record<string, Record<string, number | null>>;
+  overrides: Array<{ tier: string; feature: string; limit_value: number | null; updated_at: string | null; updated_by: string | null }>;
+};
+
 type FeedbackRow = {
   id:           number;
   created_at:   string;
@@ -324,6 +330,12 @@ export default function AdminPage() {
     return res.json();
   }, []);
 
+  const fetchTierLimits = useCallback(async (): Promise<TierLimitsResponse> => {
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/tier-limits"));
+    if (!res.ok) throw new Error(`tier-limits HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
   const overview     = usePolling(fetchOverview,     OVERVIEW_POLL_MS, enabled);
   const timeseries   = usePolling(fetchTimeseries,   DETAIL_POLL_MS,   enabled);
   const users        = usePolling(fetchUsers,        DETAIL_POLL_MS,   enabled);
@@ -333,6 +345,7 @@ export default function AdminPage() {
   const costAlerts   = usePolling(fetchCostAlerts,   DETAIL_POLL_MS,   enabled);
   const sysHealth    = usePolling(fetchSystemHealth, OVERVIEW_POLL_MS, enabled);
   const feedback     = usePolling(fetchFeedback,     30_000,           enabled);
+  const tierLimits   = usePolling(fetchTierLimits,   60_000,           enabled);
 
   const refreshAll = () => {
     overview.refresh();
@@ -344,6 +357,25 @@ export default function AdminPage() {
     costAlerts.refresh();
     sysHealth.refresh();
     feedback.refresh();
+    tierLimits.refresh();
+  };
+
+  // PATCH a single (tier, feature) quota override. `limit` of null resets
+  // that cell to the code default; -1 stores "unlimited". Refreshes the
+  // polling state immediately so the editor updates without waiting on
+  // the 60s tick.
+  const saveTierLimit = async (tier: string, feature: string, limit: number | null) => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/tier-limits"), {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tier, feature, limit_value: limit }),
+      });
+      if (!res.ok) throw new Error(`PATCH tier-limits HTTP ${res.status}`);
+      tierLimits.refresh();
+    } catch (e) {
+      console.error("[admin] saveTierLimit:", e);
+    }
   };
 
   // Resolve / unresolve a feedback row (dev action — flips the flag).
@@ -719,6 +751,30 @@ export default function AdminPage() {
           </div>
         </section>
 
+        {/* Tier limits editor — full width because it's a table */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                Subscription tier daily limits
+              </h3>
+              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                Edit per-tier daily quotas. Changes apply within ~30 s to all workers.
+                Leave blank to reset to the code default. Users already over their new
+                cap see the new number but KEEP their consumed count (no reset).
+              </p>
+            </div>
+            <button
+              onClick={() => tierLimits.refresh()}
+              className="text-[10px] inline-flex items-center gap-1"
+              style={{ color: "var(--ats-fg-muted)" }}
+            >
+              <RefreshCw size={10} /> Refresh
+            </button>
+          </div>
+          <TierLimitsEditor data={tierLimits.data} onSave={saveTierLimit} />
+        </section>
+
         {/* Feedback inbox — full width so long messages are readable */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
           <div className="flex items-center justify-between mb-3">
@@ -863,11 +919,15 @@ function AdminLoginScreen({ currentEmail }: { currentEmail: string | null }) {
           <button
             type="submit"
             disabled={busy || !email.trim() || !password}
-            className="w-full rounded-lg border px-4 py-2 text-sm font-semibold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full rounded-lg px-4 py-2 text-sm font-bold shadow-md hover:brightness-110 hover:shadow-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
             style={{
-              borderColor:     "var(--ats-border-accent)",
-              backgroundColor: "var(--ats-bg-accent-soft)",
-              color:           "var(--ats-fg-accent)",
+              // Solid accent-colored background so the enabled state is
+              // unambiguously "click me" rather than blending into the
+              // pale panel surface. Previous soft-tint version looked
+              // nearly identical to its disabled state on day-mint.
+              backgroundColor: "var(--ats-fg-accent)",
+              color:           "#ffffff",
+              border:          "1px solid var(--ats-fg-accent)",
             }}
           >
             {busy ? "Signing in…" : "Sign in to admin"}
@@ -1467,6 +1527,158 @@ function ErrorLogPanel({ rows }: { rows: AdminError[] }) {
     </div>
   );
 }
+
+// ── Tier limits editor ────────────────────────────────────────────────────
+// Two-dimensional editor: rows = tiers, columns = features. Each cell is
+// an <input type="number"> that starts with the effective value (code
+// default OR override) and saves on blur / Enter. An "Unlimited" button
+// per cell writes -1 → stored as NULL override = "explicitly unlimited".
+// A "Reset" button deletes the override row so the cell falls back to
+// the code default; visual indicator distinguishes overridden cells.
+
+function TierLimitsEditor({
+  data, onSave,
+}: {
+  data: TierLimitsResponse | null;
+  onSave: (tier: string, feature: string, limit: number | null) => void;
+}) {
+  if (!data) {
+    return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
+  }
+  const TIERS: string[]    = ["anonymous", "free", "basic", "scholar", "dev"];
+  const FEATURES: { key: string; label: string }[] = [
+    { key: "quick_search", label: "Quick Search" },
+    { key: "deep_search",  label: "Deep Search"  },
+    { key: "synthesis",    label: "Synthesis"    },
+    { key: "deep_read",    label: "Deep Read"    },
+  ];
+  // Helper: is this cell overridden (vs fallback to code default)?
+  const overrideMap: Record<string, Record<string, boolean>> = {};
+  for (const row of data.overrides) {
+    if (!overrideMap[row.tier]) overrideMap[row.tier] = {};
+    overrideMap[row.tier][row.feature] = true;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-[10px] uppercase tracking-wider border-b" style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}>
+            <th className="pb-2 pr-3 font-semibold">Tier</th>
+            {FEATURES.map(f => (
+              <th key={f.key} className="pb-2 pr-3 font-semibold">{f.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {TIERS.map(tier => (
+            <tr key={tier} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+              <td className="py-2 pr-3 align-top">
+                <span
+                  className="inline-flex text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide"
+                  style={{
+                    color:           TIER_COLORS[tier] ?? "#64748b",
+                    backgroundColor: (TIER_COLORS[tier] ?? "#64748b") + "22",
+                    borderColor:     (TIER_COLORS[tier] ?? "#64748b") + "55",
+                    borderWidth: 1, borderStyle: "solid",
+                  }}
+                >
+                  {tier}
+                </span>
+              </td>
+              {FEATURES.map(f => {
+                const val          = data.effective[tier]?.[f.key] ?? null;
+                const isOverridden = !!overrideMap[tier]?.[f.key];
+                return (
+                  <td key={f.key} className="py-2 pr-3 align-top">
+                    <TierLimitCell
+                      tier={tier}
+                      feature={f.key}
+                      value={val}
+                      isOverridden={isOverridden}
+                      onSave={onSave}
+                    />
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="text-[10px] mt-2" style={{ color: "var(--ats-fg-muted)" }}>
+        Empty = unlimited. <span style={{ color: "var(--ats-fg-accent)" }}>●</span> Overridden
+        (not the code default) · <span style={{ color: "var(--ats-fg-muted)" }}>○</span> Default value.
+      </p>
+    </div>
+  );
+}
+
+function TierLimitCell({
+  tier, feature, value, isOverridden, onSave,
+}: {
+  tier:         string;
+  feature:      string;
+  value:        number | null;
+  isOverridden: boolean;
+  onSave:       (tier: string, feature: string, limit: number | null) => void;
+}) {
+  const [draft, setDraft] = useState<string>(value === null ? "" : String(value));
+  // Keep input in sync when `value` refreshes from the 60 s poll.
+  useEffect(() => {
+    setDraft(value === null ? "" : String(value));
+  }, [value]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed === "") {
+      // Empty input → send -1 which the backend maps to NULL = unlimited.
+      onSave(tier, feature, -1);
+      return;
+    }
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0) {
+      // Invalid — reset display to the current committed value.
+      setDraft(value === null ? "" : String(value));
+      return;
+    }
+    onSave(tier, feature, Math.floor(n));
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <span
+        className="inline-block w-1.5 h-1.5 rounded-full"
+        title={isOverridden ? "Overridden via admin dashboard" : "Using code default"}
+        style={{ backgroundColor: isOverridden ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
+      />
+      <input
+        type="number"
+        min={0}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { if (draft !== (value === null ? "" : String(value))) commit(); }}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
+        placeholder="∞"
+        className="w-16 rounded border px-1.5 py-0.5 text-xs tabular-nums outline-none focus:border-[var(--ats-border-accent)]"
+        style={{
+          borderColor:     "var(--ats-border-subtle)",
+          backgroundColor: "var(--ats-bg-base)",
+          color:           "var(--ats-fg-primary)",
+        }}
+      />
+      {isOverridden && (
+        <button
+          onClick={() => onSave(tier, feature, null)}
+          title="Reset to code default"
+          className="text-[9px] underline"
+          style={{ color: "var(--ats-fg-muted)" }}
+        >
+          reset
+        </button>
+      )}
+    </div>
+  );
+}
+
 
 // ── Feedback inbox ────────────────────────────────────────────────────────
 
