@@ -1671,6 +1671,33 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Reload on account switch / sign-out ─────────────────────────────────
+  // When the live session's email actually CHANGES (not the first load,
+  // not a first-time sign-in), the cleanest way to avoid stale data
+  // leaking from one account into another is to full-reload the page.
+  // Transitions:
+  //   undefined → X  = initial mount        → no reload
+  //   null      → X  = first-time login     → no reload (no data to clear)
+  //   X         → Y  = account switch       → reload
+  //   X         → null = sign-out           → reload
+  const prevAuthEmailRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const prev    = prevAuthEmailRef.current;
+    const current = authUser?.email ?? null;
+    if (prev === undefined) {
+      prevAuthEmailRef.current = current;
+      return;
+    }
+    if (prev === current) return;
+    prevAuthEmailRef.current = current;
+    // Only reload when there WAS a previous non-null user — otherwise
+    // we'd reload right after a first-time sign-in, which is annoying
+    // and pointless (nothing to clear).
+    if (prev !== null) {
+      try { window.location.reload(); } catch { /* ignore — test env */ }
+    }
+  }, [authUser?.email]);
+
   // ── Per-user localStorage key helpers ────────────────────────────────────
   const _hKey = (email: string) => `ats-search-history::${email}`;
   const _fKey = (email: string) => `ats-history-favorites::${email}`;
@@ -2995,6 +3022,59 @@ ${html}
           <span className="click-hint-blink pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 text-xs font-medium tracking-wide text-[var(--ats-fg-accent)] select-none whitespace-nowrap">
             Click anywhere to begin
           </span>
+        </div>
+      )}
+
+      {/* ── Login-required gate ────────────────────────────────────────────
+          Once auth is checked and the user is NOT signed in, a blocking
+          overlay covers the whole app. Pointer events on the backdrop
+          prevent any feature from being clicked while unauthenticated;
+          the only interactive element is the "Continue with Google"
+          button in the card. Disappears immediately when authUser
+          becomes non-null (via onAuthStateChange). */}
+      {!authLoading && !authUser && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center p-6 backdrop-blur-sm"
+          style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border shadow-2xl p-6 text-center"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-panel)",
+            }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/Cats_01.png" alt="AcademiCats" className="h-16 w-16 mx-auto mb-3 select-none pointer-events-none" draggable={false} />
+            <h2 className="text-lg font-bold mb-1" style={{ color: "var(--ats-fg-primary)" }}>
+              Sign in to continue
+            </h2>
+            <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--ats-fg-secondary)" }}>
+              AcademiCats requires a free account to keep your search history,
+              Lab outputs, and subscription in sync across devices.
+            </p>
+            <button
+              onClick={handleGoogleLogin}
+              className="w-full flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:brightness-105 transition-all"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-base)",
+                color:           "var(--ats-fg-primary)",
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
+                <path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/>
+                <path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/>
+                <path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/>
+                <path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/>
+              </svg>
+              Continue with Google
+            </button>
+            <p className="mt-3 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+              We never sell your data. See{" "}
+              <button onClick={() => setUserPanel("legal")} className="underline hover:opacity-80">Terms & Notices</button>.
+            </p>
+          </div>
         </div>
       )}
 
