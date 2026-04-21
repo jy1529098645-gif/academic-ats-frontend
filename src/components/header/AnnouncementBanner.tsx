@@ -87,11 +87,17 @@ function AnnouncementRotatorCard({
   }
 
   const author = formatAuthor(current);
+  // Google Translate IS allowed here. Previous revisions had translate="no"
+  // to protect volatile DOM from Google's text-node rewrite, but the
+  // rotator remounts on every cycle (key={current.id}) — each new
+  // message is a fresh DOM subtree, so there's no React-owned node for
+  // Google to collide with. Users on a translated page will see their
+  // message content translated (including the "Nameless Cat" byline),
+  // which is the behaviour they asked for.
   return (
     <div
       key={current.id}
-      translate="no"
-      className="notranslate ticker-fade-in flex items-center gap-2 min-w-0 w-full"
+      className="ticker-fade-in flex items-center gap-2 min-w-0 w-full"
       aria-live={paused ? "off" : "polite"}
     >
       {author && (

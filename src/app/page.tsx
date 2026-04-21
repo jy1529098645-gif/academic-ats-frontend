@@ -1011,6 +1011,46 @@ export default function HomePage() {
   const [labTargetPages,    setLabTargetPages]    = useState(2);
   const [labGenerating, setLabGenerating] = useState(false);
   const [labResult,     setLabResult]     = useState("");
+
+  // ── Lab multi-generation: tabbed result history ──────────────────────────
+  // Each completed Generate run is archived in `labRuns` (newest first
+  // order maintained on append at the END so "Run 1" = first-ever).
+  // The user can tab-switch between past runs to compare outputs; the
+  // viewed-run's full context (article text + agent log + reviewer
+  // notes) is preserved so switching feels like a time-machine rather
+  // than a partial revert.
+  //
+  // `labViewingId` points to the run currently being displayed; null
+  // means "look at the live working buffer" (labResult / labAgentLog /
+  // labReviewerNotes), which is what streaming writes into.
+  //
+  // Auto-snapshot runs when labGenerating transitions from true → false
+  // AND labResult is non-empty, keyed on `labLastSavedRef` so the same
+  // run doesn't get archived twice.
+  type LabRun = {
+    id: string;
+    text: string;
+    agentLog: typeof labAgentLog;
+    reviewerNotes: null | {
+      missing_inputs?: string[];
+      citation_gaps?: string[];
+      data_suggestions?: string[];
+      argument_suggestions?: string[];
+      supporting_points?: string[];
+      completeness?: { missing?: string[]; thin?: string[] };
+      paper_usage?: {
+        used?:       Array<{ index: number; note?: string }>;
+        unused?:     Array<{ index: number; reason?: string }>;
+        unreadable?: Array<{ index: number; reason?: string }>;
+        total?:      number;
+      };
+    };
+    outputType: string;
+    createdAt: number;
+  };
+  const [labRuns,       setLabRuns]       = useState<LabRun[]>([]);
+  const [labViewingId,  setLabViewingId]  = useState<string | null>(null);
+  const labLastSavedRef = useRef<string>("");
   // Ephemeral "Copied" flag — flips true on successful Copy-to-clipboard and
   // auto-resets after 1.5 s; used only by the Generated Text header button.
   const [labCopied,     setLabCopied]     = useState(false);
@@ -1033,6 +1073,23 @@ export default function HomePage() {
   const [labAgentLog,   setLabAgentLog]   = useState<{name: string; msg: string; done: boolean; error: boolean; revision: boolean}[]>([]);
   const [labDownloadFormat, setLabDownloadFormat] = useState<"pdf"|"html"|"txt"|"md">("pdf");
   const [briefDownloadFmt, setBriefDownloadFmt]   = useState<"pdf"|"html"|"txt"|"md">("pdf");
+
+  // ── Brief translation (SSE) ──────────────────────────────────────────────
+  // Google Translate can't safely translate the streaming brief (DOM
+  // rewrite collides with React's streaming commits). This state backs
+  // an in-app translate button that asks the backend to stream a
+  // translation via /api/brief/translate — the user sees tokens appear
+  // progressively, and can toggle back to the original at any time.
+  //
+  // The `requestBriefTranslation` callback itself is defined further
+  // down in the component, after `result` has been derived from `job`
+  // (order of declarations matters — a useCallback closing over `result`
+  // that's mounted above its declaration would error under TS).
+  const [briefTranslated,  setBriefTranslated]  = useState("");
+  const [briefTranslating, setBriefTranslating] = useState(false);
+  const [briefShowTrans,   setBriefShowTrans]   = useState(false);
+  const [briefTransError,  setBriefTransError]  = useState("");
+  const briefTransAbortRef = useRef<AbortController | null>(null);
   const [labAgentLogOpen,   setLabAgentLogOpen]   = useState(true);
   const [labReviewerNotes,  setLabReviewerNotes]  = useState<{
     missing_inputs?: string[];
@@ -1717,6 +1774,96 @@ export default function HomePage() {
     return Math.min(99, progress);
   }, [fastMode, isSubmitting, progress, streamPapers, job, retrievalCount, candidateLimit]);
   const result = job?.result || null;
+
+  // ── Brief translation logic (continued from the state declarations above) ──
+  // Defined here (after `result` is derived from `job`) so the
+  // useCallback below can safely close over `result?.brief`.
+  const _inferTargetLang = useCallback((): string => {
+    if (typeof navigator === "undefined") return "Chinese (Simplified)";
+    const lang = (navigator.language || "").toLowerCase();
+    if (lang.startsWith("zh-tw") || lang.startsWith("zh-hk")) return "Chinese (Traditional)";
+    if (lang.startsWith("zh"))    return "Chinese (Simplified)";
+    if (lang.startsWith("ja"))    return "Japanese";
+    if (lang.startsWith("ko"))    return "Korean";
+    if (lang.startsWith("es"))    return "Spanish";
+    if (lang.startsWith("fr"))    return "French";
+    if (lang.startsWith("de"))    return "German";
+    if (lang.startsWith("pt"))    return "Portuguese";
+    if (lang.startsWith("ru"))    return "Russian";
+    if (lang.startsWith("ar"))    return "Arabic";
+    return "Chinese (Simplified)";
+  }, []);
+
+  const requestBriefTranslation = useCallback(async () => {
+    const source = (result?.brief || "").trim();
+    if (!source) return;
+    briefTransAbortRef.current?.abort();
+    const ac = new AbortController();
+    briefTransAbortRef.current = ac;
+    setBriefTranslated("");
+    setBriefTransError("");
+    setBriefTranslating(true);
+    setBriefShowTrans(true);
+    try {
+      const token = await getAuthToken();
+      const res = await fetch(buildApiUrl("/api/brief/translate"), {
+        method: "POST",
+        signal: ac.signal,
+        headers: {
+          "Content-Type":  "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          brief_text:      source,
+          target_language: _inferTargetLang(),
+        }),
+      });
+      if (!res.ok || !res.body) throw new Error(`translate HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      // SSE parse loop: each message is separated by "\n\n" and
+      // carries a single `data: <json>` line. Accumulate token frames
+      // into briefTranslated; abort cleanly on `done` or `error`.
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const raw of parts) {
+          const line = raw.split("\n").find(l => l.startsWith("data: "));
+          if (!line) continue;
+          const payload = line.slice(6).trim();
+          if (!payload) continue;
+          try {
+            const obj = JSON.parse(payload);
+            if (typeof obj.token === "string") {
+              setBriefTranslated(prev => prev + obj.token);
+            } else if (obj.error) {
+              setBriefTransError(String(obj.error));
+            }
+          } catch { /* stray non-JSON data — ignore */ }
+        }
+      }
+    } catch (e) {
+      if ((e as { name?: string })?.name !== "AbortError") {
+        setBriefTransError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBriefTranslating(false);
+    }
+  }, [result?.brief, _inferTargetLang]);
+
+  // Reset translation state whenever a new brief arrives (new search).
+  // Prevents a stale translation from leaking under the toggle for the
+  // next query's brief.
+  useEffect(() => {
+    setBriefTranslated("");
+    setBriefShowTrans(false);
+    setBriefTransError("");
+    briefTransAbortRef.current?.abort();
+  }, [result?.brief]);
 
   // Run-time label: ticks while isSubmitting, freezes when job finishes
   const runTimeLabel = (() => {
@@ -2451,6 +2598,13 @@ ${html}
     setLabError("");
     setLabAgentLog([]);
     setLabReviewerNotes(null);
+    // Reset the "already snapshotted" ref so the effect-driven archiver
+    // fires again when this new run completes — even if the new output
+    // text happens to equal a previous run's text verbatim.
+    labLastSavedRef.current = "";
+    // Any active "viewing past run" mode is cleared so the user sees
+    // the new run streaming into the live buffer.
+    setLabViewingId(null);
     try {
       const res = await fetchWithApiFallback("/api/forge/synthesize", {
         method: "POST",
@@ -2545,6 +2699,41 @@ ${html}
       void usage.refresh();
     }
   }
+
+  // ── Lab auto-snapshot: archive completed runs into labRuns ──────────────
+  // Fires when generation transitions from in-flight (labGenerating=true)
+  // to idle (labGenerating=false) AND the run produced non-empty output.
+  // `labLastSavedRef` guards against double-archiving on re-renders.
+  useEffect(() => {
+    if (labGenerating) return;               // still streaming — wait
+    const text = labResult.trim();
+    if (!text) return;                       // empty output (stopped before any text)
+    if (text === labLastSavedRef.current) return;  // already archived
+    labLastSavedRef.current = text;
+    const run: LabRun = {
+      id:            `lab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      text:          labResult,
+      agentLog:      labAgentLog,
+      reviewerNotes: labReviewerNotes,
+      outputType:    labOutputType,
+      createdAt:     Date.now(),
+    };
+    setLabRuns(prev => [...prev, run]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labGenerating, labResult, labAgentLog, labReviewerNotes, labOutputType]);
+
+  // When the user tabs to a past run, we DON'T overwrite the live
+  // labResult/labAgentLog/labReviewerNotes — we just display the past
+  // run's snapshotted copies in the UI instead. The rest of the lab
+  // panel reads from `displayedLab*` which alias to either the past
+  // snapshot or the live state depending on labViewingId.
+  const _viewedLabRun: LabRun | null = useMemo(
+    () => labViewingId ? (labRuns.find(r => r.id === labViewingId) ?? null) : null,
+    [labViewingId, labRuns],
+  );
+  const displayedLabResult        = _viewedLabRun ? _viewedLabRun.text          : labResult;
+  const displayedLabAgentLog      = _viewedLabRun ? _viewedLabRun.agentLog      : labAgentLog;
+  const displayedLabReviewerNotes = _viewedLabRun ? _viewedLabRun.reviewerNotes : labReviewerNotes;
 
   async function runDeepRead(paper: Paper, paperKey: string) {
     if (!ensureQuota("deep_read")) return;
@@ -2817,7 +3006,9 @@ ${html}
                 {researchBriefMarkdown ? (
                   <>
                     {/* translate="no" — Google Translate rewrites text nodes, which collides
-                        with the streamed markdown diff and crashes the page mid-generation. */}
+                        with the streamed markdown diff and crashes the page mid-generation.
+                        For in-app translation (the button below), we swap the rendered
+                        markdown to the backend-streamed translation instead. */}
                     {/* Body text at 0.78rem — one step below the previous
                         0.85rem — with tighter line-height/margins so the
                         brief reads more densely without the headings
@@ -2827,9 +3018,14 @@ ${html}
                       prose-strong:text-slate-100 prose-strong:font-semibold
                       prose-li:text-[0.78rem] prose-li:leading-[1.4] prose-li:text-slate-300 prose-li:my-0
                       prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4">
-                      <ReactMarkdown components={mdComponents}>{researchBriefMarkdown}</ReactMarkdown>
-                      {isStreamingBrief && (
+                      <ReactMarkdown components={mdComponents}>
+                        {briefShowTrans ? (briefTranslated || " ") : researchBriefMarkdown}
+                      </ReactMarkdown>
+                      {(isStreamingBrief || (briefShowTrans && briefTranslating)) && (
                         <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
+                      )}
+                      {briefShowTrans && briefTransError && (
+                        <p className="mt-2 text-xs text-red-400">Translation failed: {briefTransError}</p>
                       )}
                     </div>
                     {!isStreamingBrief && result?.brief && (
@@ -2838,6 +3034,49 @@ ${html}
                           onClick={() => void navigator.clipboard.writeText(result?.brief || "")}
                           className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
                         ><ClipboardList size={13} className="shrink-0" /><span className="truncate">Copy Brief</span></button>
+                        {/* Translate toggle — themed to match the Copy/Download
+                            chrome (border + hover-accent colour tokens). First
+                            click fires an SSE translation; subsequent clicks
+                            flip between Original and Translated views without
+                            re-requesting. "Show Original" when showing the
+                            translation, "Translate" / "Retry" otherwise. */}
+                        <button
+                          onClick={() => {
+                            if (briefShowTrans && briefTranslated) {
+                              // Already have a translation — flip back to original.
+                              setBriefShowTrans(false);
+                              return;
+                            }
+                            if (briefTranslated && !briefTranslating) {
+                              // Cached translation exists but we're showing
+                              // the original — just flip the toggle.
+                              setBriefShowTrans(true);
+                              return;
+                            }
+                            // No cached translation yet (or previous attempt
+                            // errored) — fire a fresh SSE request.
+                            void requestBriefTranslation();
+                          }}
+                          disabled={briefTranslating}
+                          title={briefShowTrans ? "Show original brief" : "Translate this brief"}
+                          className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border px-3 py-2 text-sm font-semibold transition-all disabled:opacity-60"
+                          style={{
+                            borderColor: "var(--ats-border-accent)",
+                            backgroundColor: "var(--ats-bg-accent-soft)",
+                            color:       "var(--ats-fg-accent)",
+                          }}
+                        >
+                          <Globe size={13} className="shrink-0" />
+                          <span className="truncate">
+                            {briefTranslating
+                              ? "Translating…"
+                              : briefShowTrans
+                                ? "Show Original"
+                                : briefTranslated
+                                  ? "Show Translation"
+                                  : "Translate"}
+                          </span>
+                        </button>
                         <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
                           <select
                             value={briefDownloadFmt}
@@ -2955,7 +3194,7 @@ ${html}
 
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
             <div className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
-              <div ref={placeholderWrapperRef} translate="no" className="notranslate relative" style={{ containerType: "inline-size" }}>
+              <div ref={placeholderWrapperRef} className="relative" style={{ containerType: "inline-size" }}>
                 <textarea
                   ref={taRef}
                   value={query}
@@ -3706,6 +3945,7 @@ ${html}
                     labCoreArg.trim().length > 0 ||
                     labPoints.some(p => p.trim().length > 0) ||
                     !!labResult ||
+                    labRuns.length > 0 ||
                     labGenerating;
                   const shouldGate = displayedPapers.length === 0 && !hasLabState;
                   return shouldGate;
@@ -4043,6 +4283,59 @@ ${html}
                     )}
                   </div>
 
+                  {/* ── Run-history tabs ────────────────────────────────────
+                      Only shown once the user has ≥ 2 archived runs. Each
+                      button switches the displayed article + agent log +
+                      reviewer notes to that past run; "Latest" returns to
+                      the live working buffer (useful after Regenerate).
+                      Tabs are disabled mid-generation so a switch doesn't
+                      interrupt the streaming writer's target. */}
+                  {labRuns.length >= 2 && (
+                    <div
+                      className="flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-700/50 bg-slate-900/40 px-2 py-1.5"
+                      role="tablist"
+                      aria-label="Past Lab generations"
+                    >
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 pl-1 pr-1">Runs:</span>
+                      {labRuns.map((run, i) => {
+                        const isActive = labViewingId === run.id;
+                        return (
+                          <button
+                            key={run.id}
+                            role="tab"
+                            aria-selected={isActive}
+                            disabled={labGenerating}
+                            onClick={() => setLabViewingId(run.id)}
+                            title={`Run ${i + 1} — ${new Date(run.createdAt).toLocaleTimeString()}`}
+                            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                              isActive
+                                ? "border-violet-500/60 bg-violet-500/15 text-violet-200"
+                                : "border-slate-700/60 bg-slate-900/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"
+                            }`}
+                          >
+                            Run {i + 1}
+                          </button>
+                        );
+                      })}
+                      {/* "Latest" pill — returns to the live buffer so the
+                          user can see a fresh Regenerate as it streams. */}
+                      <button
+                        role="tab"
+                        aria-selected={labViewingId === null}
+                        disabled={labGenerating}
+                        onClick={() => setLabViewingId(null)}
+                        title="Show the live/working buffer"
+                        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                          labViewingId === null
+                            ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300"
+                            : "border-slate-700/60 bg-slate-900/40 text-slate-400 hover:border-slate-600 hover:text-slate-200"
+                        }`}
+                      >
+                        Latest
+                      </button>
+                    </div>
+                  )}
+
                   {/* Writing model selector (collapsible).
                       Displays user-facing aliases ("Swift Writer" / "Deep
                       Writer" / "Scholar Writer"); the backend still receives
@@ -4092,8 +4385,9 @@ ${html}
                     );
                   })()}
 
-                  {/* Agent activity panel */}
-                  {(labGenerating || labAgentLog.length > 0) && (
+                  {/* Agent activity panel — reads displayedLabAgentLog so
+                      past-run tabs also show the original agent trace. */}
+                  {(labGenerating || displayedLabAgentLog.length > 0) && (
                     <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-3">
                       <div className="flex items-center gap-2 mb-1">
                         <button
@@ -4103,21 +4397,21 @@ ${html}
                           {labAgentLogOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                           <Bot size={12} />
                           <span>Agent Activity</span>
-                          {!labAgentLogOpen && labAgentLog.length > 0 && (
-                            <span className="text-slate-500 font-normal">({labAgentLog.length} agents)</span>
+                          {!labAgentLogOpen && displayedLabAgentLog.length > 0 && (
+                            <span className="text-slate-500 font-normal">({displayedLabAgentLog.length} agents)</span>
                           )}
                         </button>
-                        {labGenerating && (
+                        {labGenerating && !labViewingId && (
                           <span className="text-xs text-slate-500 animate-pulse ml-1">{labStatus.replace(/^\[[^\]]+\]\s*/, "") || "Running…"}</span>
                         )}
                       </div>
                       {labAgentLogOpen && (
                       <div>
-                      {labAgentLog.length === 0 && labGenerating && (
+                      {displayedLabAgentLog.length === 0 && labGenerating && !labViewingId && (
                         <div className="text-xs text-slate-600 animate-pulse">Initialising…</div>
                       )}
                       <div className="space-y-1 mt-1.5">
-                        {labAgentLog.map(entry => {
+                        {displayedLabAgentLog.map(entry => {
                           const isWriter   = entry.name.startsWith("Scholar·");
                           const isReviewer = entry.name.startsWith("Review·");
                           const isEditor   = entry.name === "Editor";
@@ -4164,7 +4458,7 @@ ${html}
                   )}
 
                   {/* Result */}
-                  {labResult && (() => {
+                  {displayedLabResult && (() => {
                     // Shared resolvers — used by every filename + PDF title in this block.
                     const OUTPUT_LABELS_SLUG: Record<string,string> = {
                       literature_review:     "Literature_Review",
@@ -4202,7 +4496,7 @@ ${html}
                           <button
                             onClick={async () => {
                               try {
-                                await navigator.clipboard.writeText(labResult);
+                                await navigator.clipboard.writeText(displayedLabResult);
                                 setLabCopied(true);
                                 window.setTimeout(() => setLabCopied(false), 1500);
                               } catch { /* clipboard may be blocked — silently fail */ }
@@ -4214,8 +4508,8 @@ ${html}
                         </div>
                       </div>
                       <div translate="no" className="notranslate rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
-                        {labResult}
-                        {labGenerating && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
+                        {displayedLabResult}
+                        {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
 
                       {/* ── Consolidated download footer ─────────────────────
@@ -4263,7 +4557,7 @@ ${html}
                                   try {
                                     await triggerDownload(
                                       buildApiUrl("/api/text/to-pdf"),
-                                      { text: labResult, title: outputSlug.replace(/_/g, " ") },
+                                      { text: displayedLabResult, title: outputSlug.replace(/_/g, " ") },
                                       `${filename}.pdf`,
                                       "lab-download-pdf",
                                       ac.signal,
@@ -4275,7 +4569,7 @@ ${html}
                                 } else {
                                   // Text formats are synchronous client-side — no
                                   // pause needed because there's nothing to wait on.
-                                  downloadTextAs(labResult, filename, labDownloadFormat as "html"|"txt"|"md");
+                                  downloadTextAs(displayedLabResult, filename, labDownloadFormat as "html"|"txt"|"md");
                                 }
                               }}
                               className={`ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${labDownloading ? "border-red-500/40 bg-red-500/10 text-red-300 animate-pulse" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60"}`}
@@ -4325,7 +4619,7 @@ ${html}
                                   const res = await fetchWithApiFallback("/api/text/translate-export", {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ text: labResult, target_language: labTranslateLang, title: outputTitle, file_format: labTranslateFormat }),
+                                    body: JSON.stringify({ text: displayedLabResult, target_language: labTranslateLang, title: outputTitle, file_format: labTranslateFormat }),
                                     signal: controller.signal,
                                   }, true);
                                   if (!res.ok) throw new Error(`Translate failed: ${res.status}`);
@@ -4358,8 +4652,13 @@ ${html}
                     );
                   })()}
 
-                  {/* Reviewer Notes — collapsible improvement feedback */}
-                  {labReviewerNotes && (
+                  {/* Reviewer Notes — collapsible improvement feedback.
+                      Reads from displayedLabReviewerNotes via a local alias
+                      so past-run tabs also surface their own notes; the
+                      existing sub-expressions below stay identical. */}
+                  {displayedLabReviewerNotes && (() => {
+                    const labReviewerNotes = displayedLabReviewerNotes;
+                    return (
                     <div className="rounded-xl border border-amber-500/25 bg-amber-500/5">
                       <button
                         onClick={() => setLabNotesOpen(o => !o)}
@@ -4476,7 +4775,8 @@ ${html}
                         </div>
                       )}
                     </div>
-                  )}
+                    );
+                  })()}
 
                 </div>
                 )}
