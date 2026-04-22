@@ -20,6 +20,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ScrollText, AlertCircle, Check, X } from "lucide-react";
 import { buildApiUrl, fetchWithAuth } from "@/lib/api";
 
 type TOSStatus = {
@@ -36,11 +37,16 @@ type TOSStatus = {
 // exactly what they agreed to.
 const TOS_VERSION = "1.0";
 
+// Product version — shown in the TOS header + Section 1 so users know
+// exactly which build of the product they're agreeing to. Kept in sync
+// with the tagline in page.tsx; bump both when you bump the app.
+const APP_VERSION = "v1.7.0-Alpha";
+
 const TOS_SECTIONS: Array<{ title: string; body: string }> = [
   {
     title: "1. What AcademiCats is",
     body:
-      "AcademiCats is an AI-assisted academic research assistant. It helps you discover relevant papers from open-access databases (Semantic Scholar, OpenAlex, Crossref, arXiv, PubMed, and others), synthesises those papers into research briefs, and offers deep-read / translation tools for individual PDFs. The service is provided as-is during the Alpha testing period; features and limits may change without notice.",
+      `AcademiCats is an AI-assisted academic research assistant (currently ${APP_VERSION}). It helps you discover relevant papers from open-access databases (Semantic Scholar, OpenAlex, Crossref, arXiv, PubMed, and others), synthesises those papers into research briefs, and offers deep-read / translation tools for individual PDFs. The service is provided as-is during the Alpha testing period; features and limits may change without notice.`,
   },
   {
     title: "2. What data we collect and why",
@@ -139,21 +145,42 @@ export default function TermsOfServiceGate({ children }: { children: React.React
     <>
       {children}
       <div
-        className="fixed inset-0 z-[9500] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 z-[9500] flex items-center justify-center p-4 backdrop-blur-sm"
+        style={{ backgroundColor: "rgba(0, 0, 0, 0.55)" }}
         role="dialog"
         aria-modal="true"
         aria-labelledby="tos-title"
       >
-        <div className="w-full max-w-2xl max-h-[90vh] flex flex-col rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl">
+        {/* Modal card — every surface/text/border uses --ats-* tokens so
+            the TOS matches the user's active theme (Morning Mint /
+            Warm Paper / Daylight Blue / Night etc). Previous version
+            was hardcoded dark-slate which clashed with day themes. */}
+        <div
+          className="w-full max-w-2xl max-h-[90vh] flex flex-col rounded-2xl border shadow-2xl"
+          style={{
+            backgroundColor: "var(--ats-bg-panel)",
+            borderColor:     "var(--ats-border-subtle)",
+          }}
+        >
           {/* Header */}
-          <div className="px-6 py-4 border-b border-slate-800">
+          <div
+            className="px-6 py-4 border-b"
+            style={{ borderColor: "var(--ats-border-subtle)" }}
+          >
             <div className="flex items-center gap-2 mb-1">
-              <span aria-hidden className="text-xl">📜</span>
-              <h2 id="tos-title" className="text-lg font-bold text-slate-100">
+              {/* Lucide ScrollText icon in accent colour, replacing the
+                  📜 emoji which rendered in multi-colour and clashed
+                  with every theme palette. */}
+              <ScrollText size={18} style={{ color: "var(--ats-fg-accent)" }} />
+              <h2
+                id="tos-title"
+                className="text-lg font-bold"
+                style={{ color: "var(--ats-fg-primary)" }}
+              >
                 {isReAcceptance ? "Terms of Service updated" : "Welcome — a quick agreement"}
               </h2>
             </div>
-            <p className="text-[11px] text-slate-400">
+            <p className="text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
               {isReAcceptance
                 ? `We've updated our terms since you last accepted (v${status.accepted_version} → v${status.current_version}). Please review the changes and agree to continue using AcademiCats.`
                 : `Before you start, please read and agree to our Terms of Service. Version ${status.current_version} · takes about 90 seconds.`}
@@ -164,57 +191,123 @@ export default function TermsOfServiceGate({ children }: { children: React.React
           <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4">
             {TOS_SECTIONS.map(s => (
               <section key={s.title}>
-                <h3 className="text-sm font-bold text-slate-200 mb-1">{s.title}</h3>
-                <p className="text-xs text-slate-300 leading-relaxed">{s.body}</p>
+                <h3
+                  className="text-sm font-bold mb-1"
+                  style={{ color: "var(--ats-fg-primary)" }}
+                >
+                  {s.title}
+                </h3>
+                <p
+                  className="text-xs leading-relaxed"
+                  style={{ color: "var(--ats-fg-secondary)" }}
+                >
+                  {s.body}
+                </p>
               </section>
             ))}
-            <p className="text-[10px] text-slate-500 italic pt-2 border-t border-slate-800">
-              By clicking <span className="font-semibold">Accept and continue</span> below, you confirm you are at least 13 years old and agree to these terms. If you do not agree, please close this tab — we will not record any further activity for your account.
+            <p
+              className="text-[10px] italic pt-2 border-t"
+              style={{
+                color:       "var(--ats-fg-muted)",
+                borderColor: "var(--ats-border-subtle)",
+              }}
+            >
+              By clicking{" "}
+              <span className="font-semibold" style={{ color: "var(--ats-fg-accent)" }}>
+                Accept and continue
+              </span>{" "}
+              below, you confirm you are at least 13 years old and agree to these terms. If you do not agree, please close this tab — we will not record any further activity for your account.
             </p>
           </div>
 
           {/* Footer with checkbox + CTAs */}
-          <div className="px-6 py-4 border-t border-slate-800 space-y-3">
+          <div
+            className="px-6 py-4 border-t space-y-3"
+            style={{ borderColor: "var(--ats-border-subtle)" }}
+          >
             <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={agreed}
-                onChange={(e) => setAgreed(e.target.checked)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-blue-500"
-              />
-              <span className="text-xs text-slate-200 leading-snug">
+              {/* Styled checkbox — uses accent token so the tick colour
+                  follows the active theme. Hidden native box + custom
+                  rendered square so we can paint it with var(--ats-*). */}
+              <span
+                className="relative mt-0.5 h-4 w-4 shrink-0 inline-flex items-center justify-center rounded border"
+                style={{
+                  backgroundColor: agreed ? "var(--ats-bg-accent-soft)" : "transparent",
+                  borderColor:     agreed ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                  transition:      "all 120ms ease",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={agreed}
+                  onChange={(e) => setAgreed(e.target.checked)}
+                  className="absolute inset-0 opacity-0 cursor-pointer"
+                  aria-label="Agree to terms"
+                />
+                {agreed && <Check size={12} style={{ color: "var(--ats-fg-accent)" }} strokeWidth={3} />}
+              </span>
+              <span
+                className="text-xs leading-snug"
+                style={{ color: "var(--ats-fg-secondary)" }}
+              >
                 I have read and agree to the Terms of Service (version {status.current_version}) and the data practices described above.
               </span>
             </label>
             {error && (
-              <p className="text-[11px] text-rose-400">
+              <p
+                className="text-[11px] inline-flex items-center gap-1.5 rounded-md px-2 py-1 border"
+                style={{
+                  color:           "#ef4444",
+                  backgroundColor: "rgba(239, 68, 68, 0.08)",
+                  borderColor:     "rgba(239, 68, 68, 0.35)",
+                }}
+              >
+                <AlertCircle size={12} />
                 {error}. Please check your connection and try again.
               </p>
             )}
-            <div className="flex items-center justify-end gap-2">
-              <a
-                href="/login"
-                className="text-[11px] text-slate-500 hover:text-slate-300 transition-colors"
-                onClick={(e) => {
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
                   // Sign out path — if the user doesn't agree, let them
                   // leave cleanly. We don't record anything server-side
                   // about the decline itself.
-                  e.preventDefault();
                   if (confirm("Exit without agreeing? You'll be signed out.")) {
                     try { window.location.href = "/login"; } catch { /* ignore */ }
                   }
                 }}
+                className="inline-flex items-center gap-1 text-[11px] transition-colors hover:brightness-125"
+                style={{ color: "var(--ats-fg-muted)" }}
               >
+                <X size={12} />
                 I don&apos;t agree
-              </a>
+              </button>
               <button
                 type="button"
                 onClick={() => void handleAccept()}
                 disabled={!agreed || submitting}
-                className="rounded-lg px-4 py-2 text-sm font-bold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ backgroundColor: agreed ? "#3b82f6" : "#475569" }}
+                className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-bold transition-all border disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-110"
+                style={{
+                  backgroundColor: agreed ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                  color:           agreed ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                  borderColor:     agreed ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                }}
               >
-                {submitting ? "Saving…" : "Accept and continue"}
+                {submitting ? (
+                  <>
+                    <span
+                      className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"
+                      aria-hidden
+                    />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <Check size={14} strokeWidth={3} />
+                    Accept and continue
+                  </>
+                )}
               </button>
             </div>
           </div>

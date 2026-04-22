@@ -99,6 +99,24 @@ body {
   .megaphone-breath { box-shadow: none; }
 }
 
+/* Query understanding progress shimmer — always-moving gradient sweep
+ * that plays OVER a determinate progress bar. Purpose: the underlying
+ * percentage only advances when the backend emits a new status event
+ * (often 5-15s between), during which the bar sits at 15% / 45% / 75%
+ * unchanged. Users reported thinking the UI was stuck. This overlay
+ * gradient keeps moving regardless of the underlying width, so the
+ * stationary phase still reads as "actively working" rather than
+ * "frozen".
+ *
+ * Drives the overlay in page.tsx's `{isUnderstanding && ...}` block.
+ * Works with any background colour — the gradient's transparent endpoints
+ * blend naturally into the panel the bar sits in.
+ */
+@keyframes query-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
 /* Danmu (bullet comment) flow animation.
  *
  * Historical bug: the previous keyframe used `120vw` / `-120vw`, which is

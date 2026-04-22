@@ -3426,7 +3426,7 @@ ${html}
             {/* Tagline is sized so the whole line (descriptor + version)
                 fits within the wordmark + mascot row width above — no
                 overflow past the mascot's right edge. */}
-            <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.6.0-Alpha</span></p>
+            <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.7.0-Alpha</span></p>
           </div>
           {/* Announcement banner – fills remaining width; extra left
               padding gives the mascot image visual breathing room. The
@@ -4037,16 +4037,61 @@ ${html}
               </div>
             )}
 
-            {/* Understanding progress bar */}
+            {/* Understanding progress bar — with live status text + shimmer.
+                Previous version was just a static-width bar; users reported
+                thinking the UI was stuck when the width held at 15% / 45%
+                / 75% for several seconds between backend status events.
+                Three layers of "still working" signalling now:
+                  1. Status text (from understandStatus) updates as the
+                     backend emits progress events — gives users a concrete
+                     "what step am I on".
+                  2. Pulsing dot before the text — always animates, so
+                     even when the step label is the same, the dot proves
+                     the component is live.
+                  3. Shimmer gradient overlay on the bar itself — animates
+                     regardless of the underlying width so the bar never
+                     sits still. Keyframe in globals.css (query-shimmer). */}
             {isUnderstanding && (() => {
-              const pct = understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing")
+              const pct = understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing") || understandStatus.toLowerCase().includes("mapping")
                 ? 75
-                : understandStatus.toLowerCase().includes("found")
+                : understandStatus.toLowerCase().includes("found") || understandStatus.toLowerCase().includes("preview")
                   ? 45
-                  : 15;
+                  : understandStatus.toLowerCase().includes("identifying") || understandStatus.toLowerCase().includes("concepts")
+                    ? 30
+                    : 15;
+              const statusText = understandStatus || "Starting query analysis…";
               return (
-                <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                  <div className="h-full rounded-full bg-blue-500 transition-all duration-700" style={{ width: `${pct}%` }} />
+                <div className="mt-2">
+                  <div
+                    className="mb-1 flex items-center gap-1.5 text-[10px]"
+                    style={{ color: "var(--ats-fg-muted)" }}
+                  >
+                    <span
+                      className="inline-block h-1.5 w-1.5 rounded-full animate-pulse"
+                      style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                      aria-hidden
+                    />
+                    <span className="italic truncate">{statusText}</span>
+                  </div>
+                  <div className="relative h-1 w-full overflow-hidden rounded-full bg-slate-800">
+                    {/* Determinate filled portion */}
+                    <div
+                      className="h-full rounded-full bg-blue-500 transition-all duration-700"
+                      style={{ width: `${pct}%` }}
+                    />
+                    {/* Shimmer overlay — always animating so the bar
+                        never looks frozen while waiting for the next
+                        backend status event. Transparent endpoints so
+                        the gradient fades naturally into the panel. */}
+                    <div
+                      className="absolute inset-0 rounded-full pointer-events-none"
+                      style={{
+                        background:       "linear-gradient(90deg, transparent 0%, rgba(147,197,253,0.45) 50%, transparent 100%)",
+                        backgroundSize:   "200% 100%",
+                        animation:        "query-shimmer 1.4s linear infinite",
+                      }}
+                    />
+                  </div>
                 </div>
               );
             })()}
@@ -4113,12 +4158,39 @@ ${html}
             </div>
             )}
 
-            {/* Query Understanding section — hidden until the user actually runs the analysis
-                (or has run it previously). Stays out of the way on a fresh workspace. */}
+            {/* Query Understanding section — stays mounted as long as
+                directionData holds a result (only cleared by a fresh
+                Understand click, NOT by a Search run). During Search
+                we close the accordion (setUnderstandOpen(false) in the
+                submit handler) but keep the data so the user can open
+                it back up to review which direction they picked.
+                When collapsed we annotate the header with the direction
+                count + a small "preserved" dot so users see that the
+                data is still there, it's just tucked away. */}
             {(isUnderstanding || Boolean(directionData?.directions?.length)) && (
             <div className="mt-5 rounded-xl bg-[var(--ats-bg-card-muted)] px-3 py-2.5">
-              <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-1" onClick={() => setUnderstandOpen(o => !o)}>
+              <div
+                className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-1"
+                onClick={() => setUnderstandOpen(o => !o)}
+                title={understandOpen ? "Collapse the directions grid" : "Expand — your earlier results are preserved"}
+              >
                 <Search size={14} /><span>Query Understanding</span>
+                {/* "Preserved results" hint — only when collapsed AND
+                    directionData has content. Tiny accent dot + count.
+                    Disappears when expanded (the content itself is
+                    the indicator) and while actively understanding. */}
+                {!understandOpen && !isUnderstanding && Boolean(directionData?.directions?.length) && (
+                  <span className="ml-1 inline-flex items-center gap-1 text-[10px] font-normal" style={{ color: "var(--ats-fg-muted)" }}>
+                    <span
+                      className="inline-block h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                      aria-hidden
+                    />
+                    <span className="italic">
+                      {directionData!.directions.length} direction{directionData!.directions.length !== 1 ? "s" : ""} preserved — click to reopen
+                    </span>
+                  </span>
+                )}
                 <ChevronDown size={12} className={`ml-auto transition-transform duration-200 ${understandOpen ? "" : "rotate-180"}`} />
               </div>
               {understandOpen && (
@@ -6922,7 +6994,7 @@ ${html}
                       </ul>
                     </div>
                   ))}
-                  <p className="md:col-span-2 text-[10px] text-slate-600 text-center">Last updated 2026-04-19 · Alpha build v1.6.0</p>
+                  <p className="md:col-span-2 text-[10px] text-slate-600 text-center">Last updated 2026-04-21 · Alpha build v1.7.0</p>
                 </div>
               )}
 
