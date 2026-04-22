@@ -126,6 +126,10 @@ type AdminUser = {
   tier_updated_at: string | null;
   profile_updated: string | null;
   first_seen_at:   string | null;
+  // Synthesised server-side: max(user_usage_daily.updated_at) for this user.
+  // Null if the user has never performed a metered action. The list is
+  // sorted by this field desc so active users surface above stale signups.
+  last_active_at?: string | null;
   // Moderation (server-populated from profiles row)
   is_banned?:   boolean;
   ban_reason?:  string;
@@ -446,11 +450,13 @@ export default function AdminPage() {
   }, [tsDays]);
 
   const fetchUsers = useCallback(async (): Promise<{ users: AdminUser[] }> => {
-    // Default limit raised 50 → 500 so the panel shows EVERY signed-up
-    // account during alpha (realistic max). If we ever exceed 500 real
-    // users we'll switch this to pagination; until then, one fetch with
-    // the whole roster is simpler to operate than lazy-loading pages.
-    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/users?limit=500"));
+    // Default limit 2000 (matches the backend's new upper bound). The
+    // backend now sorts by last-activity, so ACTIVE users bubble to the
+    // top regardless of signup date — and we're confident the full
+    // alpha roster fits in one fetch. If we ever exceed 2000 real
+    // users, switch to pagination; until then a single fetch keeps
+    // admin UX simple.
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/users?limit=2000"));
     if (!res.ok) throw new Error(`users HTTP ${res.status}`);
     return res.json();
   }, []);
@@ -567,6 +573,34 @@ export default function AdminPage() {
   // do stuff to them") and avoids 5 levels of modal stacking.
   const [userDrawer, setUserDrawer] = useState<AdminUser | null>(null);
 
+  // ── Collapsed panel tracking ──────────────────────────────────────
+  // Single Set of panel-ids that the operator has collapsed. Every
+  // heavy-content panel has a caret in its header + reads this state
+  // to decide whether to render its body. Persisted to localStorage so
+  // a refresh keeps the admin's preferred compact view. Panels default
+  // to EXPANDED (not in the set) — the user opts to hide things,
+  // nothing vanishes on first load.
+  const [collapsedPanels, setCollapsedPanels] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.localStorage.getItem("ats-admin-collapsed-panels");
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch { /* ignore */ }
+    return new Set();
+  });
+  const isPanelOpen = (id: string) => !collapsedPanels.has(id);
+  const togglePanel = (id: string) => {
+    setCollapsedPanels(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else              next.add(id);
+      if (typeof window !== "undefined") {
+        try { window.localStorage.setItem("ats-admin-collapsed-panels", JSON.stringify([...next])); } catch { /* ignore */ }
+      }
+      return next;
+    });
+  };
+
   // ── KPI hero time-window ────────────────────────────────────────────────
   // Which window's totals the KPI cards render: today's (default),
   // rolling 7d, or rolling 30d. The backend returns all three in one
@@ -588,20 +622,48 @@ export default function AdminPage() {
   }, [kpiWindow]);
 
   // Top-N users by cost + top-N queries — the "who is burning money"
-  // and "what are they asking about" panels. Both scope to `kpiWindow`
-  // so they move in lockstep with the admin's Today/Week/Month toggle
-  // at the top of the dashboard.
+  // and "what are they asking about" panels. They have their OWN
+  // independent window toggles (decoupled from the KPI hero window)
+  // because operators often want "today's cost leaders" while looking
+  // at "this month's retention numbers" above — the two panels answer
+  // different questions. Each panel's window is persisted separately
+  // so the admin's preferred view per panel survives a refresh.
+  const [topUsersWindow,   setTopUsersWindow]   = useState<"today" | "week" | "month" | "year">(() => {
+    if (typeof window === "undefined") return "week";
+    try {
+      const raw = window.localStorage.getItem("ats-admin-top-users-window");
+      if (raw === "today" || raw === "week" || raw === "month" || raw === "year") return raw;
+    } catch { /* ignore */ }
+    return "week";
+  });
+  const [topQueriesWindow, setTopQueriesWindow] = useState<"today" | "week" | "month" | "year">(() => {
+    if (typeof window === "undefined") return "week";
+    try {
+      const raw = window.localStorage.getItem("ats-admin-top-queries-window");
+      if (raw === "today" || raw === "week" || raw === "month" || raw === "year") return raw;
+    } catch { /* ignore */ }
+    return "week";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-top-users-window", topUsersWindow); } catch { /* ignore */ }
+  }, [topUsersWindow]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-top-queries-window", topQueriesWindow); } catch { /* ignore */ }
+  }, [topQueriesWindow]);
+
   const fetchTopUsers = useCallback(async (): Promise<{ users: TopUserRow[] }> => {
-    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-users?window=${kpiWindow}&limit=10`));
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-users?window=${topUsersWindow}&limit=10`));
     if (!res.ok) throw new Error(`top-users HTTP ${res.status}`);
     return res.json();
-  }, [kpiWindow]);
+  }, [topUsersWindow]);
 
   const fetchTopQueries = useCallback(async (): Promise<{ queries: TopQueryRow[] }> => {
-    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-queries?window=${kpiWindow}&limit=15`));
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-queries?window=${topQueriesWindow}&limit=15`));
     if (!res.ok) throw new Error(`top-queries HTTP ${res.status}`);
     return res.json();
-  }, [kpiWindow]);
+  }, [topQueriesWindow]);
 
   // Pollers for the top-N panels. Declared AFTER kpiWindow + the
   // fetchers because both depend on `kpiWindow` being initialised.
@@ -1220,11 +1282,16 @@ export default function AdminPage() {
                 Showing up to 200, newest first.
               </p>
             </div>
-            <button onClick={() => auditLog.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
-              <RefreshCw size={10} /> Refresh
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => auditLog.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+              <CollapseCaret open={isPanelOpen("audit-log")} onClick={() => togglePanel("audit-log")} />
+            </div>
           </div>
-          <AuditLogPanel rows={auditLog.data?.rows ?? []} />
+          {isPanelOpen("audit-log") && (
+            <AuditLogPanel rows={auditLog.data?.rows ?? []} />
+          )}
         </section>
 
         {/* ── Top users by cost + Top queries ────────────────────────
@@ -1236,19 +1303,24 @@ export default function AdminPage() {
              numbers line up with the hero-card totals above. */}
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="rounded-2xl border p-4" style={panelStyle}>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
               <div>
                 <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                  Top users by cost ({kpiWindow})
+                  Top users by cost ({topUsersWindow})
                 </h3>
                 <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
                   Highest LLM spend in the selected window. Click any row to open their detail drawer.
                 </p>
               </div>
-              <button onClick={() => topUsers.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
-                <RefreshCw size={10} /> Refresh
-              </button>
+              <div className="flex items-center gap-1.5">
+                <WindowToggle value={topUsersWindow} onChange={setTopUsersWindow} includeYear />
+                <button onClick={() => topUsers.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                  <RefreshCw size={10} /> Refresh
+                </button>
+                <CollapseCaret open={isPanelOpen("top-users")} onClick={() => togglePanel("top-users")} />
+              </div>
             </div>
+            {isPanelOpen("top-users") && (
             <TopUsersPanel
               rows={topUsers.data?.users ?? []}
               onOpenDrawer={(row) => {
@@ -1275,22 +1347,29 @@ export default function AdminPage() {
                 });
               }}
             />
+            )}
           </div>
           <div className="rounded-2xl border p-4" style={panelStyle}>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
               <div>
                 <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                  Top queries ({kpiWindow})
+                  Top queries ({topQueriesWindow})
                 </h3>
                 <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                  Most-searched text in the selected window, case-insensitive. Good signal for "what are people trying to research".
+                  Most-searched text in the selected window, case-insensitive. Good signal for &quot;what are people trying to research&quot;.
                 </p>
               </div>
-              <button onClick={() => topQueries.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
-                <RefreshCw size={10} /> Refresh
-              </button>
+              <div className="flex items-center gap-1.5">
+                <WindowToggle value={topQueriesWindow} onChange={setTopQueriesWindow} includeYear />
+                <button onClick={() => topQueries.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                  <RefreshCw size={10} /> Refresh
+                </button>
+                <CollapseCaret open={isPanelOpen("top-queries")} onClick={() => togglePanel("top-queries")} />
+              </div>
             </div>
-            <TopQueriesPanel rows={topQueries.data?.queries ?? []} />
+            {isPanelOpen("top-queries") && (
+              <TopQueriesPanel rows={topQueries.data?.queries ?? []} />
+            )}
           </div>
         </section>
 
@@ -1306,15 +1385,22 @@ export default function AdminPage() {
                 Refreshes every 30 s.
               </p>
             </div>
-            <button
-              onClick={() => activity.refresh()}
-              className="text-[10px] inline-flex items-center gap-1"
-              style={{ color: "var(--ats-fg-muted)" }}
-            >
-              <RefreshCw size={10} /> Refresh
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => activity.refresh()}
+                className="text-[10px] inline-flex items-center gap-1"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <RefreshCw size={10} /> Refresh
+              </button>
+              <CollapseCaret open={isPanelOpen("activity")} onClick={() => togglePanel("activity")} />
+            </div>
           </div>
-          <ActivityFeed rows={activity.data?.activity ?? []} />
+          {isPanelOpen("activity") && (
+            <div className="max-h-[420px] overflow-y-auto thin-scrollbar pr-1">
+              <ActivityFeed rows={activity.data?.activity ?? []} />
+            </div>
+          )}
         </section>
 
         {/* ── Recent users table ─────────────────────────────────────── */}
@@ -1325,19 +1411,26 @@ export default function AdminPage() {
                 All users
               </h3>
               <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                Every signed-up account, newest first. Showing {userList.length}
-                {userList.length >= 500 && " (capped at 500 — paginate if you need older)"}.
+                All signed-up accounts, sorted by <span className="font-semibold">most-recent activity</span> (active users on top, stale signups at the bottom). Showing {userList.length}
+                {userList.length >= 2000 && " (capped at 2000 — paginate if you need older)"}.
               </p>
             </div>
-            <button
-              onClick={() => users.refresh()}
-              className="text-[10px] inline-flex items-center gap-1 transition-colors"
-              style={{ color: "var(--ats-fg-muted)" }}
-            >
-              <RefreshCw size={10} /> Refresh
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => users.refresh()}
+                className="text-[10px] inline-flex items-center gap-1 transition-colors"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <RefreshCw size={10} /> Refresh
+              </button>
+              <CollapseCaret open={isPanelOpen("users")} onClick={() => togglePanel("users")} />
+            </div>
           </div>
-          <UserTable users={userList} onOpenDrawer={setUserDrawer} />
+          {isPanelOpen("users") && (
+            <div className="max-h-[520px] overflow-y-auto thin-scrollbar">
+              <UserTable users={userList} onOpenDrawer={setUserDrawer} />
+            </div>
+          )}
         </section>
 
         {/* ── Tier limits editor — full width because it's a table ───── */}
@@ -1353,15 +1446,20 @@ export default function AdminPage() {
                 cap see the new number but KEEP their consumed count (no reset).
               </p>
             </div>
-            <button
-              onClick={() => tierLimits.refresh()}
-              className="text-[10px] inline-flex items-center gap-1"
-              style={{ color: "var(--ats-fg-muted)" }}
-            >
-              <RefreshCw size={10} /> Refresh
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => tierLimits.refresh()}
+                className="text-[10px] inline-flex items-center gap-1"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <RefreshCw size={10} /> Refresh
+              </button>
+              <CollapseCaret open={isPanelOpen("tier-limits")} onClick={() => togglePanel("tier-limits")} />
+            </div>
           </div>
-          <TierLimitsEditor data={tierLimits.data} onSaveAll={saveTierLimitsBatch} />
+          {isPanelOpen("tier-limits") && (
+            <TierLimitsEditor data={tierLimits.data} onSaveAll={saveTierLimitsBatch} />
+          )}
         </section>
 
         {/* ── Feedback inbox — full width so long messages are readable ── */}
@@ -1375,11 +1473,18 @@ export default function AdminPage() {
                 User-submitted bug reports / feature requests. Unresolved rows surface first.
               </p>
             </div>
-            <button onClick={() => feedback.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
-              <RefreshCw size={10} /> Refresh
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => feedback.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+              <CollapseCaret open={isPanelOpen("feedback")} onClick={() => togglePanel("feedback")} />
+            </div>
           </div>
-          <FeedbackInbox rows={feedback.data?.feedback ?? []} onToggle={toggleFeedbackResolved} />
+          {isPanelOpen("feedback") && (
+            <div className="max-h-[520px] overflow-y-auto thin-scrollbar pr-1">
+              <FeedbackInbox rows={feedback.data?.feedback ?? []} onToggle={toggleFeedbackResolved} />
+            </div>
+          )}
         </section>
 
         {/* ── Announcements full log + System snapshot (low-frequency) ──
@@ -1428,9 +1533,12 @@ export default function AdminPage() {
                 >
                   <RefreshCw size={10} /> Refresh
                 </button>
+                <CollapseCaret open={isPanelOpen("announcements")} onClick={() => togglePanel("announcements")} />
               </div>
             </div>
-            <AnnouncementLog rows={annList} onDelete={deleteOneAnnouncement} onEdit={editOneAnnouncement} />
+            {isPanelOpen("announcements") && (
+              <AnnouncementLog rows={annList} onDelete={deleteOneAnnouncement} onEdit={editOneAnnouncement} />
+            )}
           </div>
 
           <div className="rounded-2xl border p-4" style={panelStyle}>
@@ -1970,6 +2078,63 @@ function QuotaGiftInput({ label, value, onChange }: { label: string; value: numb
 }
 
 
+// ── Collapse-state hook (per-panel, persisted) ────────────────────────────
+// `id` must be stable across renders — it's the localStorage key. The
+// hook returns `{ open, toggle }` so panels can render a caret button in
+// their header + conditionally render the body. State defaults to
+// `defaultOpen` on first visit (typically true so nothing is hidden
+// unexpectedly on first load), then remembers the operator's last
+// choice across refreshes.
+
+function useCollapsed(id: string, defaultOpen = true): { open: boolean; toggle: () => void } {
+  const storageKey = `ats-admin-collapsed:${id}`;
+  const [open, setOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return defaultOpen;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw === "open")   return true;
+      if (raw === "closed") return false;
+    } catch { /* ignore */ }
+    return defaultOpen;
+  });
+  const toggle = useCallback(() => {
+    setOpen(prev => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        try { window.localStorage.setItem(storageKey, next ? "open" : "closed"); } catch { /* ignore */ }
+      }
+      return next;
+    });
+  }, [storageKey]);
+  return { open, toggle };
+}
+
+
+// ── CollapseCaret — tiny chevron button shared across collapsible panels ──
+// Renders ▾ when open, ▸ when closed. Click flips state. Sits in the
+// panel header next to the Refresh button so operators can tuck away
+// any panel they don't currently care about and the admin page stays
+// scannable even with 15+ sections.
+
+function CollapseCaret({ open, onClick }: { open: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title={open ? "Collapse this panel" : "Expand this panel"}
+      aria-label={open ? "Collapse panel" : "Expand panel"}
+      aria-expanded={open}
+      className="text-[11px] inline-flex h-5 w-5 items-center justify-center rounded border transition-colors"
+      style={{
+        borderColor: "var(--ats-border-subtle)",
+        color:       "var(--ats-fg-muted)",
+      }}
+    >
+      {open ? "▾" : "▸"}
+    </button>
+  );
+}
+
+
 // ── HeadroomBar (used by SystemHealthPanel) ────────────────────────────────
 // Horizontal usage bar: current / cap with a coloured fill. Fill colour
 // ladders green (<50%) → amber (<80%) → red (≥80%) so ops can tell
@@ -2387,16 +2552,29 @@ function TopQueriesPanel({ rows }: { rows: TopQueryRow[] }) {
 // Active segment uses the accent token pair so colour follows the user's
 // current theme — emerald on Morning Mint, amber on Warm Paper, etc.
 
+type WindowKey = "today" | "week" | "month" | "year";
+
+// Drop the generic parameter + cast at the onChange boundary. The
+// caller always passes a setState<narrower-union> signature; the cast
+// is safe because the toggle will never hand back a value outside its
+// rendered options.
 function WindowToggle({
-  value, onChange,
+  value, onChange, includeYear = false,
 }: {
-  value: "today" | "week" | "month";
-  onChange: (v: "today" | "week" | "month") => void;
+  value: WindowKey;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onChange: (v: any) => void;
+  /** Add a "Year" segment at the end. Defaults to false because the
+   *  KPI hero + chart toggle already cover longer windows via their
+   *  own selectors. Top-N panels opt in because "top users over the
+   *  past year" is a meaningful question that 30-day can't answer. */
+  includeYear?: boolean;
 }) {
-  const options: Array<{ v: "today" | "week" | "month"; label: string }> = [
+  const options: Array<{ v: WindowKey; label: string }> = [
     { v: "today", label: "Today" },
     { v: "week",  label: "Week"  },
     { v: "month", label: "Month" },
+    ...(includeYear ? [{ v: "year" as WindowKey, label: "Year" }] : []),
   ];
   return (
     <div
@@ -2998,6 +3176,7 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
             <th className="pb-2 pr-3 font-semibold text-right">Synth</th>
             <th className="pb-2 pr-3 font-semibold text-right">Reads</th>
             <th className="pb-2 pr-3 font-semibold text-right">Cost (USD)</th>
+            <th className="pb-2 pr-3 font-semibold">Last active</th>
             <th className="pb-2 pr-3 font-semibold">First seen</th>
             <th className="pb-2 pr-3 font-semibold">Tier changed</th>
             <th className="pb-2 font-semibold text-right">Actions</th>
@@ -3071,6 +3250,27 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
                 <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
                   {u.today.llm_cost_usd.toFixed(4)}
                 </td>
+                {/* Last active — colour-codes recency so admins can tell
+                    "still engaged" vs "signed up and vanished" at a glance.
+                    Green <24h, blue <7d, amber <30d, muted older. */}
+                {(() => {
+                  const la = u.last_active_at;
+                  if (!la) {
+                    return (
+                      <td className="py-1.5 pr-3" style={{ color: "var(--ats-fg-muted)" }}>
+                        <span className="italic text-[10px]">never</span>
+                      </td>
+                    );
+                  }
+                  const ageMs = Date.now() - new Date(la).getTime();
+                  const day   = 24 * 3600 * 1000;
+                  const color = ageMs < day ? "#10b981" : ageMs < 7 * day ? "#3b82f6" : ageMs < 30 * day ? "#f59e0b" : "var(--ats-fg-muted)";
+                  return (
+                    <td className="py-1.5 pr-3 tabular-nums" style={{ color }} title={la}>
+                      {fmtDate(la)}
+                    </td>
+                  );
+                })()}
                 <td className="py-1.5 pr-3" style={{ color: "var(--ats-fg-secondary)" }} title={u.first_seen_at ?? ""}>
                   {fmtDate(u.first_seen_at)}
                 </td>

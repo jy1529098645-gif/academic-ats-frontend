@@ -19,6 +19,7 @@ import {
   FEEDBACK_PROMPT_THRESHOLD,
 } from "@/lib/stores/usage-prompt-store";
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import {
   useUsage,
   USAGE_FEATURE_LABELS,
@@ -3501,7 +3502,12 @@ ${html}
             transition: gridTransitioning ? "grid-template-columns 0.9s cubic-bezier(0.25,0.8,0.25,1)" : "none",
           }}
         >
-          {/* Left panel — Research Brief | Analytics (collapsible) */}
+          {/* Left panel — Research Brief | Analytics (collapsible).
+              Wrapped in ErrorBoundary so a crash in the Brief / agent
+              trace rendering doesn't take down the entire app — the
+              user still has the center Workspace + right Lab working. */}
+          <ErrorBoundary label="Research Brief panel">
+          {/* Left panel */}
           <div className="relative min-w-0 h-full overflow-hidden rounded-xl">
             {/* Expand button — sits at tab-bar height on the left edge, square (not circular)
                 so it reads as a panel toggle rather than a "next" arrow. */}
@@ -3847,9 +3853,15 @@ ${html}
               </div>
             </section>
           </div>
+          </ErrorBoundary>
 
           <DividerScrollbar onResizeStart={() => startDrag("left")} onSnap={snapDividerToDefault} sectionRef={leftSectionRef} />
 
+          {/* Center Workspace — the textarea + Retrieved Papers stream +
+              agent trace live here. Isolated in its own boundary so a
+              render bug in a single paper card doesn't nuke the whole
+              query + results view. */}
+          <ErrorBoundary label="Workspace">
           <section data-region="workspace" className="min-w-0 h-full rounded-xl bg-[var(--ats-bg-section)] ats-panel flex flex-col overflow-hidden transition-[width] duration-200">
             <div ref={centerSectionRef as React.RefObject<HTMLDivElement>} className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5">
             <div className="mb-4 flex items-center gap-2 text-xl font-bold"><LayoutGrid size={18} /><span>Workspace</span></div>
@@ -4615,9 +4627,14 @@ ${html}
             </div>
             </div>
           </section>
+          </ErrorBoundary>
 
           <DividerScrollbar onResizeStart={() => startDrag("center")} onSnap={snapDividerToDefault} sectionRef={centerSectionRef} />
 
+          {/* Right panel — Synthesis Lab. Isolated so a crash in the
+              Lab editor or reference list doesn't take down search +
+              the workspace alongside it. */}
+          <ErrorBoundary label="Synthesis Lab">
           {/* Analytics column — slides in/out to the right */}
           <div className="relative min-w-0 h-full overflow-hidden rounded-xl">
             {/* Expand button — at header height on the right edge, square. */}
@@ -5517,6 +5534,7 @@ ${html}
               </div>
             </aside>
           </div>
+          </ErrorBoundary>
         </div>
       </div>
 

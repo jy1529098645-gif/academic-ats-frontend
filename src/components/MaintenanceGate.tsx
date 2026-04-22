@@ -119,10 +119,21 @@ function MaintenanceOverlay({ message, etaAt }: { message: string; etaAt: string
       </div>
 
       <div className="relative max-w-md mx-auto px-8 py-10 text-center">
-        {/* Cat mascot emoji instead of a generic gear. Keeps the brand
-            voice — users have been trained by the rest of the product to
-            see the cat as a friendly surface. */}
-        <div className="text-6xl mb-4 select-none" aria-hidden>🐱</div>
+        {/* Cat mascot — product branding instead of a generic gear icon.
+            Uses the same Cats_01.png that lives alongside the wordmark
+            in the header, so the overlay reads as "AcademiCats is taking
+            a nap" rather than a generic "site under maintenance". The
+            image is a static asset in /public so no API / network dep
+            during an outage. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/Cats_01.png"
+          alt="AcademiCats mascot"
+          className="mx-auto mb-4 h-24 w-24 object-contain select-none pointer-events-none"
+          draggable={false}
+          style={{ animation: "ats-maintenance-bob 3s ease-in-out infinite" }}
+        />
+        <style>{`@keyframes ats-maintenance-bob { 0%,100% { transform: translateY(0px); } 50% { transform: translateY(-6px); } }`}</style>
 
         <h1 className="text-2xl font-bold mb-2 tracking-tight">
           We&apos;re fixing a few things
