@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import MaintenanceGate from "@/components/MaintenanceGate";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -32,7 +33,14 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="h-full overflow-hidden flex flex-col">{children}</body>
+      <body className="h-full overflow-hidden flex flex-col">
+        {/* MaintenanceGate polls /api/maintenance and renders a full-screen
+            overlay when the dev has flipped system_maintenance.enabled=true
+            in Supabase. Paths starting with /admin, /login, /api are
+            exempt so admins can still unblock the flag while in the
+            maintenance window. */}
+        <MaintenanceGate>{children}</MaintenanceGate>
+      </body>
     </html>
   );
 }

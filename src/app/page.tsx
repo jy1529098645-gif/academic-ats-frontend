@@ -15,6 +15,10 @@ import {
   THEME_TRANSITION_MIN, THEME_TRANSITION_MAX,
 } from "@/lib/stores/prefs-store";
 import {
+  useUsagePromptStore, hydrateUsagePromptStore, shouldPromptFeedback,
+  FEEDBACK_PROMPT_THRESHOLD,
+} from "@/lib/stores/usage-prompt-store";
+import {
   useUsage,
   USAGE_FEATURE_LABELS,
   formatUsage,
@@ -834,6 +838,7 @@ export default function HomePage() {
     // mismatch; the real persisted values land after first paint.
     hydrateThemeStore();
     hydratePrefsStore();
+    hydrateUsagePromptStore();
   }, []);
 
   // User-tunable behaviour preferences (Settings → Behaviour).
@@ -1470,6 +1475,31 @@ export default function HomePage() {
   const [feedbackText,     setFeedbackText]     = useState("");
   const [feedbackSending,  setFeedbackSending]  = useState(false);
   const [feedbackMsg,      setFeedbackMsg]      = useState<{ text: string; error?: boolean } | null>(null);
+  // `autoPromptedFeedback` = the modal was opened by the "5 uses" trigger,
+  // not by the floating bug-report button. Used to show a friendlier header
+  // ("How's it going?" instead of "Report a bug") and to auto-select the
+  // general category. Reset whenever the modal closes.
+  const [autoPromptedFeedback, setAutoPromptedFeedback] = useState(false);
+
+  // ── Auto-prompt feedback after N metered actions ────────────────────────
+  // Watches the Zustand usage-prompt counter. When it crosses the threshold
+  // and we haven't prompted before (shouldPromptFeedback returns true), we
+  // open the modal ONCE and immediately mark it as prompted so we don't
+  // loop. The modal itself handles dismiss/submit; both paths leave
+  // promptedAt set, so this effect never re-fires for this browser.
+  const promptUsageCount = useUsagePromptStore(s => s.usageCount);
+  const promptPromptedAt = useUsagePromptStore(s => s.promptedAt);
+  useEffect(() => {
+    if (!shouldPromptFeedback({ usageCount: promptUsageCount, promptedAt: promptPromptedAt })) return;
+    // Open the feedback modal in "gentle nudge" mode. category=general is
+    // the right default for unsolicited feedback (they didn't click "bug").
+    setFeedbackCategory("general");
+    setAutoPromptedFeedback(true);
+    setFeedbackOpen(true);
+    // Persist the prompt flag immediately so a reload during the modal
+    // session doesn't re-trigger this effect on next hydration.
+    useUsagePromptStore.getState().markPrompted();
+  }, [promptUsageCount, promptPromptedAt]);
 
   // ── Dev account sign-in (login-required overlay) ─────────────────────────
   // Lets operators sign in as dev01/02/03 from the main login screen
@@ -1530,7 +1560,7 @@ export default function HomePage() {
       setFeedbackMsg({ text: "Thanks! Sent to the developers." });
       setFeedbackText("");
       // Auto-close after 1.2 s so the success message is visible briefly.
-      window.setTimeout(() => { setFeedbackOpen(false); setFeedbackMsg(null); }, 1200);
+      window.setTimeout(() => { setFeedbackOpen(false); setFeedbackMsg(null); setAutoPromptedFeedback(false); }, 1200);
     } catch (e) {
       setFeedbackMsg({
         text: e instanceof Error ? e.message : String(e),
@@ -2846,6 +2876,10 @@ ${html}
             // Metered action finished server-side; refresh the quota snapshot
             // so subscription + user-menu counters update without a reload.
             void usage.refresh();
+            // Bump the local "feedback-prompt counter" so we can nudge the
+            // user for feedback after FEEDBACK_PROMPT_THRESHOLD metered
+            // actions (see effect below that watches usageCount).
+            useUsagePromptStore.getState().increment();
             // ── Optimistic timeline insert; cloud is authoritative ─────────
             // The search endpoint writes its own history row server-side via
             // _write_history(); we just show immediate UI feedback and then refetch
@@ -3082,6 +3116,7 @@ ${html}
       // Synthesis run just wrapped up (success or error). Refresh quota so
       // the counter in the user menu / subscription modal stays current.
       void usage.refresh();
+      useUsagePromptStore.getState().increment();
     }
   }
 
@@ -3137,6 +3172,7 @@ ${html}
       const data = await res.json();
       setDeepReadResults((prev) => ({ ...prev, [paperKey]: data || {} }));
       void usage.refresh();
+      useUsagePromptStore.getState().increment();
     } catch (error) {
       setDeepReadErrors((prev) => ({
         ...prev,
@@ -5501,7 +5537,7 @@ ${html}
           {feedbackOpen && (
             <div
               className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm"
-              onClick={() => setFeedbackOpen(false)}
+              onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }}
             >
               <div
                 className="w-full max-w-md rounded-2xl border shadow-2xl"
@@ -5513,10 +5549,19 @@ ${html}
               >
                 <div className="flex items-center gap-2 px-5 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
                   <MessageCircle size={16} style={{ color: "var(--ats-fg-accent)" }} />
-                  <h2 className="flex-1 text-base font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
-                    Send feedback
-                  </h2>
-                  <button onClick={() => setFeedbackOpen(false)} className="transition-colors" style={{ color: "var(--ats-fg-muted)" }}>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-base font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                      {autoPromptedFeedback
+                        ? `How's AcademiCats going so far?`
+                        : `Send feedback`}
+                    </h2>
+                    {autoPromptedFeedback && (
+                      <p className="text-[11px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+                        You&apos;ve used {FEEDBACK_PROMPT_THRESHOLD}+ features — drop us a line. It genuinely shapes what we ship next. You won&apos;t see this prompt again.
+                      </p>
+                    )}
+                  </div>
+                  <button onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }} className="transition-colors" style={{ color: "var(--ats-fg-muted)" }}>
                     <X size={16} />
                   </button>
                 </div>

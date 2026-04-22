@@ -115,6 +115,18 @@ type AdminUser = {
   tier_updated_at: string | null;
   profile_updated: string | null;
   first_seen_at:   string | null;
+  // Moderation (server-populated from profiles row)
+  is_banned?:   boolean;
+  ban_reason?:  string;
+  banned_at?:   string | null;
+  banned_by?:   string;
+  // Bonus quota (gift balance, additive to tier caps)
+  bonus?: {
+    quick_search: number;
+    deep_search:  number;
+    synthesis:    number;
+    deep_read:    number;
+  };
   today: {
     quick_search_count: number;
     deep_search_count:  number;
@@ -141,6 +153,17 @@ type AdminAnnouncement = {
   text: string;
   is_public: boolean;
   created_at: string;
+};
+
+// Maintenance-mode singleton as returned by GET /api/maintenance.
+// `eta_at` is nullable: when null the countdown is hidden and only the
+// static message is rendered to the user-facing overlay.
+type MaintenanceStateDto = {
+  enabled: boolean;
+  message: string;
+  eta_at: string | null;
+  set_by?: string;
+  set_at?: string | null;
 };
 
 type DbStats = {
@@ -362,6 +385,15 @@ export default function AdminPage() {
     return res.json();
   }, []);
 
+  // Maintenance singleton — read via the PUBLIC endpoint (no auth needed)
+  // so the admin page gets the same state the user-facing MaintenanceGate
+  // sees. Writes go through /api/admin/maintenance with the dev Bearer.
+  const fetchMaintenance = useCallback(async (): Promise<MaintenanceStateDto> => {
+    const res = await fetch(buildApiUrl("/api/maintenance"), { cache: "no-store" });
+    if (!res.ok) throw new Error(`maintenance HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
   const overview     = usePolling(fetchOverview,     OVERVIEW_POLL_MS, enabled);
   const timeseries   = usePolling(fetchTimeseries,   DETAIL_POLL_MS,   enabled);
   const users        = usePolling(fetchUsers,        DETAIL_POLL_MS,   enabled);
@@ -373,6 +405,91 @@ export default function AdminPage() {
   const feedback     = usePolling(fetchFeedback,     30_000,           enabled);
   const tierLimits   = usePolling(fetchTierLimits,   60_000,           enabled);
   const activity     = usePolling(fetchActivity,     30_000,           enabled);
+  const maintenance  = usePolling(fetchMaintenance,  15_000,           enabled);
+
+  // ── Maintenance-mode mutations ────────────────────────────────────────
+  // Three operations: toggle-on-with-ETA, update-message-only, toggle-off.
+  // Each PATCHes the singleton via /api/admin/maintenance (or the
+  // "/end" shortcut), then refreshes the panel so the UI reflects
+  // what the user-facing gate is now seeing.
+  const setMaintenance = async (patch: { enabled?: boolean; message?: string; eta_at?: string }) => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/maintenance"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(`maintenance PATCH HTTP ${res.status}`);
+      await maintenance.refresh();
+    } catch (e) {
+      alert(`Maintenance update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const endMaintenanceNow = async () => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/maintenance/end"), { method: "POST" });
+      if (!res.ok) throw new Error(`end-maintenance HTTP ${res.status}`);
+      await maintenance.refresh();
+    } catch (e) {
+      alert(`Go-live failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // ── User moderation: state + mutations ─────────────────────────────────
+  // A single "user detail drawer" hosts all per-user actions (ban, gift
+  // quota, tier change, activity feed). Opens on Actions-button click in
+  // the UserTable row. Keeping it one drawer instead of four separate
+  // modals keeps the admin's mental model simple ("here's this user →
+  // do stuff to them") and avoids 5 levels of modal stacking.
+  const [userDrawer, setUserDrawer] = useState<AdminUser | null>(null);
+
+  const setUserBan = async (userId: string, banned: boolean, reason?: string) => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/ban`), {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ banned, reason: reason ?? null }),
+      });
+      if (!res.ok) throw new Error(`${banned ? "ban" : "unban"} HTTP ${res.status}`);
+      await users.refresh();
+    } catch (e) {
+      alert(`Ban update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const grantUserQuota = async (userId: string, grants: {quick_search?:number; deep_search?:number; synthesis?:number; deep_read?:number}) => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/grant-quota`), {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(grants),
+      });
+      if (!res.ok) throw new Error(`grant-quota HTTP ${res.status}`);
+      await users.refresh();
+    } catch (e) {
+      alert(`Gift-quota failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const setUserTier = async (userId: string, tier: string) => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/tier`), {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tier }),
+      });
+      if (!res.ok) throw new Error(`tier PATCH HTTP ${res.status}`);
+      await users.refresh();
+    } catch (e) {
+      alert(`Tier change failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const fetchUserActivity = async (userId: string): Promise<{ activity: Array<{ id: string; entry_type: string; query: string; summary: string; created_at: string }> }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/activity?limit=50`));
+    if (!res.ok) throw new Error(`user-activity HTTP ${res.status}`);
+    return res.json();
+  };
 
   const refreshAll = () => {
     overview.refresh();
@@ -561,6 +678,16 @@ export default function AdminPage() {
             {announcements.error&& <p>Announcements: {announcements.error}</p>}
           </div>
         )}
+
+        {/* ── Maintenance mode (sits ABOVE KPIs because flipping it is the
+             single most impactful admin action; every user sees the effect
+             within 20s). Highlighted with an amber tint when enabled so the
+             panel is impossible to miss during an active window. ────── */}
+        <MaintenancePanel
+          state={maintenance.data}
+          onApply={setMaintenance}
+          onEndNow={endMaintenanceNow}
+        />
 
         {/* ── KPI hero ──────────────────────────────────────────────── */}
         <section>
@@ -791,7 +918,7 @@ export default function AdminPage() {
               <RefreshCw size={10} /> Refresh
             </button>
           </div>
-          <UserTable users={userList} />
+          <UserTable users={userList} onOpenDrawer={setUserDrawer} />
         </section>
 
         {/* ── Tier limits editor — full width because it's a table ───── */}
@@ -879,10 +1006,547 @@ export default function AdminPage() {
             <Link href="/" className="ml-1 underline hover:opacity-80">Back to app</Link>
           </p>
         </footer>
+
+        {/* Per-user detail drawer. Mounted at the admin root so stacking
+            is simple: the drawer's own backdrop covers the whole page. */}
+        {userDrawer && (
+          <UserDetailDrawer
+            user={userDrawer}
+            onClose={() => setUserDrawer(null)}
+            onBan={setUserBan}
+            onGrantQuota={grantUserQuota}
+            onSetTier={setUserTier}
+            onFetchActivity={fetchUserActivity}
+          />
+        )}
       </main>
     </div>
   );
 }
+
+// ── Maintenance mode control panel ───────────────────────────────────────
+// One-click product pause with a live countdown for users. When `enabled`
+// is true, the entire frontend (except /admin and /login) renders a full-
+// screen overlay via MaintenanceGate — so toggling this is NOT a dry-run,
+// it immediately takes the site offline for all visitors within ~20s
+// (their poll interval). The "Go live now" button is deliberately
+// separate from the toggle so an accidental click on the main toggle
+// doesn't permanently clear the message + ETA the admin just typed.
+//
+// Three sub-forms composed together:
+//   - Status pill (ON/OFF + "set by $email at $ts")
+//   - Message textarea (user-facing copy shown above the countdown)
+//   - ETA picker (datetime-local; admin's browser timezone, stored as ISO UTC)
+// Plus two buttons:
+//   - "Enter maintenance"   — posts enabled=true + current message + current eta
+//   - "Go live now"         — /api/admin/maintenance/end shortcut
+
+function MaintenancePanel({
+  state, onApply, onEndNow,
+}: {
+  state: MaintenanceStateDto | null;
+  onApply: (patch: { enabled?: boolean; message?: string; eta_at?: string }) => void | Promise<void>;
+  onEndNow: () => void | Promise<void>;
+}) {
+  // Local draft state — we don't commit writes on every keystroke; admin
+  // clicks "Apply" explicitly. The initial values come from the server
+  // state once it arrives, and are re-seeded only when the server's
+  // `set_at` timestamp changes (meaning someone else — or this same
+  // admin — just saved). This way the admin's in-flight edits aren't
+  // stomped by a poll every 15s.
+  const [msg, setMsg]     = useState<string>("");
+  const [eta, setEta]     = useState<string>("");  // datetime-local string (no tz)
+  const lastSyncRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!state) return;
+    const sig = `${state.set_at || ""}|${state.message || ""}|${state.eta_at || ""}`;
+    if (lastSyncRef.current === sig) return;
+    lastSyncRef.current = sig;
+    setMsg(state.message || "");
+    // Convert ISO UTC → datetime-local (YYYY-MM-DDTHH:MM) in browser TZ.
+    if (state.eta_at) {
+      try {
+        const d = new Date(state.eta_at);
+        const pad = (n: number) => n.toString().padStart(2, "0");
+        setEta(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
+      } catch { setEta(""); }
+    } else {
+      setEta("");
+    }
+  }, [state]);
+
+  const isEnabled = !!state?.enabled;
+
+  // Convert the datetime-local value back to an ISO string for the API.
+  // Date() parses datetime-local as browser-local time, then .toISOString()
+  // emits UTC Z — exactly what the backend stores.
+  const etaToIso = (): string => {
+    if (!eta) return "";
+    try { return new Date(eta).toISOString(); } catch { return ""; }
+  };
+
+  const quickPickPresets = [
+    { label: "+15 min", mins: 15 },
+    { label: "+30 min", mins: 30 },
+    { label: "+1 hr",   mins: 60 },
+    { label: "+2 hr",   mins: 120 },
+  ];
+  const setEtaFromNow = (mins: number) => {
+    const d = new Date(Date.now() + mins * 60_000);
+    const pad = (n: number) => n.toString().padStart(2, "0");
+    setEta(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
+  };
+
+  const panelStyle: React.CSSProperties = {
+    backgroundColor: isEnabled ? "rgba(245, 158, 11, 0.08)" : "var(--ats-bg-panel)",
+    borderColor:     isEnabled ? "rgba(245, 158, 11, 0.45)" : "var(--ats-border-subtle)",
+  };
+
+  return (
+    <section
+      className="rounded-2xl border p-4 transition-colors"
+      style={panelStyle}
+    >
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+              Maintenance mode
+            </h3>
+            <StatusPill enabled={isEnabled} />
+          </div>
+          <p className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+            {isEnabled
+              ? "The product is OFFLINE for all users (except /admin + /login). Users see a full-screen overlay with the message + countdown below."
+              : "One-click pause. While enabled, every user gets a full-screen overlay with the message and a live countdown to the ETA."}
+          </p>
+          {state?.set_by && (
+            <p className="text-[10px] mt-1" style={{ color: "var(--ats-fg-muted)" }}>
+              Last changed by <span className="font-semibold">{state.set_by}</span>
+              {state.set_at && <> at <span className="tabular-nums">{new Date(state.set_at).toLocaleString()}</span></>}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Message textarea */}
+      <label className="block mb-3">
+        <span className="block text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-muted)" }}>
+          Message to users
+        </span>
+        <textarea
+          value={msg}
+          onChange={(e) => setMsg(e.target.value)}
+          rows={2}
+          placeholder="AcademiCats is undergoing scheduled maintenance. We'll be back shortly."
+          className="w-full rounded-lg border px-3 py-2 text-xs resize-none outline-none focus:border-blue-500/50"
+          style={{
+            backgroundColor: "var(--ats-bg-panel)",
+            borderColor:     "var(--ats-border-subtle)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+      </label>
+
+      {/* ETA row */}
+      <div className="flex flex-wrap items-end gap-3 mb-4">
+        <label className="flex-1 min-w-[220px]">
+          <span className="block text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-muted)" }}>
+            Estimated back-online time (your local TZ)
+          </span>
+          <input
+            type="datetime-local"
+            value={eta}
+            onChange={(e) => setEta(e.target.value)}
+            className="w-full rounded-lg border px-3 py-2 text-xs outline-none focus:border-blue-500/50"
+            style={{
+              backgroundColor: "var(--ats-bg-panel)",
+              borderColor:     "var(--ats-border-subtle)",
+              color:           "var(--ats-fg-primary)",
+            }}
+          />
+        </label>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold" style={{ color: "var(--ats-fg-muted)" }}>Quick:</span>
+          {quickPickPresets.map(p => (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => setEtaFromNow(p.mins)}
+              className="text-[10px] font-semibold rounded border px-2 py-1 transition-colors"
+              style={{
+                borderColor: "var(--ats-border-subtle)",
+                color:       "var(--ats-fg-secondary)",
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+          {eta && (
+            <button
+              type="button"
+              onClick={() => setEta("")}
+              title="Clear ETA — the overlay will show only the message, no countdown"
+              className="text-[10px] font-semibold rounded border px-2 py-1 transition-colors"
+              style={{
+                borderColor: "var(--ats-border-subtle)",
+                color:       "var(--ats-fg-muted)",
+              }}
+            >
+              Clear ETA
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex flex-wrap items-center gap-2">
+        {!isEnabled ? (
+          <button
+            type="button"
+            onClick={() => onApply({ enabled: true, message: msg, eta_at: etaToIso() })}
+            className="rounded-lg px-4 py-2 text-xs font-bold text-white transition-all"
+            style={{ backgroundColor: "#f59e0b" }}
+          >
+            ⏸ Enter maintenance mode
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => onApply({ enabled: true, message: msg, eta_at: etaToIso() })}
+              className="rounded-lg px-4 py-2 text-xs font-bold border transition-all"
+              style={{
+                borderColor: "rgba(245, 158, 11, 0.6)",
+                color:       "#f59e0b",
+                backgroundColor: "rgba(245, 158, 11, 0.08)",
+              }}
+              title="Save the message + ETA without flipping the toggle off"
+            >
+              💾 Update message / ETA
+            </button>
+            <button
+              type="button"
+              onClick={() => { if (confirm("Bring the site back online now? All users will see their normal app immediately (within ~20s).")) onEndNow(); }}
+              className="rounded-lg px-4 py-2 text-xs font-bold text-white transition-all"
+              style={{ backgroundColor: "#10b981" }}
+            >
+              ▶ Go live now
+            </button>
+          </>
+        )}
+
+        {/* Dev reminder — the gate polls every 20s, so the rollout isn't instant. */}
+        <span className="text-[10px] italic ml-auto" style={{ color: "var(--ats-fg-muted)" }}>
+          Users see changes within ~20s (next poll tick).
+        </span>
+      </div>
+    </section>
+  );
+}
+
+// ── User detail drawer ─────────────────────────────────────────────────────
+// Right-side slide-in panel that hosts every per-user action: ban/unban,
+// gift quota, change tier, view activity. Opens when the admin clicks
+// "Manage" on a row in the UserTable. Close via ESC, the X button, or
+// click on the backdrop. Stateful forms (ban reason, quota inputs) are
+// local to the drawer — they reset on close so re-opening for a different
+// user doesn't carry over stale values.
+
+function UserDetailDrawer({
+  user, onClose, onBan, onGrantQuota, onSetTier, onFetchActivity,
+}: {
+  user: AdminUser;
+  onClose: () => void;
+  onBan: (userId: string, banned: boolean, reason?: string) => Promise<void>;
+  onGrantQuota: (userId: string, grants: {quick_search?:number; deep_search?:number; synthesis?:number; deep_read?:number}) => Promise<void>;
+  onSetTier: (userId: string, tier: string) => Promise<void>;
+  onFetchActivity: (userId: string) => Promise<{ activity: Array<{ id: string; entry_type: string; query: string; summary: string; created_at: string }> }>;
+}) {
+  const [banReason, setBanReason] = useState<string>(user.ban_reason || "");
+  const [quickGrant, setQuickGrant] = useState<number>(0);
+  const [deepGrant,  setDeepGrant]  = useState<number>(0);
+  const [synthGrant, setSynthGrant] = useState<number>(0);
+  const [readsGrant, setReadsGrant] = useState<number>(0);
+  const [tierDraft,  setTierDraft]  = useState<string>(user.tier);
+  const [busy, setBusy] = useState<"ban" | "unban" | "grant" | "tier" | null>(null);
+
+  // Activity feed — lazy-loaded once when drawer opens. Refreshable by the
+  // user explicitly clicking the Refresh button in that section.
+  const [activity, setActivity] = useState<Array<{ id: string; entry_type: string; query: string; summary: string; created_at: string }> | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+
+  const loadActivity = useCallback(async () => {
+    setActivityLoading(true);
+    try {
+      const data = await onFetchActivity(user.id);
+      setActivity(data.activity || []);
+    } catch {
+      setActivity([]);
+    } finally {
+      setActivityLoading(false);
+    }
+  }, [user.id, onFetchActivity]);
+
+  useEffect(() => { void loadActivity(); }, [loadActivity]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const handleBan = async () => {
+    if (!confirm(`Ban ${user.email || user.id}? They will be locked out immediately.`)) return;
+    setBusy("ban");
+    await onBan(user.id, true, banReason.trim() || undefined);
+    setBusy(null);
+    onClose();
+  };
+  const handleUnban = async () => {
+    setBusy("unban");
+    await onBan(user.id, false);
+    setBusy(null);
+    onClose();
+  };
+  const handleGrant = async () => {
+    if (quickGrant + deepGrant + synthGrant + readsGrant <= 0) { alert("Enter at least one quota value."); return; }
+    setBusy("grant");
+    await onGrantQuota(user.id, {
+      quick_search: quickGrant, deep_search: deepGrant,
+      synthesis:    synthGrant, deep_read:   readsGrant,
+    });
+    setBusy(null);
+    setQuickGrant(0); setDeepGrant(0); setSynthGrant(0); setReadsGrant(0);
+  };
+  const handleTier = async () => {
+    if (tierDraft === user.tier) return;
+    if (!confirm(`Change ${user.email || user.id} from ${user.tier} → ${tierDraft}?`)) return;
+    setBusy("tier");
+    await onSetTier(user.id, tierDraft);
+    setBusy(null);
+    onClose();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-stretch justify-end bg-black/40 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md h-full overflow-y-auto border-l shadow-2xl"
+        style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3 border-b" style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)" }}>
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold truncate" style={{ color: "var(--ats-fg-primary)" }}>
+              {user.email || "(no email)"}
+            </h3>
+            <p className="text-[10px] font-mono truncate" style={{ color: "var(--ats-fg-muted)" }}>
+              {user.id}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-[18px] px-2" style={{ color: "var(--ats-fg-muted)" }}>×</button>
+        </div>
+
+        <div className="px-5 py-4 space-y-5">
+          {/* ── Ban / unban ───────────────────────────────────────────── */}
+          <section>
+            <h4 className="text-[11px] font-bold uppercase tracking-wider mb-2" style={{ color: user.is_banned ? "#ef4444" : "var(--ats-fg-secondary)" }}>
+              {user.is_banned ? "🚫 Account suspended" : "Moderation"}
+            </h4>
+            {user.is_banned ? (
+              <div className="space-y-2">
+                <p className="text-xs" style={{ color: "var(--ats-fg-secondary)" }}>
+                  Reason: <span className="font-semibold">{user.ban_reason || "(none given)"}</span>
+                </p>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Banned {fmtDate(user.banned_at ?? null)} by {user.banned_by || "unknown"}
+                </p>
+                <button
+                  onClick={handleUnban}
+                  disabled={busy === "unban"}
+                  className="rounded-lg px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+                  style={{ backgroundColor: "#10b981" }}
+                >
+                  {busy === "unban" ? "Unbanning…" : "✅ Restore access"}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={banReason}
+                  onChange={(e) => setBanReason(e.target.value)}
+                  placeholder="Reason (shown to user on next request)"
+                  className="w-full rounded-lg border px-3 py-2 text-xs outline-none focus:border-red-500/60"
+                  style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
+                />
+                <button
+                  onClick={handleBan}
+                  disabled={busy === "ban"}
+                  className="rounded-lg px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+                  style={{ backgroundColor: "#ef4444" }}
+                >
+                  {busy === "ban" ? "Banning…" : "🚫 Ban this account"}
+                </button>
+              </div>
+            )}
+          </section>
+
+          {/* ── Tier change ───────────────────────────────────────────── */}
+          <section>
+            <h4 className="text-[11px] font-bold uppercase tracking-wider mb-2" style={{ color: "var(--ats-fg-secondary)" }}>
+              Subscription tier
+            </h4>
+            <div className="flex items-center gap-2">
+              <select
+                value={tierDraft}
+                onChange={(e) => setTierDraft(e.target.value)}
+                className="rounded-lg border px-2 py-1.5 text-xs outline-none"
+                style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
+              >
+                {["free", "basic", "scholar", "dev"].map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+              <button
+                onClick={handleTier}
+                disabled={tierDraft === user.tier || busy === "tier"}
+                className="rounded-lg px-3 py-1.5 text-xs font-bold text-white disabled:opacity-40"
+                style={{ backgroundColor: "#3b82f6" }}
+              >
+                {busy === "tier" ? "Updating…" : "Apply"}
+              </button>
+            </div>
+            <p className="text-[10px] mt-1" style={{ color: "var(--ats-fg-muted)" }}>
+              Current: {user.tier} · last changed {fmtDate(user.tier_updated_at)}
+            </p>
+          </section>
+
+          {/* ── Gift quota ────────────────────────────────────────────── */}
+          <section>
+            <h4 className="text-[11px] font-bold uppercase tracking-wider mb-2" style={{ color: "var(--ats-fg-secondary)" }}>
+              🎁 Gift bonus quota
+            </h4>
+            <p className="text-[10px] mb-2" style={{ color: "var(--ats-fg-muted)" }}>
+              Current balance — +{user.bonus?.quick_search ?? 0} quick · +{user.bonus?.deep_search ?? 0} deep · +{user.bonus?.synthesis ?? 0} synth · +{user.bonus?.deep_read ?? 0} reads.
+              Grants stack on top of tier limits and don&apos;t reset at UTC midnight.
+            </p>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <QuotaGiftInput label="Quick searches" value={quickGrant} onChange={setQuickGrant} />
+              <QuotaGiftInput label="Deep searches"  value={deepGrant}  onChange={setDeepGrant} />
+              <QuotaGiftInput label="Syntheses"      value={synthGrant} onChange={setSynthGrant} />
+              <QuotaGiftInput label="Deep reads"     value={readsGrant} onChange={setReadsGrant} />
+            </div>
+            <button
+              onClick={handleGrant}
+              disabled={busy === "grant" || (quickGrant + deepGrant + synthGrant + readsGrant <= 0)}
+              className="rounded-lg px-3 py-2 text-xs font-bold text-white disabled:opacity-40"
+              style={{ backgroundColor: "#10b981" }}
+            >
+              {busy === "grant" ? "Gifting…" : "Add to balance"}
+            </button>
+          </section>
+
+          {/* ── Activity feed ─────────────────────────────────────────── */}
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-secondary)" }}>
+                Recent activity
+              </h4>
+              <button onClick={() => void loadActivity()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            {activityLoading && <p className="text-[10px] italic" style={{ color: "var(--ats-fg-muted)" }}>Loading…</p>}
+            {!activityLoading && activity && activity.length === 0 && (
+              <p className="text-[10px] italic" style={{ color: "var(--ats-fg-muted)" }}>No activity yet.</p>
+            )}
+            {activity && activity.length > 0 && (
+              <div className="space-y-1.5 max-h-[40vh] overflow-y-auto pr-1">
+                {activity.map((row) => (
+                  <div
+                    key={row.id}
+                    className="rounded-lg border p-2"
+                    style={{ borderColor: "var(--ats-border-subtle)" }}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-0.5">
+                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>
+                        {row.entry_type || "search"}
+                      </span>
+                      <span className="text-[9px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
+                        {fmtDate(row.created_at)}
+                      </span>
+                    </div>
+                    {row.query && (
+                      <p className="text-[11px] font-semibold truncate" title={row.query} style={{ color: "var(--ats-fg-primary)" }}>
+                        {row.query}
+                      </p>
+                    )}
+                    {row.summary && (
+                      <p className="text-[10px] mt-0.5 line-clamp-2" style={{ color: "var(--ats-fg-muted)" }}>
+                        {row.summary}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Room for future additions — flagged here so it's obvious
+              where to extend. Potential entries: "Reset password via
+              Supabase Admin API", "Revoke sessions", "Export this user's
+              data (GDPR)", "Merge duplicate account". Each slots in as
+              another <section> block above this comment. */}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuotaGiftInput({ label, value, onChange }: { label: string; value: number; onChange: (n: number) => void }) {
+  return (
+    <label className="block">
+      <span className="block text-[9px] font-semibold uppercase tracking-wide mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+        {label}
+      </span>
+      <input
+        type="number"
+        min={0}
+        max={9999}
+        step={1}
+        value={value}
+        onChange={(e) => onChange(Math.max(0, Math.min(9999, parseInt(e.target.value || "0", 10) || 0)))}
+        className="w-full rounded-md border px-2 py-1.5 text-xs tabular-nums outline-none"
+        style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
+      />
+    </label>
+  );
+}
+
+
+function StatusPill({ enabled }: { enabled: boolean }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider"
+      style={{
+        color:            enabled ? "#f59e0b" : "#10b981",
+        backgroundColor:  enabled ? "rgba(245,158,11,0.12)" : "rgba(16,185,129,0.10)",
+        borderColor:      enabled ? "rgba(245,158,11,0.45)" : "rgba(16,185,129,0.40)",
+      }}
+    >
+      <span
+        className="inline-block h-1.5 w-1.5 rounded-full"
+        style={{ backgroundColor: enabled ? "#f59e0b" : "#10b981" }}
+      />
+      {enabled ? "ACTIVE — site offline" : "Idle — site live"}
+    </span>
+  );
+}
+
 
 // ── Admin login screen ────────────────────────────────────────────────────
 // Gates /admin behind its own email+password prompt against the isolated
@@ -1274,7 +1938,7 @@ function arcPath(cx: number, cy: number, outer: number, inner: number, startFrac
 
 // ── User table ──────────────────────────────────────────────────────────────
 
-function UserTable({ users }: { users: AdminUser[] }) {
+function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: (u: AdminUser) => void }) {
   if (users.length === 0) {
     return (
       <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
@@ -1292,53 +1956,107 @@ function UserTable({ users }: { users: AdminUser[] }) {
           >
             <th className="pb-2 pr-3 font-semibold">Email</th>
             <th className="pb-2 pr-3 font-semibold">Tier</th>
+            <th className="pb-2 pr-3 font-semibold">Status</th>
             <th className="pb-2 pr-3 font-semibold text-right">Quick</th>
             <th className="pb-2 pr-3 font-semibold text-right">Deep</th>
             <th className="pb-2 pr-3 font-semibold text-right">Synth</th>
             <th className="pb-2 pr-3 font-semibold text-right">Reads</th>
             <th className="pb-2 pr-3 font-semibold text-right">Cost (USD)</th>
             <th className="pb-2 pr-3 font-semibold">First seen</th>
-            <th className="pb-2 font-semibold">Tier changed</th>
+            <th className="pb-2 pr-3 font-semibold">Tier changed</th>
+            <th className="pb-2 font-semibold text-right">Actions</th>
           </tr>
         </thead>
         <tbody style={{ color: "var(--ats-fg-primary)" }}>
-          {users.map(u => (
-            <tr
-              key={u.id}
-              className="border-b transition-colors hover:bg-[var(--ats-bg-accent-soft)]"
-              style={{ borderColor: "var(--ats-border-subtle)" }}
-            >
-              <td className="py-1.5 pr-3 truncate max-w-[220px]" title={u.email ?? ""}>
-                {u.email ?? <span className="italic" style={{ color: "var(--ats-fg-muted)" }}>(no email)</span>}
-              </td>
-              <td className="py-1.5 pr-3">
-                <span
-                  className="inline-flex text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide"
-                  style={{
-                    color: TIER_COLORS[u.tier] ?? "#64748b",
-                    backgroundColor: (TIER_COLORS[u.tier] ?? "#64748b") + "22",
-                    borderColor:     (TIER_COLORS[u.tier] ?? "#64748b") + "55",
-                    borderWidth: 1, borderStyle: "solid",
-                  }}
-                >
-                  {u.tier}
-                </span>
-              </td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.quick_search_count}</td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.deep_search_count}</td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.synthesis_count}</td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.deep_read_count}</td>
-              <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
-                {u.today.llm_cost_usd.toFixed(4)}
-              </td>
-              <td className="py-1.5 pr-3" style={{ color: "var(--ats-fg-secondary)" }} title={u.first_seen_at ?? ""}>
-                {fmtDate(u.first_seen_at)}
-              </td>
-              <td className="py-1.5" style={{ color: "var(--ats-fg-muted)" }}>
-                {fmtDate(u.tier_updated_at)}
-              </td>
-            </tr>
-          ))}
+          {users.map(u => {
+            const bonusTotal = (u.bonus?.quick_search ?? 0) + (u.bonus?.deep_search ?? 0) + (u.bonus?.synthesis ?? 0) + (u.bonus?.deep_read ?? 0);
+            return (
+              <tr
+                key={u.id}
+                className="border-b transition-colors hover:bg-[var(--ats-bg-accent-soft)]"
+                style={{
+                  borderColor: "var(--ats-border-subtle)",
+                  // Banned rows get a faint red tint so they jump out even
+                  // before reading the Status pill.
+                  backgroundColor: u.is_banned ? "rgba(239, 68, 68, 0.04)" : undefined,
+                }}
+              >
+                <td className="py-1.5 pr-3 truncate max-w-[220px]" title={u.email ?? ""}>
+                  {u.email ?? <span className="italic" style={{ color: "var(--ats-fg-muted)" }}>(no email)</span>}
+                </td>
+                <td className="py-1.5 pr-3">
+                  <span
+                    className="inline-flex text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide"
+                    style={{
+                      color: TIER_COLORS[u.tier] ?? "#64748b",
+                      backgroundColor: (TIER_COLORS[u.tier] ?? "#64748b") + "22",
+                      borderColor:     (TIER_COLORS[u.tier] ?? "#64748b") + "55",
+                      borderWidth: 1, borderStyle: "solid",
+                    }}
+                  >
+                    {u.tier}
+                  </span>
+                </td>
+                <td className="py-1.5 pr-3">
+                  {u.is_banned ? (
+                    <span
+                      title={u.ban_reason || "Banned (no reason given)"}
+                      className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide"
+                      style={{
+                        color: "#ef4444",
+                        backgroundColor: "rgba(239, 68, 68, 0.12)",
+                        borderColor:     "rgba(239, 68, 68, 0.55)",
+                        borderWidth: 1, borderStyle: "solid",
+                      }}
+                    >
+                      🚫 Banned
+                    </span>
+                  ) : bonusTotal > 0 ? (
+                    <span
+                      title={`Bonus quota gifted: +${u.bonus?.quick_search} quick · +${u.bonus?.deep_search} deep · +${u.bonus?.synthesis} synth · +${u.bonus?.deep_read} reads`}
+                      className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide"
+                      style={{
+                        color: "#10b981",
+                        backgroundColor: "rgba(16, 185, 129, 0.12)",
+                        borderColor:     "rgba(16, 185, 129, 0.55)",
+                        borderWidth: 1, borderStyle: "solid",
+                      }}
+                    >
+                      🎁 +{bonusTotal}
+                    </span>
+                  ) : (
+                    <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>—</span>
+                  )}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.quick_search_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.deep_search_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.synthesis_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.deep_read_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
+                  {u.today.llm_cost_usd.toFixed(4)}
+                </td>
+                <td className="py-1.5 pr-3" style={{ color: "var(--ats-fg-secondary)" }} title={u.first_seen_at ?? ""}>
+                  {fmtDate(u.first_seen_at)}
+                </td>
+                <td className="py-1.5 pr-3" style={{ color: "var(--ats-fg-muted)" }}>
+                  {fmtDate(u.tier_updated_at)}
+                </td>
+                <td className="py-1.5 text-right">
+                  <button
+                    onClick={() => onOpenDrawer(u)}
+                    className="text-[10px] font-semibold rounded border px-2 py-1 transition-colors"
+                    style={{
+                      borderColor: "var(--ats-border-subtle)",
+                      color:       "var(--ats-fg-secondary)",
+                    }}
+                    title="Ban / unban · gift quota · change tier · view activity"
+                  >
+                    Manage
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
