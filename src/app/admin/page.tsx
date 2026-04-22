@@ -1500,16 +1500,45 @@ function DbStatsPanel({ data }: { data: DbStats | null }) {
           </tr>
         </thead>
         <tbody style={{ color: "var(--ats-fg-primary)" }}>
-          {tables.map(t => (
-            <tr key={t.name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
-              <td className="py-1 pr-3 font-mono text-[11px]">{t.name}</td>
-              <td className="py-1 text-right tabular-nums">{t.rows < 0 ? <span style={{ color: "var(--ats-fg-muted)" }}>?</span> : t.rows.toLocaleString()}</td>
-            </tr>
-          ))}
+          {tables.map(t => {
+            // rows < 0 means the COUNT query failed — most likely the
+            // table hasn't been migrated into this Supabase project yet.
+            // Show an explicit warning instead of the old "?" which was
+            // ambiguous ("is it 0 rows, or broken?"). This is especially
+            // important for user_usage_daily — a missing migration
+            // there silently zeroes out every KPI on the dashboard.
+            const missing = t.rows < 0;
+            return (
+              <tr key={t.name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                <td className="py-1 pr-3 font-mono text-[11px]">
+                  {t.name}
+                  {missing && (
+                    <span
+                      className="ml-2 inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide rounded border px-1 py-0.5"
+                      style={{ color: "#f59e0b", backgroundColor: "#f59e0b1a", borderColor: "#f59e0b55" }}
+                      title="COUNT query failed — table likely missing from Supabase. Run the schema migration."
+                    >
+                      ⚠ not found
+                    </span>
+                  )}
+                </td>
+                <td className="py-1 text-right tabular-nums">
+                  {missing ? <span style={{ color: "var(--ats-fg-muted)" }}>—</span> : t.rows.toLocaleString()}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
+      {tables.some(t => t.rows < 0) && (
+        <p className="text-[10px] font-semibold mt-2" style={{ color: "#f59e0b" }}>
+          ⚠ One or more tables are missing from Supabase — run the schema migration in supabase_schema.sql.
+          Tables marked &ldquo;not found&rdquo; above silently kill any admin KPI that sources from them
+          (e.g. missing <code>user_usage_daily</code> zeroes out Active today / Searches today / Cost today).
+        </p>
+      )}
       {pctFull >= 80 && (
-        <p className="text-[10px] font-semibold" style={{ color: "#ef4444" }}>
+        <p className="text-[10px] font-semibold mt-2" style={{ color: "#ef4444" }}>
           ⚠ Storage above 80%. Upgrade Supabase Pro ($25/mo → 8 GB) or enable history-entry TTL.
         </p>
       )}
