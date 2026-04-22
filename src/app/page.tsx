@@ -4445,15 +4445,36 @@ ${html}
                     </span>
                     <span className="text-slate-500 tabular-nums">{progress}%</span>
                   </div>
-                  <div className="h-1 w-full rounded-full bg-slate-800 overflow-hidden mb-1.5">
+                  {/* Progress bar — layered: (1) determinate backing fill
+                      whose width tracks the real backend progress so the
+                      user still has a "how far along" signal, and
+                      (2) the product-wide `progress-slide` sliding
+                      segment on top so there's always motion even when
+                      the percentage holds steady between backend events.
+                      Same keyframe as ProgressStrip / Query Understanding
+                      for a consistent loading idiom across the product. */}
+                  <div className="relative h-1 w-full overflow-hidden rounded-full bg-slate-800 mb-1.5">
                     <div
-                      className="h-full rounded-full bg-blue-500/70 transition-all duration-700"
+                      className="absolute inset-y-0 left-0 rounded-full bg-blue-500/55 transition-all duration-700"
                       style={{ width: `${Math.max(progress, 5)}%` }}
                     />
+                    <div
+                      className="absolute inset-y-0 left-0 w-1/3 rounded-full bg-blue-400"
+                      style={{ animation: "progress-slide 1.2s ease-in-out infinite" }}
+                    />
                   </div>
-                  {/* Raw backend message — shows exact step (e.g. adversarial batch X/Y) */}
-                  <div className="text-[11px] text-slate-400 leading-snug">
-                    {rawProgressMsg || "Initialising deep validation…"}
+                  {/* Raw backend message — shows exact step (e.g. adversarial batch X/Y).
+                      Prefixed with a tiny animated dot so the message
+                      area also reads as "actively updating" even when
+                      the same step label is shown for several seconds. */}
+                  <div className="text-[11px] text-slate-400 leading-snug flex items-center gap-1.5">
+                    <span
+                      className="inline-block h-1 w-1 rounded-full bg-blue-400/70 animate-pulse shrink-0"
+                      aria-hidden
+                    />
+                    <span className="italic truncate">
+                      {rawProgressMsg || "Initialising deep validation…"}
+                    </span>
                   </div>
                   <div className="mt-1 text-[10px] text-slate-600">
                     {displayedPapers.length} candidates found · Scores available after analysis completes

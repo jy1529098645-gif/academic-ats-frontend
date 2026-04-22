@@ -22,6 +22,7 @@
 import { useEffect, useState } from "react";
 import { ScrollText, AlertCircle, Check, X } from "lucide-react";
 import { buildApiUrl, fetchWithAuth } from "@/lib/api";
+import { useThemeStore } from "@/lib/stores/theme-store";
 
 type TOSStatus = {
   accepted_at:      string | null;
@@ -89,6 +90,20 @@ export default function TermsOfServiceGate({ children }: { children: React.React
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]     = useState<string>("");
 
+  // Read the user's current theme so we can stamp data-theme / data-tone
+  // on the modal's root element. Without this the fixed-positioned
+  // overlay is a SIBLING of <main> (<main> carries the theme attrs),
+  // and every --ats-* token inside the modal resolves to the :root
+  // (dark) default — users on a day theme saw a dark modal on their
+  // bright background. Reading from Zustand + painting the attrs on
+  // the overlay means the modal picks up whatever theme is active,
+  // including Morning Mint / Warm Paper / Daylight Blue / Night Prism
+  // etc., without any coupling to the parent DOM hierarchy.
+  const themeMode    = useThemeStore(s => s.mode);
+  const dayThemeId   = useThemeStore(s => s.dayThemeId);
+  const nightThemeId = useThemeStore(s => s.nightThemeId);
+  const activeThemeId = themeMode === "day" ? dayThemeId : nightThemeId;
+
   // On mount, fetch the status. Uses fetchWithAuth so if the user isn't
   // signed in, the call 401s and we treat it as "up_to_date: true"
   // (no one to gate). The gate only exists for authenticated users.
@@ -145,6 +160,12 @@ export default function TermsOfServiceGate({ children }: { children: React.React
     <>
       {children}
       <div
+        // Paint theme attrs directly on the overlay so the nested
+        // --ats-* tokens resolve to the user's active theme. See the
+        // themeMode / activeThemeId declarations above for why this
+        // matters (overlay is a sibling, not a child, of <main>).
+        data-theme={activeThemeId}
+        data-tone={themeMode}
         className="fixed inset-0 z-[9500] flex items-center justify-center p-4 backdrop-blur-sm"
         style={{ backgroundColor: "rgba(0, 0, 0, 0.55)" }}
         role="dialog"
