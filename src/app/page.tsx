@@ -18,6 +18,7 @@ import {
   useUsagePromptStore, hydrateUsagePromptStore, shouldPromptFeedback,
   FEEDBACK_PROMPT_THRESHOLD,
 } from "@/lib/stores/usage-prompt-store";
+import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import {
   useUsage,
   USAGE_FEATURE_LABELS,
@@ -3210,6 +3211,7 @@ ${html}
   }, []);
 
   return (
+    <TermsOfServiceGate>
     <main
       data-theme={theme}
       data-tone={themeMode}
@@ -6939,5 +6941,6 @@ ${html}
         </div>
       )}
     </main>
+    </TermsOfServiceGate>
   );
 }

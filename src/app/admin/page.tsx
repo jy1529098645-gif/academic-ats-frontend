@@ -270,6 +270,36 @@ type SystemHealth = {
   openai_tiers_available?: string[];
 };
 
+// Per-source retrieval stats — one row per academic source (Semantic
+// Scholar, OpenAlex, Crossref, arXiv, PubMed, etc.) over the rolling
+// window. Drives the "is PubMed broken today?" panel.
+type SourceStatRow = {
+  source:                string;
+  fetches:               number;
+  total_papers:          number;
+  avg_papers_per_fetch:  number;
+  avg_latency_ms:        number;
+  p95_latency_ms:        number;
+  errors:                number;
+  success_rate:          number;      // 0.0 – 1.0
+};
+
+// Conversion funnel — 4 stages over the signup cohort in the window.
+// Counts are absolute; pct is relative to stage 1 (signed_up).
+type FunnelStage = {
+  key:   string;
+  label: string;
+  count: number;
+  pct:   number;
+};
+type FunnelResponse = {
+  window_days: number;
+  start_utc?:  string;
+  end_utc?:    string;
+  stages:      FunnelStage[];
+  error?:      string;
+};
+
 // ── Audit log row (admin_audit_log table) ──────────────────────────────────
 type AuditLogRow = {
   id:           number;
@@ -379,6 +409,24 @@ export default function AdminPage() {
   const isDev   = authEmail ? DEV_ACCTS.includes(authEmail) : false;
   const enabled = authChecked && isDev;
 
+  // ── Time-range state (must precede fetchers that close over it) ────────
+  // Chart time-range selector — persisted so a refresh keeps the operator's
+  // preferred view. Four windows: last week (daily granularity), month
+  // (default), quarter, year.
+  const [tsDays, setTsDays] = useState<7 | 30 | 90 | 365>(() => {
+    if (typeof window === "undefined") return 30;
+    try {
+      const raw = window.localStorage.getItem("ats-admin-ts-days");
+      const n = parseInt(raw ?? "", 10);
+      if ([7, 30, 90, 365].includes(n)) return n as 7 | 30 | 90 | 365;
+    } catch { /* ignore */ }
+    return 30;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-ts-days", String(tsDays)); } catch { /* ignore */ }
+  }, [tsDays]);
+
   // ── Fetchers ────────────────────────────────────────────────────────────
   // Every admin API call uses fetchWithAdminAuth, which pulls the access
   // token from the ISOLATED admin Supabase client. No dependency on the
@@ -391,10 +439,11 @@ export default function AdminPage() {
   }, []);
 
   const fetchTimeseries = useCallback(async (): Promise<{ data: TimeSeriesPoint[] }> => {
-    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/usage-timeseries?days=30"));
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/usage-timeseries?days=${tsDays}`));
     if (!res.ok) throw new Error(`timeseries HTTP ${res.status}`);
     return res.json();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tsDays]);
 
   const fetchUsers = useCallback(async (): Promise<{ users: AdminUser[] }> => {
     // Default limit raised 50 → 500 so the panel shows EVERY signed-up
@@ -568,6 +617,26 @@ export default function AdminPage() {
     return res.json();
   }, []);
   const auditLog = usePolling(fetchAuditLog, 30_000, enabled);
+
+  // Per-source retrieval stats — rolling 15-min window. Polled
+  // frequently because "PubMed just went down" is a signal the admin
+  // wants fast.
+  const fetchSourceStats = useCallback(async (): Promise<{ sources: SourceStatRow[]; window_seconds: number }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/source-stats?window_seconds=900"));
+    if (!res.ok) throw new Error(`source-stats HTTP ${res.status}`);
+    return res.json();
+  }, []);
+  const sourceStats = usePolling(fetchSourceStats, 30_000, enabled);
+
+  // Conversion funnel — scopes to `tsDays` (same window as the Usage
+  // chart) so admins can see alpha retention across different
+  // observation windows without adding a second toggle.
+  const fetchFunnel = useCallback(async (): Promise<FunnelResponse> => {
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/conversion-funnel?days=${tsDays}`));
+    if (!res.ok) throw new Error(`funnel HTTP ${res.status}`);
+    return res.json();
+  }, [tsDays]);
+  const funnel = usePolling(fetchFunnel, DETAIL_POLL_MS, enabled);
 
   const setUserBan = async (userId: string, banned: boolean, reason?: string) => {
     try {
@@ -953,23 +1022,29 @@ export default function AdminPage() {
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Time-series (2/3) */}
           <div className="lg:col-span-2 rounded-2xl border p-4" style={panelStyle}>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
               <div>
                 <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                  Usage — last 30 days
+                  Usage — last {tsDays === 7 ? "7 days" : tsDays === 30 ? "30 days" : tsDays === 90 ? "90 days" : "year"}
                 </h3>
                 <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                  Daily volumes per feature, zero-filled for quiet days.
+                  Daily volumes per feature, zero-filled for quiet days. Axis ticks auto-adapt to the selected range.
                 </p>
               </div>
-              <TimeseriesLegend />
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Range toggle — small segmented rocker. Clicking a
+                    segment kicks the fetcher (closure on `tsDays`) and
+                    re-renders the chart. No extra refresh click needed. */}
+                <TimeRangeToggle value={tsDays} onChange={setTsDays} />
+                <TimeseriesLegend />
+              </div>
             </div>
             {ts.length === 0 ? (
               <div className="h-64 flex items-center justify-center text-xs" style={{ color: "var(--ats-fg-muted)" }}>
                 No data yet
               </div>
             ) : (
-              <LineChart data={ts} />
+              <LineChart data={ts} windowDays={tsDays} />
             )}
           </div>
 
@@ -1082,6 +1157,51 @@ export default function AdminPage() {
               </button>
             </div>
             <ErrorLogPanel rows={errors.data?.errors ?? []} />
+          </div>
+        </section>
+
+        {/* ── Per-source retrieval + Conversion funnel ──────────────────
+             Side-by-side: operational signal (which source is slow /
+             broken) + retention signal (how many signups stuck around).
+             Both scope to `tsDays` for the funnel and a rolling 15-min
+             window for source stats (different cadence, different data
+             nature — source health is a live signal, funnel is a cohort
+             analysis). */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Per-source retrieval (last 15 min)
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Each row: fetches · papers returned · latency · error rate. Rows with ≥20% errors turn amber;
+                  sources that returned 0 papers on every call turn red so &quot;PubMed went down&quot; jumps out.
+                </p>
+              </div>
+              <button onClick={() => sourceStats.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <SourceStatsPanel rows={sourceStats.data?.sources ?? []} />
+          </div>
+
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Conversion funnel (last {tsDays} days)
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Cohort = users who signed up in this window. Shows drop-off from signup to active use to feedback.
+                  Retargets with the chart&apos;s time-range toggle.
+                </p>
+              </div>
+              <button onClick={() => funnel.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <ConversionFunnelPanel data={funnel.data} />
           </div>
         </section>
 
@@ -1875,6 +1995,170 @@ function HeadroomBar({ label, used, cap, pct }: { label: string; used: number; c
 }
 
 
+// ── Per-source retrieval stats panel ───────────────────────────────────────
+// Table row per academic source in the window. Error rate colour-codes
+// the whole row: ≥50% = red, ≥20% = amber, <20% = neutral. A source
+// that returned 0 papers across all fetches gets its own "dead source"
+// indicator (useful for "ERIC is rate-limiting us today" cases).
+
+function SourceStatsPanel({ rows }: { rows: SourceStatRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No retrievals in the last 15 minutes.
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr
+            className="text-left text-[10px] uppercase tracking-wider border-b"
+            style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}
+          >
+            <th className="pb-2 pr-3 font-semibold">Source</th>
+            <th className="pb-2 pr-3 font-semibold text-right">Fetches</th>
+            <th className="pb-2 pr-3 font-semibold text-right">Avg papers</th>
+            <th className="pb-2 pr-3 font-semibold text-right">Avg latency</th>
+            <th className="pb-2 pr-3 font-semibold text-right">p95</th>
+            <th className="pb-2 pr-3 font-semibold text-right">Success</th>
+            <th className="pb-2 font-semibold text-right">Errors</th>
+          </tr>
+        </thead>
+        <tbody style={{ color: "var(--ats-fg-primary)" }}>
+          {rows.map(r => {
+            const errRate = r.fetches > 0 ? r.errors / r.fetches : 0;
+            const deadSource = r.fetches > 0 && r.total_papers === 0;
+            const rowBg = deadSource
+              ? "rgba(239,68,68,0.08)"
+              : errRate >= 0.5
+              ? "rgba(239,68,68,0.05)"
+              : errRate >= 0.2
+              ? "rgba(245,158,11,0.05)"
+              : undefined;
+            return (
+              <tr
+                key={r.source}
+                className="border-b"
+                style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: rowBg }}
+              >
+                <td className="py-1.5 pr-3 font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                  {r.source}
+                  {deadSource && (
+                    <span className="ml-2 text-[9px] font-bold" style={{ color: "#ef4444" }}>
+                      0 PAPERS
+                    </span>
+                  )}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{r.fetches}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{r.avg_papers_per_fetch}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
+                  {Math.round(r.avg_latency_ms)} ms
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
+                  {Math.round(r.p95_latency_ms)} ms
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: r.success_rate >= 0.95 ? "#10b981" : r.success_rate >= 0.8 ? "#f59e0b" : "#ef4444" }}>
+                  {(r.success_rate * 100).toFixed(1)}%
+                </td>
+                <td className="py-1.5 text-right tabular-nums" style={{ color: r.errors > 0 ? "#ef4444" : "var(--ats-fg-muted)" }}>
+                  {r.errors}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
+// ── Conversion funnel panel ────────────────────────────────────────────────
+// Funnel visualisation: horizontal bars, each sized relative to Stage 1
+// (signed_up). Percentage shown is absolute (relative to signed_up), not
+// step-to-step — the "what fraction of signups actually used it" framing
+// is the one that matters most for alpha retention.
+
+function ConversionFunnelPanel({ data }: { data: FunnelResponse | null }) {
+  if (!data) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        Loading…
+      </div>
+    );
+  }
+  if (data.error) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "#ef4444" }}>
+        Funnel fetch failed: {data.error}
+      </div>
+    );
+  }
+  const stages = data.stages || [];
+  if (stages.length === 0 || stages[0].count === 0) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No signups in the last {data.window_days} days.
+      </div>
+    );
+  }
+  const top = stages[0].count;
+  const stageColor = (idx: number) => {
+    // Ladder green → blue → purple → pink so the visual "funnel"
+    // shape is obvious even if percentages look similar.
+    return ["#10b981", "#3b82f6", "#8b5cf6", "#ec4899"][idx % 4];
+  };
+  return (
+    <div className="space-y-2">
+      {stages.map((s, i) => {
+        const widthPct = Math.max(6, Math.round((s.count / top) * 100));
+        return (
+          <div key={s.key}>
+            <div className="flex items-center justify-between text-[11px] mb-0.5">
+              <span className="font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                {s.label}
+              </span>
+              <span className="tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
+                {s.count} <span className="text-[9px]" style={{ color: "var(--ats-fg-muted)" }}>({s.pct.toFixed(1)}%)</span>
+              </span>
+            </div>
+            <div className="h-4 rounded" style={{ backgroundColor: "var(--ats-border-subtle)" }}>
+              <div
+                className="h-full rounded transition-all"
+                style={{ width: `${widthPct}%`, backgroundColor: stageColor(i) }}
+              />
+            </div>
+          </div>
+        );
+      })}
+      {/* Drop-off callout — shows the biggest stage-to-stage loss so
+          ops know exactly which step to work on. */}
+      {stages.length >= 2 && (() => {
+        let worstDrop = 0;
+        let worstFrom = "";
+        let worstTo   = "";
+        for (let i = 1; i < stages.length; i++) {
+          const drop = stages[i - 1].count - stages[i].count;
+          if (drop > worstDrop) {
+            worstDrop = drop;
+            worstFrom = stages[i - 1].label;
+            worstTo   = stages[i].label;
+          }
+        }
+        if (worstDrop <= 0) return null;
+        return (
+          <p className="text-[10px] mt-2 pt-2 border-t" style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}>
+            📉 Biggest drop-off: <span className="font-semibold" style={{ color: "var(--ats-fg-primary)" }}>{worstFrom} → {worstTo}</span> lost {worstDrop} user{worstDrop !== 1 ? "s" : ""}.
+          </p>
+        );
+      })()}
+    </div>
+  );
+}
+
+
 // ── Admin audit log panel ──────────────────────────────────────────────────
 // Renders admin_audit_log rows newest-first. Each row shows actor, action
 // (colour-coded by category), target, and a relative timestamp. No
@@ -2383,13 +2667,91 @@ function KpiCard({
 // Four-series stacked view: quick search, deep search, synthesis, deep reads.
 // Fixed viewBox so grid labels scale predictably; background grid at 0/25/50/75/100%.
 
-function LineChart({ data }: { data: TimeSeriesPoint[] }) {
+// ── Nice-number rounding (for Y axis) ─────────────────────────────────────
+// Given an arbitrary data max, return a "nice" upper bound whose axis
+// ticks are human-readable (1, 2, 5, 10, 20, 50, 100, 200, 500, …).
+// The previous version used Math.ceil(m / 10^floor(log10(m))) * 10^... ,
+// which produced e.g. 7 → 7 or 23 → 30 — fine for 1-digit numbers but
+// awkward elsewhere. This returns the tight power-of-1/2/5 fit so a
+// max of 23 rounds to 25 and 1137 rounds to 1200.
+function niceAxisMax(m: number): number {
+  if (m <= 1) return 1;
+  const exponent = Math.floor(Math.log10(m));
+  const fraction = m / Math.pow(10, exponent);
+  let niceFraction: number;
+  if      (fraction <= 1)   niceFraction = 1;
+  else if (fraction <= 2)   niceFraction = 2;
+  else if (fraction <= 2.5) niceFraction = 2.5;
+  else if (fraction <= 5)   niceFraction = 5;
+  else                       niceFraction = 10;
+  return niceFraction * Math.pow(10, exponent);
+}
+
+// ── X-axis tick picker (adaptive to window length) ────────────────────────
+// Different time ranges demand different tick densities + formats:
+//   ≤7 days   → tick every day,  "Mon 21" format (weekday + day number)
+//   ≤30 days  → tick every ~5d,  "04-21"        (MM-DD)
+//   ≤90 days  → tick every ~week,"Apr 21"       (Mon D)
+//   ≤365 days → tick ~monthly,   "Apr"          (Mon)
+// Returns the set of indices to render AND the format function. Decoupling
+// the format lets the final "today" tick always use its full label even
+// when intermediate ticks are compressed.
+function pickXTicks(data: TimeSeriesPoint[], windowDays: number): {
+  indices: number[];
+  fmt: (d: string) => string;
+} {
+  const n = data.length;
+  if (n === 0) return { indices: [], fmt: (d) => d };
+
+  let stride: number;
+  let fmt: (d: string) => string;
+
+  if (windowDays <= 7) {
+    // Daily ticks. "Mon 21" style reads naturally for a week view.
+    stride = 1;
+    fmt = (iso) => {
+      const d = new Date(iso + "T00:00:00Z");
+      const wk = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()];
+      return `${wk} ${d.getUTCDate()}`;
+    };
+  } else if (windowDays <= 30) {
+    // Every ~5 days. Classic month view.
+    stride = Math.max(1, Math.ceil(n / 6));
+    fmt = (iso) => iso.slice(5);   // MM-DD
+  } else if (windowDays <= 90) {
+    // Weekly ticks.
+    stride = 7;
+    fmt = (iso) => {
+      const d = new Date(iso + "T00:00:00Z");
+      const mo = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
+      return `${mo} ${d.getUTCDate()}`;
+    };
+  } else {
+    // Year view — monthly ticks.
+    stride = 30;
+    fmt = (iso) => {
+      const d = new Date(iso + "T00:00:00Z");
+      return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
+    };
+  }
+
+  const indices: number[] = [];
+  for (let i = 0; i < n; i += stride) indices.push(i);
+  // Always include the final point so "today" shows up with a tick.
+  if (indices[indices.length - 1] !== n - 1) indices.push(n - 1);
+  return { indices, fmt };
+}
+
+function LineChart({ data, windowDays }: { data: TimeSeriesPoint[]; windowDays: number }) {
   const W = 800;
   const H = 260;
   const P = { top: 16, right: 20, bottom: 28, left: 40 };
   const innerW = W - P.left - P.right;
   const innerH = H - P.top - P.bottom;
 
+  // Y-axis ceiling — auto-scale with nice numbers (see niceAxisMax).
+  // Fills the plot area tightly so small counts (1-3 range) don't float
+  // in a chart whose top is stuck at 10.
   const max = useMemo(() => {
     const m = Math.max(
       1,
@@ -2397,10 +2759,17 @@ function LineChart({ data }: { data: TimeSeriesPoint[] }) {
         d.quick_search_count, d.deep_search_count, d.synthesis_count, d.deep_read_count,
       ]),
     );
-    // Round up to a nice number for axis labels.
-    const power = Math.pow(10, Math.floor(Math.log10(m)));
-    return Math.ceil(m / power) * power;
+    return niceAxisMax(m);
   }, [data]);
+
+  // Y-axis tick labels — prefer 4 evenly-spaced labels for an integer max,
+  // but if max is 1 or 2, only show 2/3 labels so we don't render
+  // duplicate "0 / 0 / 1 / 1" ticks from rounding.
+  const yTickFractions = useMemo(() => {
+    if (max <= 2) return [0, 1];                           // 0, max
+    if (max <= 4) return [0, 0.5, 1];                       // 0, half, max
+    return [0, 0.25, 0.5, 0.75, 1];                         // standard quartile ticks
+  }, [max]);
 
   const n = data.length;
   const stepX = n > 1 ? innerW / (n - 1) : innerW;
@@ -2419,13 +2788,19 @@ function LineChart({ data }: { data: TimeSeriesPoint[] }) {
     { key: "read",   color: "#10b981", accessor: (p: TimeSeriesPoint) => p.deep_read_count    },
   ];
 
-  // X-axis tick positions — every ~5 days.
-  const tickStride = Math.max(1, Math.ceil(n / 6));
+  // X-axis ticks: indices to render + the format per index. See pickXTicks.
+  const { indices: xTickIndices, fmt: xFmt } = useMemo(
+    () => pickXTicks(data, windowDays),
+    [data, windowDays],
+  );
+  const xTickSet = useMemo(() => new Set(xTickIndices), [xTickIndices]);
+
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-64" aria-label="Usage time series">
       {/* Grid — stroke uses --ats-border-subtle so axes dim on dark themes
-          but pop on the day-mint default. */}
-      {[0, 0.25, 0.5, 0.75, 1].map((frac, i) => {
+          but pop on the day-mint default. Y ticks adapt to `max` so
+          small-integer charts (max=1) don't render 4 duplicate 0 labels. */}
+      {yTickFractions.map((frac, i) => {
         const y = P.top + innerH * (1 - frac);
         return (
           <g key={i}>
@@ -2438,13 +2813,14 @@ function LineChart({ data }: { data: TimeSeriesPoint[] }) {
           </g>
         );
       })}
-      {/* X ticks */}
+      {/* X ticks — density + format are chosen by pickXTicks() based on
+          the selected window length. */}
       {data.map((d, i) => {
-        if (i % tickStride !== 0 && i !== n - 1) return null;
+        if (!xTickSet.has(i)) return null;
         const x = P.left + i * stepX;
         return (
           <text key={d.day} x={x} y={H - 10} textAnchor="middle" fontSize={9} fill="var(--ats-fg-muted)">
-            {d.day.slice(5)}
+            {xFmt(d.day)}
           </text>
         );
       })}
@@ -2463,6 +2839,45 @@ function LineChart({ data }: { data: TimeSeriesPoint[] }) {
         return <circle key={`dot-${s.key}`} cx={x} cy={y} r={2.5} fill={s.color} />;
       })}
     </svg>
+  );
+}
+
+// ── Time-range toggle (used next to Charts header) ─────────────────────────
+function TimeRangeToggle({ value, onChange }: { value: 7 | 30 | 90 | 365; onChange: (v: 7 | 30 | 90 | 365) => void }) {
+  const options: Array<{ v: 7 | 30 | 90 | 365; label: string }> = [
+    { v: 7,   label: "7d"  },
+    { v: 30,  label: "30d" },
+    { v: 90,  label: "90d" },
+    { v: 365, label: "1y"  },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Chart time range"
+      className="inline-flex items-center rounded-md border p-0.5 text-[10px] font-bold tracking-wide select-none"
+      style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
+    >
+      {options.map(opt => {
+        const active = value === opt.v;
+        return (
+          <button
+            key={opt.v}
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(opt.v)}
+            className="rounded-sm px-2 py-0.5 transition-colors"
+            style={active ? {
+              backgroundColor: "var(--ats-bg-accent-soft)",
+              color:           "var(--ats-fg-accent)",
+            } : {
+              color: "var(--ats-fg-muted)",
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -3094,7 +3509,10 @@ function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
       {/* OpenAI headroom — compares current RPM/TPM against a tier cap
           so ops can see "we're at 35% of Tier-1 RPM" at a glance.
           Colour of the bar ladders green → amber → red so a glance at
-          the panel tells you whether to consider upgrading tiers. */}
+          the panel tells you whether to consider upgrading tiers.
+          The banner ABOVE the bars appears when either axis crosses
+          60% — this is the "lead time" threshold: if you see it, you
+          still have a few minutes to upgrade before 429s start landing. */}
       {headroom && (
         <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
           <div className="flex items-center justify-between mb-1.5">
@@ -3105,6 +3523,50 @@ function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
               caps: {headroom.caps.rpm.toLocaleString()} RPM · {headroom.caps.tpm.toLocaleString()} TPM
             </span>
           </div>
+          {(() => {
+            // Decide whether to show the warning banner based on the
+            // HIGHER of RPM / TPM percentage. Two-tier threshold so the
+            // message escalates: 60%+ = "watch", 85%+ = "act now".
+            const hotPct = Math.max(headroom.pct.rpm, headroom.pct.tpm);
+            const axis   = headroom.pct.rpm > headroom.pct.tpm ? "RPM" : "TPM";
+            if (hotPct >= 85) {
+              return (
+                <div
+                  className="rounded-md border px-2 py-1.5 mb-2 flex items-start gap-2"
+                  style={{ borderColor: "rgba(239,68,68,0.5)", backgroundColor: "rgba(239,68,68,0.12)" }}
+                >
+                  <span aria-hidden className="text-sm">🚨</span>
+                  <div className="flex-1 text-[10px] leading-snug">
+                    <p className="font-bold" style={{ color: "#ef4444" }}>
+                      {axis} at {hotPct.toFixed(0)}% of {headroom.tier.toUpperCase()} cap — 429s imminent
+                    </p>
+                    <p style={{ color: "#fca5a5" }}>
+                      Upgrade OpenAI tier now. Users will start seeing "rate limit reached" errors within the next minute at this rate.
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+            if (hotPct >= 60) {
+              return (
+                <div
+                  className="rounded-md border px-2 py-1.5 mb-2 flex items-start gap-2"
+                  style={{ borderColor: "rgba(245,158,11,0.5)", backgroundColor: "rgba(245,158,11,0.10)" }}
+                >
+                  <span aria-hidden className="text-sm">⚠️</span>
+                  <div className="flex-1 text-[10px] leading-snug">
+                    <p className="font-bold" style={{ color: "#f59e0b" }}>
+                      {axis} at {hotPct.toFixed(0)}% of {headroom.tier.toUpperCase()} cap — watch closely
+                    </p>
+                    <p style={{ color: "#fcd34d" }}>
+                      If traffic keeps growing, consider pre-paying OpenAI to jump a tier before you hit the ceiling.
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+            return null;
+          })()}
           <HeadroomBar label="RPM" used={headroom.used.rpm} cap={headroom.caps.rpm} pct={headroom.pct.rpm} />
           <div className="h-1" />
           <HeadroomBar label="TPM" used={headroom.used.tpm} cap={headroom.caps.tpm} pct={headroom.pct.tpm} />
