@@ -137,6 +137,20 @@ function VoteButtons({
   onClick:      (next: "up" | "down" | null) => void;
 }) {
   const base = "inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-semibold transition-colors select-none";
+  // Fixed-width counter slot — keeps the button the exact same width whether
+  // the count is 0, 1, or 99. Previously the numeric <span> only rendered
+  // when count > 0, which meant voting (0 → 1) WIDENED the button and
+  // then rotating to an un-voted announcement NARROWED it again, which
+  // in the carousel looked like the whole banner row twitched on every
+  // tick. `inline-block` is required for min-width to actually apply on
+  // a <span>. textAlign:right keeps multi-digit counts (10+) visually
+  // anchored to the icon.
+  const counterSlot: React.CSSProperties = {
+    display: "inline-block",
+    minWidth: "1.1ch",
+    textAlign: "right",
+    fontVariantNumeric: "tabular-nums",
+  };
   return (
     <div className="shrink-0 flex items-center gap-0.5 ml-1">
       <button
@@ -149,7 +163,7 @@ function VoteButtons({
         }}
       >
         <ThumbsUp size={11} />
-        {likeCount > 0 && <span className="tabular-nums">{likeCount}</span>}
+        <span style={counterSlot}>{likeCount > 0 ? likeCount : ""}</span>
       </button>
       <button
         onClick={(e) => { e.stopPropagation(); onClick(myVote === "down" ? null : "down"); }}
@@ -161,7 +175,7 @@ function VoteButtons({
         }}
       >
         <ThumbsDown size={11} />
-        {dislikeCount > 0 && <span className="tabular-nums">{dislikeCount}</span>}
+        <span style={counterSlot}>{dislikeCount > 0 ? dislikeCount : ""}</span>
       </button>
     </div>
   );

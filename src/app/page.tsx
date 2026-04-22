@@ -2312,6 +2312,81 @@ export default function HomePage() {
     return Boolean(backendPaper.pdf_url || backendPaper.oa_url || backendPaper.url);
   };
 
+  // ── Paywall / anti-bot awareness ────────────────────────────────────────
+  // Some publishers reliably block our Deep Read / Download / Translate
+  // pipeline — either their DRM / anti-bot layer blocks non-browser clients
+  // (Elsevier, Wiley, Springer, T&F, SAGE) or their articles are paywalled
+  // with no green-OA mirror (the common case for their closed content).
+  // When Unpaywall / OpenAlex explicitly says a paper is NOT open access
+  // AND the landing URL points at one of these domains, the three PDF-
+  // dependent actions are going to fail 95%+ of the time. Pre-gating them
+  // saves the user a click → wait → red error cycle.
+  //
+  // "Open Paper" always stays enabled because it just opens the
+  // publisher's landing page in a new tab — that always works, it's the
+  // PDF pipeline that doesn't.
+  //
+  // We keep the buttons ENABLED (not gated) whenever Unpaywall has found
+  // any OA signal (is_oa=true OR an oa_url is present), because there
+  // might still be a green-OA mirror (institutional repo, arXiv, PMC) we
+  // can fall back to.
+  const PAYWALLED_HOST_RE = /(?:sciencedirect\.com|onlinelibrary\.wiley\.com|link\.springer\.com|tandfonline\.com|journals\.sagepub\.com|ieeexplore\.ieee\.org|dl\.acm\.org|nature\.com|science\.org|pnas\.org|cambridge\.org|oup\.com|jstor\.org)/i;
+  const PAYWALLED_DOI_PREFIX = ["10.1016/", "10.1002/", "10.1111/", "10.1007/", "10.1057/", "10.1080/", "10.1177/", "10.1109/", "10.1145/", "10.1038/", "10.1126/", "10.1073/", "10.1017/", "10.1093/"];
+
+  const classifyPaperAccess = (paper: Paper): { accessible: boolean; reason: string } => {
+    const backendPaper = toBackendPaper(paper);
+    // No source URL at all → backend has nothing to try.
+    if (!backendPaper.pdf_url && !backendPaper.oa_url && !backendPaper.url) {
+      return { accessible: false, reason: "No download source linked for this paper." };
+    }
+    // Trust any OA signal — don't over-gate green OA that lives on a
+    // paywalled publisher's domain (some arXiv-mirrored papers still
+    // have a Nature landing page as their primary URL).
+    if (backendPaper.pdf_url || backendPaper.oa_url || backendPaper.is_oa === true) {
+      return { accessible: true, reason: "" };
+    }
+    // Known-paywalled publisher + no OA signal anywhere → likely blocked.
+    const landingUrl = String(backendPaper.url || "");
+    const doi = String(backendPaper.doi || "").toLowerCase();
+    const hostHit = PAYWALLED_HOST_RE.test(landingUrl);
+    const doiHit = PAYWALLED_DOI_PREFIX.some(p => doi.startsWith(p));
+    if ((hostHit || doiHit) && backendPaper.is_oa !== true) {
+      return {
+        accessible: false,
+        reason: "This publisher doesn't expose a public PDF to automated tools (paywall / anti-bot). Try the publisher's page directly via Open Paper.",
+      };
+    }
+    return { accessible: true, reason: "" };
+  };
+
+  // Soft-classify an error message returned by the deep-read / download /
+  // translate endpoints. When the failure is "publisher didn't give us a
+  // PDF" (paywall, anti-bot, stale OA, no direct download) we want to
+  // show a MUTED / neutral message, not a scary red error — the user
+  // didn't do anything wrong, we just can't reach the content.
+  // Keywords cover the backend's _NO_PDF_ERROR_MESSAGE template in
+  // deep_read_service.py plus common upstream error fragments we've
+  // observed in production logs.
+  const isSoftAccessError = (message: string): boolean => {
+    const s = (message || "").toLowerCase();
+    return (
+      s.includes("couldn't fetch") ||
+      s.includes("couldn’t fetch") ||
+      s.includes("no direct download") ||
+      s.includes("paywall") ||
+      s.includes("anti-bot") ||
+      s.includes("publisher") ||
+      s.includes("institutional access") ||
+      s.includes("open-access link") ||
+      s.includes("open access link") ||
+      s.includes("no pdf") ||
+      s.includes("not publicly accessible") ||
+      s.includes("javascript-rendered") ||
+      s.includes("403") ||
+      s.includes("forbidden")
+    );
+  };
+
   const triggerDownload = async (
     url: string,
     body: Record<string, any>,
@@ -4282,8 +4357,21 @@ ${html}
 
                         {/* Action buttons — single horizontal row; each shrinks + truncates
                             instead of reflowing to a second row as the panel narrows. */}
+                        {(() => {
+                          // Evaluate access once per paper render — avoids calling
+                          // classifyPaperAccess three times per button, and gives a
+                          // single source of truth for the "grey + tooltip" state.
+                          const access = classifyPaperAccess(paper);
+                          const isBlocked = !access.accessible;
+                          // PDF-pipeline buttons use the same disabled-style so a
+                          // user scanning the row sees "three greyed-out, one blue"
+                          // and instantly knows only Open Paper will work here.
+                          const blockedClasses = "border-slate-800 bg-slate-900/30 text-slate-500 cursor-not-allowed opacity-60";
+                          const blockedTooltip = isBlocked ? access.reason : undefined;
+                        return (
                         <div className="mt-3 flex flex-nowrap items-center gap-2 overflow-hidden">
-                          {/* Open Paper */}
+                          {/* Open Paper — always enabled; publisher's own landing
+                              page reliably works even when their PDF is paywalled. */}
                           {paper.url && (
                             <a href={paper.url} target="_blank" rel="noreferrer"
                                className="shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 transition-all">
@@ -4293,11 +4381,14 @@ ${html}
                           {/* Deep Read */}
                           <button
                             onClick={() => void runDeepRead(paper, paperKey)}
-                            disabled={!hasDownloadSource(paper) || deepReadLoading[paperKey]}
-                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed overflow-hidden ${
-                              deepReadLoading[paperKey]
+                            disabled={isBlocked || deepReadLoading[paperKey]}
+                            title={blockedTooltip}
+                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
+                              isBlocked
+                                ? blockedClasses
+                                : deepReadLoading[paperKey]
                                 ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
-                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
+                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                             }`}
                           >
                             <Microscope size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
@@ -4307,11 +4398,14 @@ ${html}
                           {/* Download PDF */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/download-original"), { paper: toBackendPaper(paper) }, `${paper.title || "paper"}.pdf`, `${paperKey}-original`)}
-                            disabled={!hasDownloadSource(paper) || originalLoading[`${paperKey}-original`]}
-                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed overflow-hidden ${
-                              originalLoading[`${paperKey}-original`]
+                            disabled={isBlocked || originalLoading[`${paperKey}-original`]}
+                            title={blockedTooltip}
+                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
+                              isBlocked
+                                ? blockedClasses
+                                : originalLoading[`${paperKey}-original`]
                                 ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-300"
-                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
+                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                             }`}
                           >
                             <Download size={12} className={`shrink-0 ${originalLoading[`${paperKey}-original`] ? "animate-pulse" : ""}`} />
@@ -4321,11 +4415,14 @@ ${html}
                           {/* Translate PDF + inline language selector */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/translate-pdf"), { paper: toBackendPaper(paper), target_languages: langs }, `${paper.title || "paper"}_${(langs[0] || "translated").replace(/\s*\(.*?\)/g, "").trim()}.pdf`, `${paperKey}-translate`)}
-                            disabled={!hasDownloadSource(paper) || translateLoading[`${paperKey}-translate`]}
-                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed overflow-hidden ${
-                              translateLoading[`${paperKey}-translate`]
+                            disabled={isBlocked || translateLoading[`${paperKey}-translate`]}
+                            title={blockedTooltip}
+                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
+                              isBlocked
+                                ? blockedClasses
+                                : translateLoading[`${paperKey}-translate`]
                                 ? "border-purple-500/60 bg-purple-500/10 text-purple-300"
-                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:opacity-50"
+                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                             }`}
                           >
                             <Globe size={12} className={`shrink-0 ${translateLoading[`${paperKey}-translate`] ? "animate-spin" : ""}`} />
@@ -4341,12 +4438,43 @@ ${html}
                               <option key={lang} value={lang}>{lang}</option>
                             ))}
                           </select>
+                          {/* Gentle inline note when all three PDF actions are
+                              gated, so users don't just see a row of grey
+                              buttons and wonder if something broke. Uses
+                              muted slate text — never the red/yellow alert
+                              palette, because this isn't an error, it's a
+                              publisher choice. */}
+                          {isBlocked && (
+                            <span className="ml-1 shrink-0 hidden sm:inline-flex items-center gap-1 text-[10px] italic text-slate-500">
+                              <span aria-hidden className="text-slate-600">·</span>
+                              Not publicly accessible
+                            </span>
+                          )}
                         </div>
+                        );
+                        })()}
 
-                        {/* Error messages */}
-                        {deepReadErrors[paperKey] && <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{deepReadErrors[paperKey]}</div>}
-                        {originalErrors[paperKey] && <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{originalErrors[paperKey]}</div>}
-                        {translateErrors[paperKey] && <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{translateErrors[paperKey]}</div>}
+                        {/* Error messages — classified as "soft" (publisher didn't
+                            expose the PDF — gray, informational) or "hard" (our
+                            pipeline broke — red). Soft errors use the same muted
+                            slate palette as the pre-gate "Not publicly accessible"
+                            note above so the visual language is consistent: gray
+                            always means "the publisher, not us". */}
+                        {deepReadErrors[paperKey] && (
+                          isSoftAccessError(deepReadErrors[paperKey])
+                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{deepReadErrors[paperKey]}</div>
+                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{deepReadErrors[paperKey]}</div>
+                        )}
+                        {originalErrors[paperKey] && (
+                          isSoftAccessError(originalErrors[paperKey])
+                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{originalErrors[paperKey]}</div>
+                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{originalErrors[paperKey]}</div>
+                        )}
+                        {translateErrors[paperKey] && (
+                          isSoftAccessError(translateErrors[paperKey])
+                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{translateErrors[paperKey]}</div>
+                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{translateErrors[paperKey]}</div>
+                        )}
 
                         {/* Abstract — collapsed by default */}
                         {paper.summary && (

@@ -660,79 +660,25 @@ export default function AdminPage() {
           </div>
         </section>
 
-        {/* ── Users table ───────────────────────────────────────────── */}
-        <section className="rounded-2xl border p-4" style={panelStyle}>
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                Recent users
-              </h3>
-              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                Sorted by most-recent tier change. Showing {userList.length}.
-              </p>
-            </div>
-            <button
-              onClick={() => users.refresh()}
-              className="text-[10px] inline-flex items-center gap-1 transition-colors"
-              style={{ color: "var(--ats-fg-muted)" }}
-            >
-              <RefreshCw size={10} /> Refresh
-            </button>
-          </div>
-          <UserTable users={userList} />
-        </section>
+        {/* ── Section order is deliberate: ordered by developer importance
+             and consultation frequency (what you actually look at during
+             an incident, a daily standup, or a capacity check).
+             High-frequency / high-signal panels first; low-frequency
+             reference panels (tier edits, feedback, announcement log) last.
+             ────────────────────────────────────────────────────────────
+             1. KPIs                           — above, top of page
+             2. Charts                         — above
+             3. System health + DB storage     — infra state, check often
+             4. Cost alerts + Error log        — immediate red flags
+             5. Recent activity                — "what did users just do"
+             6. Recent users                   — who's on the platform
+             7. Tier limits editor             — config, rarely touched
+             8. Feedback inbox                 — async triage
+             9. Announcements log + snapshot   — mostly a content log
+        */}
 
-        {/* ── Announcements + summary side-by-side ──────────────────── */}
+        {/* ── System health + DB storage ─────────────────────────────── */}
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="rounded-2xl border p-4" style={panelStyle}>
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                  Announcements — full log
-                </h3>
-                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                  {annList.length} total ·
-                  {" "}{annList.filter(a => a.author_email === "dev@academicats.com").length} seed ·
-                  {" "}{annList.filter(a => a.author_email !== "dev@academicats.com").length} user-posted
-                </p>
-              </div>
-              <button
-                onClick={() => announcements.refresh()}
-                className="text-[10px] inline-flex items-center gap-1 transition-colors"
-                style={{ color: "var(--ats-fg-muted)" }}
-              >
-                <RefreshCw size={10} /> Refresh
-              </button>
-            </div>
-            <AnnouncementLog rows={annList} />
-          </div>
-
-          <div className="rounded-2xl border p-4" style={panelStyle}>
-            <h3 className="text-sm font-bold mb-3" style={{ color: "var(--ats-fg-primary)" }}>
-              System snapshot
-            </h3>
-            <SystemSnapshot overview={ov} />
-          </div>
-        </section>
-
-        {/* ── Integrated monitoring: DB / health / errors / cost / feedback ── */}
-        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Database storage — predicts when the Supabase free tier runs out */}
-          <div className="rounded-2xl border p-4" style={panelStyle}>
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>Database storage</h3>
-                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                  Estimated usage vs. Supabase free tier (500 MB). History entries dominate — watch that row.
-                </p>
-              </div>
-              <button onClick={() => dbStats.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
-                <RefreshCw size={10} /> Refresh
-              </button>
-            </div>
-            <DbStatsPanel data={dbStats.data} />
-          </div>
-
           {/* System health — Redis + LLM key pool + worker count */}
           <div className="rounded-2xl border p-4" style={panelStyle}>
             <div className="flex items-center justify-between mb-3">
@@ -748,9 +694,25 @@ export default function AdminPage() {
             </div>
             <SystemHealthPanel data={sysHealth.data} />
           </div>
+
+          {/* Database storage — predicts when the Supabase free tier runs out */}
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>Database storage</h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Estimated usage vs. Supabase free tier (500 MB). History entries dominate — watch that row.
+                </p>
+              </div>
+              <button onClick={() => dbStats.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <DbStatsPanel data={dbStats.data} />
+          </div>
         </section>
 
-        {/* Cost alerts + Error log side-by-side */}
+        {/* ── Cost alerts + Error log side-by-side ───────────────────── */}
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="rounded-2xl border p-4" style={panelStyle}>
             <div className="flex items-center justify-between mb-3">
@@ -787,7 +749,7 @@ export default function AdminPage() {
           </div>
         </section>
 
-        {/* Activity feed — what each user actually did, newest first */}
+        {/* ── Recent activity — what each user actually did, newest first ── */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
           <div className="flex items-center justify-between mb-3">
             <div>
@@ -810,7 +772,29 @@ export default function AdminPage() {
           <ActivityFeed rows={activity.data?.activity ?? []} />
         </section>
 
-        {/* Tier limits editor — full width because it's a table */}
+        {/* ── Recent users table ─────────────────────────────────────── */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                Recent users
+              </h3>
+              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                Sorted by most-recent tier change. Showing {userList.length}.
+              </p>
+            </div>
+            <button
+              onClick={() => users.refresh()}
+              className="text-[10px] inline-flex items-center gap-1 transition-colors"
+              style={{ color: "var(--ats-fg-muted)" }}
+            >
+              <RefreshCw size={10} /> Refresh
+            </button>
+          </div>
+          <UserTable users={userList} />
+        </section>
+
+        {/* ── Tier limits editor — full width because it's a table ───── */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
           <div className="flex items-center justify-between mb-3">
             <div>
@@ -834,7 +818,7 @@ export default function AdminPage() {
           <TierLimitsEditor data={tierLimits.data} onSaveAll={saveTierLimitsBatch} />
         </section>
 
-        {/* Feedback inbox — full width so long messages are readable */}
+        {/* ── Feedback inbox — full width so long messages are readable ── */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
           <div className="flex items-center justify-between mb-3">
             <div>
@@ -850,6 +834,42 @@ export default function AdminPage() {
             </button>
           </div>
           <FeedbackInbox rows={feedback.data?.feedback ?? []} onToggle={toggleFeedbackResolved} />
+        </section>
+
+        {/* ── Announcements full log + System snapshot (low-frequency) ──
+             Moved to the end because these are reference panels, not
+             incident-response signals. The log is mostly historical; the
+             snapshot duplicates top-of-page KPI info in a different shape. */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Announcements — full log
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  {annList.length} total ·
+                  {" "}{annList.filter(a => a.author_email === "dev@academicats.com").length} seed ·
+                  {" "}{annList.filter(a => a.author_email !== "dev@academicats.com").length} user-posted
+                </p>
+              </div>
+              <button
+                onClick={() => announcements.refresh()}
+                className="text-[10px] inline-flex items-center gap-1 transition-colors"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <AnnouncementLog rows={annList} />
+          </div>
+
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <h3 className="text-sm font-bold mb-3" style={{ color: "var(--ats-fg-primary)" }}>
+              System snapshot
+            </h3>
+            <SystemSnapshot overview={ov} />
+          </div>
         </section>
 
         <footer className="pt-2 pb-8 text-center">
