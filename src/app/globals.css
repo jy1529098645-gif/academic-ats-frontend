@@ -99,10 +99,42 @@ body {
   .megaphone-breath { box-shadow: none; }
 }
 
-/* Danmu (bullet comment) flow animation */
+/* Danmu (bullet comment) flow animation.
+ *
+ * Historical bug: the previous keyframe used `120vw` / `-120vw`, which is
+ * VIEWPORT-relative. The danmu container is the banner card (~300–600px
+ * wide depending on layout), much smaller than the viewport. A translation
+ * of 120vw on a 1920px viewport is 2304px — way past the right edge of
+ * the card. With `overflow: hidden` on the parent, bullets started so
+ * far off-screen that they were clipped for most of their cycle, only
+ * briefly flashing through the card for ~10% of each loop. Users saw
+ * them as "lined up / stationary" because they spent 90% of the cycle
+ * invisible and the remaining 10% passed too quickly to register as
+ * flowing.
+ *
+ * Fix: use CONTAINER query units (`cqw` = 1% of the container's inline
+ * size) instead of viewport units. 100cqw is always one container-width.
+ * `100cqw + 100%` starts the bullet fully past the right edge of the
+ * container (+ its own width), and `-100cqw - 100%` ends it fully past
+ * the left edge — so the bullet spends ~50% of its cycle visibly
+ * traversing the card regardless of card width. Requires
+ * `container-type: inline-size` on the parent element that provides the
+ * cq context (set via `.danmu-track` below).
+ */
 @keyframes danmuFloat {
-  from { transform: translateX(120vw); }
-  to   { transform: translateX(-120vw); }
+  from { transform: translateX(calc(100cqw + 100%)); }
+  to   { transform: translateX(calc(-100cqw - 100%)); }
+}
+/* Parent element that creates the container-query context for danmu
+ * bullets. Applied to the overlay div that wraps all `<span>` bullets
+ * in AnnouncementBanner.tsx (the one with `absolute inset-0`). Without
+ * this class, `cqw` units resolve to 0 and the keyframe reduces to a
+ * pure `translateX(100%)` → `translateX(-100%)` (element-width-only)
+ * animation, which still *works* but with 100% of the cycle spent with
+ * the bullet barely offscreen on either side. Setting container-type
+ * gives us a proper "full container width of travel" effect. */
+.danmu-track {
+  container-type: inline-size;
 }
 
 /* Fade-in + slide-up for SSE-streamed content */

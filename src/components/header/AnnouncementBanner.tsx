@@ -136,21 +136,26 @@ function VoteButtons({
   myVote:       "up" | "down" | null;
   onClick:      (next: "up" | "down" | null) => void;
 }) {
-  const base = "inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-semibold transition-colors select-none";
-  // Fixed-width counter slot — keeps the button the exact same width whether
-  // the count is 0, 1, or 99. Previously the numeric <span> only rendered
-  // when count > 0, which meant voting (0 → 1) WIDENED the button and
-  // then rotating to an un-voted announcement NARROWED it again, which
-  // in the carousel looked like the whole banner row twitched on every
-  // tick. `inline-block` is required for min-width to actually apply on
-  // a <span>. textAlign:right keeps multi-digit counts (10+) visually
-  // anchored to the icon.
-  const counterSlot: React.CSSProperties = {
+  // Explicit h-[20px] + w-[26px] min locks BOTH dimensions of each button so
+  // nothing inside (icon swap, count change, active-background fade-in) can
+  // ever reshape the button — and the container row around it stays rigid.
+  // The first version of this fix only reserved inline width for the count;
+  // the user reported continued jitter because an EMPTY span contributes no
+  // text-baseline to its parent while a FILLED span does, so the button's
+  // vertical baseline shifted by ~1px on vote. Locking the button height
+  // eliminates that entire class of bug.
+  const base = "inline-flex items-center justify-center gap-0.5 rounded px-1 h-[20px] min-w-[26px] text-[10px] font-semibold transition-colors select-none";
+  // Counter slot: ALWAYS renders the number; uses `visibility: hidden` when
+  // zero so the span still contributes the same width + baseline as when
+  // filled. tabular-nums keeps single and double digit counts visually
+  // anchored to the same right edge.
+  const counterSlot = (count: number): React.CSSProperties => ({
     display: "inline-block",
     minWidth: "1.1ch",
     textAlign: "right",
     fontVariantNumeric: "tabular-nums",
-  };
+    visibility: count > 0 ? "visible" : "hidden",
+  });
   return (
     <div className="shrink-0 flex items-center gap-0.5 ml-1">
       <button
@@ -163,7 +168,7 @@ function VoteButtons({
         }}
       >
         <ThumbsUp size={11} />
-        <span style={counterSlot}>{likeCount > 0 ? likeCount : ""}</span>
+        <span style={counterSlot(likeCount)}>{likeCount > 0 ? likeCount : 0}</span>
       </button>
       <button
         onClick={(e) => { e.stopPropagation(); onClick(myVote === "down" ? null : "down"); }}
@@ -175,7 +180,7 @@ function VoteButtons({
         }}
       >
         <ThumbsDown size={11} />
-        <span style={counterSlot}>{dislikeCount > 0 ? dislikeCount : ""}</span>
+        <span style={counterSlot(dislikeCount)}>{dislikeCount > 0 ? dislikeCount : 0}</span>
       </button>
     </div>
   );
@@ -505,8 +510,19 @@ export function AnnouncementBanner({
           the top via absolute positioning. This means switching to
           danmu mode doesn't trigger a height change on the card — the
           parent flex row (mascot + banner) stays anchored and nothing
-          around the banner reflows. */}
-      <div className="relative flex-1 min-h-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
+          around the banner reflows.
+
+          HARD-LOCKED height: h-[68px] pins the card's vertical size
+          regardless of what changes inside (vote icon swaps, counter
+          ticks between 0↔1, danmu ↔ board mode, composer focus border
+          additions, etc). Without this lock, any inner-element size
+          flux cascades back up through flex-1 and pushes the header
+          row around — the user reported "slight jitter during vote"
+          even after the width-counter fix. Fixing the outer box's
+          dimensions is the bulletproof option. 68px fits rotator row
+          (~40px) + composer row (~28px) with no slack; tweak this
+          number as a pair with the row paddings below. */}
+      <div className="relative h-[68px] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
         {/* Integrated theme toggle — lives inside the card chrome at the
             right end of the top row. z-20 keeps it above the danmu
             overlay when collapsed. */}
@@ -581,7 +597,7 @@ export function AnnouncementBanner({
             bullets never intercept clicks the board might need later
             if we ever re-enable interactivity in danmu mode. */}
         {collapsed && (
-          <div translate="no" className="notranslate absolute inset-0 overflow-hidden pointer-events-none">
+          <div translate="no" className="notranslate danmu-track absolute inset-0 overflow-hidden pointer-events-none">
             {danmu.length === 0 ? (
               <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-600 opacity-50 select-none">
                 User posts will flow here as danmu ✦

@@ -81,20 +81,31 @@ const DETAIL_POLL_MS   = 60_000; // time-series / users / announcements
 
 // ── API response types ──────────────────────────────────────────────────────
 
+// Per-window aggregate shape — identical for today / week / month so the
+// KPI-card renderer can swap between them without per-window branches.
+// Only `today` has `day_utc`; `week` and `month` carry a date RANGE
+// (start_day_utc..end_day_utc) plus the window length in days.
+type UsageWindow = {
+  day_utc?:           string;   // today only
+  start_day_utc?:     string;   // week / month only
+  end_day_utc?:       string;   // week / month only
+  window_days?:       number;   // 7 | 30
+  active_users:       number;
+  quick_search_count: number;
+  deep_search_count:  number;
+  synthesis_count:    number;
+  deep_read_count:    number;
+  llm_cost_usd:       number;
+};
+
 type Overview = {
   server_time: string;
   users: { total: number; by_tier: Record<string, number> };
   conversations: number;
   history_entries: number;
-  today: {
-    day_utc: string;
-    active_users: number;
-    quick_search_count: number;
-    deep_search_count:  number;
-    synthesis_count:    number;
-    deep_read_count:    number;
-    llm_cost_usd:       number;
-  };
+  today: UsageWindow;
+  week?:  UsageWindow;           // optional — backends that predate the rolling-window commit omit these
+  month?: UsageWindow;
   announcements_total: number;
 };
 
@@ -443,6 +454,26 @@ export default function AdminPage() {
   // do stuff to them") and avoids 5 levels of modal stacking.
   const [userDrawer, setUserDrawer] = useState<AdminUser | null>(null);
 
+  // ── KPI hero time-window ────────────────────────────────────────────────
+  // Which window's totals the KPI cards render: today's (default),
+  // rolling 7d, or rolling 30d. The backend returns all three in one
+  // /api/admin/overview response, so switching is instant (no extra
+  // fetch). Persisted to localStorage so a refresh keeps the admin's
+  // preferred view — operators who monitor the weekly trend don't get
+  // bumped back to "today" every page load.
+  const [kpiWindow, setKpiWindow] = useState<"today" | "week" | "month">(() => {
+    if (typeof window === "undefined") return "today";
+    try {
+      const raw = window.localStorage.getItem("ats-admin-kpi-window");
+      if (raw === "week" || raw === "month" || raw === "today") return raw;
+    } catch { /* ignore */ }
+    return "today";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-kpi-window", kpiWindow); } catch { /* ignore */ }
+  }, [kpiWindow]);
+
   const setUserBan = async (userId: string, banned: boolean, reason?: string) => {
     try {
       const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/ban`), {
@@ -691,53 +722,77 @@ export default function AdminPage() {
 
         {/* ── KPI hero ──────────────────────────────────────────────── */}
         <section>
-          <h2 className="text-xs font-bold uppercase tracking-wider mb-3" style={{ color: "var(--ats-fg-secondary)" }}>
-            Live KPIs
-          </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <KpiCard
-              icon={<Users size={14} />}
-              label="Total users"
-              value={ov?.users.total ?? "—"}
-              sublabel={`${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar`}
-              color="#3b82f6"
-            />
-            <KpiCard
-              icon={<Activity size={14} />}
-              label="Active today"
-              value={ov?.today.active_users ?? "—"}
-              sublabel={ov ? `${pct(ov.today.active_users, ov.users.total)}% of all users` : ""}
-              color="#10b981"
-            />
-            <KpiCard
-              icon={<Zap size={14} />}
-              label="Searches today"
-              value={ov ? (ov.today.quick_search_count + ov.today.deep_search_count) : "—"}
-              sublabel={ov ? `${ov.today.quick_search_count} quick · ${ov.today.deep_search_count} deep` : ""}
-              color="#8b5cf6"
-            />
-            <KpiCard
-              icon={<Sparkles size={14} />}
-              label="Synthesis today"
-              value={ov?.today.synthesis_count ?? "—"}
-              sublabel={`${ov?.today.deep_read_count ?? 0} deep reads`}
-              color="#ec4899"
-            />
-            <KpiCard
-              icon={<MessageSquare size={14} />}
-              label="Conversations"
-              value={ov?.conversations ?? "—"}
-              sublabel={`${ov?.history_entries ?? 0} history rows`}
-              color="#f59e0b"
-            />
-            <KpiCard
-              icon={<DollarSign size={14} />}
-              label="Cost today"
-              value={ov ? `$${ov.today.llm_cost_usd.toFixed(2)}` : "—"}
-              sublabel="LLM usage (USD)"
-              color="#ef4444"
-            />
+          <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+            <h2 className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-secondary)" }}>
+              Live KPIs
+            </h2>
+            {/* Window toggle — 3 segments, active one tinted with the
+                accent token so it follows the theme. The labels below
+                swap from "Searches today" → "Searches this week" →
+                "Searches this month" as the user clicks. Total users +
+                Conversations are ALL-TIME and deliberately don't change
+                — they're not windowed metrics. */}
+            <WindowToggle value={kpiWindow} onChange={setKpiWindow} />
           </div>
+          {(() => {
+            // Pick which window to render. Falls back to `today` if the
+            // backend hasn't been upgraded yet (old deploys didn't send
+            // week/month — we degrade gracefully instead of showing "—").
+            const win: UsageWindow | undefined =
+              kpiWindow === "week"  ? (ov?.week  ?? ov?.today) :
+              kpiWindow === "month" ? (ov?.month ?? ov?.today) :
+                                      ov?.today;
+            const windowLabel =
+              kpiWindow === "today" ? "today" :
+              kpiWindow === "week"  ? "this week" :
+                                      "this month";
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                <KpiCard
+                  icon={<Users size={14} />}
+                  label="Total users"
+                  value={ov?.users.total ?? "—"}
+                  sublabel={`${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar`}
+                  color="#3b82f6"
+                />
+                <KpiCard
+                  icon={<Activity size={14} />}
+                  label={`Active ${windowLabel}`}
+                  value={win?.active_users ?? "—"}
+                  sublabel={win && ov ? `${pct(win.active_users, ov.users.total)}% of all users` : ""}
+                  color="#10b981"
+                />
+                <KpiCard
+                  icon={<Zap size={14} />}
+                  label={`Searches ${windowLabel}`}
+                  value={win ? (win.quick_search_count + win.deep_search_count) : "—"}
+                  sublabel={win ? `${win.quick_search_count} quick · ${win.deep_search_count} deep` : ""}
+                  color="#8b5cf6"
+                />
+                <KpiCard
+                  icon={<Sparkles size={14} />}
+                  label={`Synthesis ${windowLabel}`}
+                  value={win?.synthesis_count ?? "—"}
+                  sublabel={`${win?.deep_read_count ?? 0} deep reads`}
+                  color="#ec4899"
+                />
+                <KpiCard
+                  icon={<MessageSquare size={14} />}
+                  label="Conversations"
+                  value={ov?.conversations ?? "—"}
+                  sublabel={`${ov?.history_entries ?? 0} history rows`}
+                  color="#f59e0b"
+                />
+                <KpiCard
+                  icon={<DollarSign size={14} />}
+                  label={`Cost ${windowLabel}`}
+                  value={win ? `$${win.llm_cost_usd.toFixed(2)}` : "—"}
+                  sublabel="LLM usage (USD)"
+                  color="#ef4444"
+                />
+              </div>
+            );
+          })()}
         </section>
 
         {/* ── Charts row ────────────────────────────────────────────── */}
@@ -1524,6 +1579,58 @@ function QuotaGiftInput({ label, value, onChange }: { label: string; value: numb
         style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
       />
     </label>
+  );
+}
+
+
+// ── KPI window toggle ──────────────────────────────────────────────────────
+// Three-segment rocker: Today · Week · Month. Compact (same height as the
+// section heading) so it sits next to "Live KPIs" without dominating.
+// Active segment uses the accent token pair so colour follows the user's
+// current theme — emerald on Morning Mint, amber on Warm Paper, etc.
+
+function WindowToggle({
+  value, onChange,
+}: {
+  value: "today" | "week" | "month";
+  onChange: (v: "today" | "week" | "month") => void;
+}) {
+  const options: Array<{ v: "today" | "week" | "month"; label: string }> = [
+    { v: "today", label: "Today" },
+    { v: "week",  label: "Week"  },
+    { v: "month", label: "Month" },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label="KPI time window"
+      className="inline-flex items-center rounded-lg border p-0.5 text-[10px] font-bold tracking-wide select-none"
+      style={{
+        borderColor:     "var(--ats-border-subtle)",
+        backgroundColor: "var(--ats-bg-panel)",
+      }}
+    >
+      {options.map(opt => {
+        const active = value === opt.v;
+        return (
+          <button
+            key={opt.v}
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(opt.v)}
+            className="rounded-md px-2.5 py-1 transition-colors"
+            style={active ? {
+              backgroundColor: "var(--ats-bg-accent-soft)",
+              color:           "var(--ats-fg-accent)",
+            } : {
+              color: "var(--ats-fg-muted)",
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

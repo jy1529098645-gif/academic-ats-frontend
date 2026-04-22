@@ -2413,7 +2413,23 @@ export default function HomePage() {
       s.includes("not publicly accessible") ||
       s.includes("javascript-rendered") ||
       s.includes("403") ||
-      s.includes("forbidden")
+      s.includes("forbidden") ||
+      // Truncated / corrupt PDF transport errors — pypdf throws
+      // PdfStreamError("Stream has ended unexpectedly") when the
+      // publisher's server sends an incomplete response. Same UX
+      // category as a paywall (not our bug, nothing the user can
+      // debug) so render gray. The backend now wraps these in a
+      // user-friendly message that also contains "publisher"
+      // (already matched above), but the extra keywords here
+      // belt-and-suspenders the detection.
+      s.includes("truncated") ||
+      s.includes("corrupt") ||
+      s.includes("incomplete pdf") ||
+      s.includes("stream has ended") ||
+      s.includes("pdfstreamerror") ||
+      s.includes("pdfreaderror") ||
+      s.includes("could not parse pdf") ||
+      s.includes("partial response")
     );
   };
 
