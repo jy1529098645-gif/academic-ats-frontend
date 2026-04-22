@@ -747,6 +747,24 @@ export default function AdminPage() {
     }
   };
 
+  // Send a dev-composed popup notification to one user. Body is short
+  // prose (< 1200 chars); the recipient sees it as a modal on their
+  // next page load. Server-side this also writes to admin_audit_log.
+  const notifyUser = async (
+    userId: string,
+    payload: { title: string; body: string; emoji?: string; kind?: string },
+  ) => {
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/notify`), {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`notify HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+  };
+
   const fetchUserActivity = async (userId: string): Promise<{ activity: Array<{ id: string; entry_type: string; query: string; summary: string; created_at: string }> }> => {
     const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/activity?limit=50`));
     if (!res.ok) throw new Error(`user-activity HTTP ${res.status}`);
@@ -1571,6 +1589,7 @@ export default function AdminPage() {
             onBan={setUserBan}
             onGrantQuota={grantUserQuota}
             onSetTier={setUserTier}
+            onNotify={notifyUser}
             onFetchActivity={fetchUserActivity}
           />
         )}
@@ -1809,14 +1828,27 @@ function MaintenancePanel({
 // local to the drawer — they reset on close so re-opening for a different
 // user doesn't carry over stale values.
 
+// Curated emoji palette for the admin notify composer. Covers the four
+// moods that match the typical send reasons: celebration (tier bump,
+// quota grant), gratitude (thanks / milestone), encouragement, and
+// informational. Free-form typing is still allowed — this is just a
+// quick-pick row, not a constraint.
+const NOTIFY_EMOJI_PRESETS: string[] = [
+  "🎉", "🎊", "✨", "🥳", "🎁", "🌟", "💎",
+  "🙏", "❤️", "💖", "💕", "💝", "🫶", "🤗",
+  "👍", "🙌", "👏", "💪", "🤝", "🔥", "⚡",
+  "🚀", "📚", "🧪", "🎯", "📣", "💬", "📌", "✉️",
+];
+
 function UserDetailDrawer({
-  user, onClose, onBan, onGrantQuota, onSetTier, onFetchActivity,
+  user, onClose, onBan, onGrantQuota, onSetTier, onNotify, onFetchActivity,
 }: {
   user: AdminUser;
   onClose: () => void;
   onBan: (userId: string, banned: boolean, reason?: string) => Promise<void>;
   onGrantQuota: (userId: string, grants: {quick_search?:number; deep_search?:number; synthesis?:number; deep_read?:number}) => Promise<void>;
   onSetTier: (userId: string, tier: string) => Promise<void>;
+  onNotify: (userId: string, payload: { title: string; body: string; emoji?: string; kind?: string }) => Promise<void>;
   onFetchActivity: (userId: string) => Promise<{ activity: Array<{ id: string; entry_type: string; query: string; summary: string; created_at: string }> }>;
 }) {
   const [banReason, setBanReason] = useState<string>(user.ban_reason || "");
@@ -1825,7 +1857,14 @@ function UserDetailDrawer({
   const [synthGrant, setSynthGrant] = useState<number>(0);
   const [readsGrant, setReadsGrant] = useState<number>(0);
   const [tierDraft,  setTierDraft]  = useState<string>(user.tier);
-  const [busy, setBusy] = useState<"ban" | "unban" | "grant" | "tier" | null>(null);
+  const [busy, setBusy] = useState<"ban" | "unban" | "grant" | "tier" | "notify" | null>(null);
+
+  // ── Notify composer state ────────────────────────────────────────────────
+  const [notifyTitle, setNotifyTitle] = useState<string>("");
+  const [notifyBody,  setNotifyBody]  = useState<string>("");
+  const [notifyEmoji, setNotifyEmoji] = useState<string>("");
+  const [notifyKind,  setNotifyKind]  = useState<"general" | "tier_upgrade" | "quota_grant" | "system">("general");
+  const [notifyMsg,   setNotifyMsg]   = useState<{ text: string; error?: boolean } | null>(null);
 
   // Activity feed — lazy-loaded once when drawer opens. Refreshable by the
   // user explicitly clicking the Refresh button in that section.
@@ -1881,6 +1920,31 @@ function UserDetailDrawer({
     await onSetTier(user.id, tierDraft);
     setBusy(null);
     onClose();
+  };
+
+  const handleNotify = async () => {
+    const t = notifyTitle.trim();
+    const b = notifyBody.trim();
+    if (!t && !b) {
+      setNotifyMsg({ text: "Add a title or body before sending.", error: true });
+      return;
+    }
+    setBusy("notify");
+    setNotifyMsg(null);
+    try {
+      await onNotify(user.id, { title: t, body: b, emoji: notifyEmoji.trim(), kind: notifyKind });
+      setNotifyMsg({ text: "Sent. The user will see it on next page load." });
+      setNotifyTitle("");
+      setNotifyBody("");
+      setNotifyEmoji("");
+      setNotifyKind("general");
+      // Auto-clear the success banner after a couple of seconds.
+      window.setTimeout(() => setNotifyMsg(null), 2500);
+    } catch (e) {
+      setNotifyMsg({ text: e instanceof Error ? e.message : String(e), error: true });
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
@@ -2005,6 +2069,122 @@ function UserDetailDrawer({
               style={{ backgroundColor: "#10b981" }}
             >
               {busy === "grant" ? "Gifting…" : "Add to balance"}
+            </button>
+          </section>
+
+          {/* ── Notify this user (dev popup) ──────────────────────────── */}
+          <section>
+            <h4 className="text-[11px] font-bold uppercase tracking-wider mb-2" style={{ color: "var(--ats-fg-secondary)" }}>
+              📬 Send popup notification
+            </h4>
+            <p className="text-[10px] mb-2" style={{ color: "var(--ats-fg-muted)" }}>
+              Shows as a modal on this user&apos;s next page load. Use after manual tier bumps, gifted quota, or one-off thank-you notes.
+            </p>
+            <div className="mb-2">
+              <label className="block text-[10px] font-semibold mb-1" style={{ color: "var(--ats-fg-secondary)" }}>
+                Kind
+              </label>
+              <div className="flex gap-1">
+                {(["general", "tier_upgrade", "quota_grant", "system"] as const).map(k => {
+                  const active = notifyKind === k;
+                  return (
+                    <button
+                      key={k}
+                      onClick={() => setNotifyKind(k)}
+                      className="flex-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition-colors"
+                      style={{
+                        borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                        backgroundColor: active ? "var(--ats-bg-accent-soft)" : "transparent",
+                        color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-secondary)",
+                      }}
+                    >
+                      {k === "tier_upgrade" ? "Tier ↑" : k === "quota_grant" ? "Quota +" : k === "system" ? "System" : "General"}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="mb-2">
+              <label className="block text-[10px] font-semibold mb-1" style={{ color: "var(--ats-fg-secondary)" }}>
+                Emoji (optional)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={notifyEmoji}
+                  onChange={(e) => setNotifyEmoji(e.target.value.slice(0, 8))}
+                  placeholder="—"
+                  className="w-14 text-center rounded-lg border px-2 py-1 text-sm outline-none"
+                  style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
+                />
+                <div className="flex-1 flex flex-wrap gap-1">
+                  {NOTIFY_EMOJI_PRESETS.map(e => (
+                    <button
+                      key={e}
+                      type="button"
+                      onClick={() => setNotifyEmoji(e)}
+                      className="h-6 w-6 rounded text-sm leading-none flex items-center justify-center hover:bg-black/5 transition-colors"
+                      style={{
+                        backgroundColor: notifyEmoji === e ? "var(--ats-bg-accent-soft)" : "transparent",
+                      }}
+                      aria-label={`Pick ${e}`}
+                    >
+                      {e}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="mb-2">
+              <label className="block text-[10px] font-semibold mb-1" style={{ color: "var(--ats-fg-secondary)" }}>
+                Title
+              </label>
+              <input
+                type="text"
+                value={notifyTitle}
+                onChange={(e) => setNotifyTitle(e.target.value)}
+                maxLength={120}
+                placeholder="e.g. You're now on Scholar"
+                className="w-full rounded-lg border px-3 py-1.5 text-xs outline-none"
+                style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
+              />
+            </div>
+            <div className="mb-2">
+              <label className="block text-[10px] font-semibold mb-1" style={{ color: "var(--ats-fg-secondary)" }}>
+                Message
+              </label>
+              <textarea
+                value={notifyBody}
+                onChange={(e) => setNotifyBody(e.target.value)}
+                maxLength={1200}
+                rows={3}
+                placeholder="Thanks for being an early user — we've bumped you up a tier. Enjoy!"
+                className="w-full rounded-lg border p-2 text-xs outline-none resize-y"
+                style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
+              />
+              <div className="flex justify-end text-[10px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
+                {notifyBody.length} / 1200
+              </div>
+            </div>
+            {notifyMsg && (
+              <p
+                className="text-[10px] rounded px-2 py-1 mb-2 border"
+                style={{
+                  borderColor:     notifyMsg.error ? "#ef444455" : "#10b98155",
+                  backgroundColor: notifyMsg.error ? "#ef44441a" : "#10b9811a",
+                  color:           notifyMsg.error ? "#ef4444"   : "#10b981",
+                }}
+              >
+                {notifyMsg.text}
+              </p>
+            )}
+            <button
+              onClick={handleNotify}
+              disabled={busy === "notify" || (notifyTitle.trim().length === 0 && notifyBody.trim().length === 0)}
+              className="rounded-lg px-3 py-2 text-xs font-bold text-white disabled:opacity-40"
+              style={{ backgroundColor: "#8b5cf6" }}
+            >
+              {busy === "notify" ? "Sending…" : "Send notification"}
             </button>
           </section>
 

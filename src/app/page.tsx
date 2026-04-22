@@ -19,6 +19,8 @@ import {
 } from "@/lib/stores/usage-prompt-store";
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import UserNotificationPopup from "@/components/UserNotificationPopup";
+import { useUserNotifications } from "@/lib/hooks/use-user-notifications";
 import {
   useUsage,
   USAGE_FEATURE_LABELS,
@@ -1291,6 +1293,11 @@ export default function HomePage() {
   // window focus, and whenever a metered action completes (see usage.refresh()
   // calls after search / synthesize / deep-read success).
   const usage = useUsage(!!authUser?.email);
+
+  // Dev-composed notification popups (tier bump / quota grant / free-form).
+  // The hook polls every 60s and on focus; the popup component auto-pops
+  // the top of the queue when present and acks on dismiss.
+  const userNotifications = useUserNotifications(!!authUser?.email);
 
   /**
    * Pre-flight quota check. Call BEFORE any metered action (search /
@@ -6069,6 +6076,13 @@ ${html}
               </div>
             </div>
           )}
+
+          {/* Dev-to-user popup notifications (tier bumps, quota grants, notes).
+              Renders only when the hook has at least one pending item; the
+              component auto-dismisses on backdrop / ESC / "Got it" and acks
+              the row server-side. Positioned at the end of the authed block
+              so it stacks cleanly above everything else except the auth widget. */}
+          <UserNotificationPopup queue={userNotifications.queue} ack={userNotifications.ack} />
         </>
       )}
 
