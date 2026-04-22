@@ -46,6 +46,7 @@ import {
   X, Gem, Check, Mail, Moon, Sun, User, Settings, CreditCard, HelpCircle, Users,
   Plus, Minus, ArrowRight, Lightbulb, ExternalLink, MessageCircle, ClipboardCheck,
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
+  Link as LinkIcon, ShieldCheck,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical
 } from "lucide-react";
 
@@ -4516,21 +4517,25 @@ ${html}
                               <ExternalLink size={12} className="shrink-0" /><span className="truncate">Open Paper</span>
                             </a>
                           )}
-                          {/* Deep Read */}
+                          {/* Evidence Chain — formerly "Deep Read". Renamed +
+                              repurposed to surface per-claim source trails
+                              from paper metadata (no PDF parsing needed), so
+                              it works on paywalled / anti-bot-protected
+                              papers too. That's why we DELIBERATELY do NOT
+                              gate this button on `isBlocked` like Download
+                              PDF / Translate PDF — the underlying endpoint
+                              no longer touches the PDF layer. */}
                           <button
                             onClick={() => void runDeepRead(paper, paperKey)}
-                            disabled={isBlocked || deepReadLoading[paperKey]}
-                            title={blockedTooltip}
+                            disabled={deepReadLoading[paperKey]}
                             className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
-                              isBlocked
-                                ? blockedClasses
-                                : deepReadLoading[paperKey]
+                              deepReadLoading[paperKey]
                                 ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                             }`}
                           >
-                            <Microscope size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
-                            <span className="truncate">{deepReadLoading[paperKey] ? "Running…" : "Deep Read"}</span>
+                            <ShieldCheck size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
+                            <span className="truncate">{deepReadLoading[paperKey] ? "Tracing…" : "Evidence Chain"}</span>
                             <ProgressStrip active={!!deepReadLoading[paperKey]} />
                           </button>
                           {/* Download PDF */}
@@ -4623,58 +4628,157 @@ ${html}
                         )}
 
 
-                        {/* Deep Reading result — collapsible */}
-                        {deepRead && (
+                        {/* Empty state: the endpoint returned but produced
+                            zero claims (paper metadata too thin for the
+                            LLM to extract anything useful). Tell the user
+                            rather than silently showing nothing. */}
+                        {deepRead && Array.isArray(deepRead.claims) && deepRead.claims.length === 0 && (
+                          <div className="mt-3 rounded-xl border border-slate-700/60 bg-slate-800/40 px-4 py-2.5 text-xs text-slate-400 flex items-start gap-2">
+                            <ShieldCheck size={14} className="shrink-0 mt-0.5 text-slate-500" />
+                            <span>
+                              Evidence Chain couldn&apos;t extract structured claims from this paper&apos;s metadata. Try the abstract on the paper&apos;s source page via <span className="font-semibold">Open Paper</span>, or add this paper to Synthesis Lab where its full-text processing lives.
+                            </span>
+                          </div>
+                        )}
+                        {/* Evidence Chain result — collapsible. Replaces
+                            the old Deep Reading narrative report. Each
+                            claim gets its own card with a chain of source
+                            entries (title / authors / year / strength pill
+                            / clickable link) so users can trace exactly
+                            where a statement came from. */}
+                        {deepRead && Array.isArray(deepRead.claims) && deepRead.claims.length > 0 && (
                           <details className="mt-3 rounded-xl bg-blue-500/5" open>
-                            <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-bold text-slate-200 hover:text-white transition-colors inline-flex items-center gap-2"><Microscope size={14} />Deep Reading Report</summary>
-                            <div className="px-4 pb-4 pt-1">
-                              {deepRead.academic_summary && <div className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-300">{deepRead.academic_summary}</div>}
-                              {Array.isArray(deepRead.key_findings) && deepRead.key_findings.length > 0 && (
-                                <div className="mt-3">
-                                  <div className="mb-2 text-sm font-semibold text-slate-100">Key findings</div>
-                                  <ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">
-                                    {deepRead.key_findings.map((item: string, idx: number) => <li key={idx}>{item}</li>)}
-                                  </ul>
-                                </div>
-                              )}
-                              {/* Download deep read report */}
-                              <div className="mt-3 flex flex-nowrap items-center gap-1.5 overflow-hidden">
+                            <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-bold text-slate-200 hover:text-white transition-colors inline-flex items-center gap-2">
+                              <ShieldCheck size={14} />
+                              Evidence Chain
+                              <span className="text-[10px] font-normal text-slate-500">
+                                · {deepRead.claims.length} claim{deepRead.claims.length !== 1 ? "s" : ""}
+                              </span>
+                            </summary>
+                            <div className="px-4 pb-4 pt-1 space-y-3">
+                              {deepRead.claims.map((claim: Record<string, unknown>, ci: number) => {
+                                const claimText = String((claim?.claim ?? claim?.claim_text) || "").trim();
+                                if (!claimText) return null;
+                                const support  = String(claim?.support_level || "moderate").toLowerCase();
+                                const chain    = Array.isArray(claim?.evidence_chain) ? (claim.evidence_chain as Array<Record<string, unknown>>) : [];
+                                const chainColor =
+                                  support === "strong"   ? "#10b981"
+                                  : support === "weak"   ? "#f59e0b"
+                                  : "#3b82f6";
+                                return (
+                                  <div key={ci} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                                    {/* Claim text — the thing being supported */}
+                                    <div className="flex items-start gap-2">
+                                      <span
+                                        className="shrink-0 mt-0.5 inline-flex items-center justify-center h-5 min-w-[20px] px-1.5 rounded-full text-[10px] font-bold tabular-nums"
+                                        style={{ backgroundColor: `${chainColor}22`, color: chainColor, border: `1px solid ${chainColor}55` }}
+                                      >
+                                        C{ci + 1}
+                                      </span>
+                                      <div className="flex-1 min-w-0">
+                                        <p className="text-sm leading-snug text-slate-100 break-words">
+                                          {claimText}
+                                        </p>
+                                        {(claim.scope_note || claim.claim_type) ? (
+                                          <p className="mt-0.5 text-[10px] text-slate-500">
+                                            {claim.claim_type ? <span className="uppercase tracking-wider font-bold text-slate-400">{String(claim.claim_type)}</span> : null}
+                                            {claim.claim_type && claim.scope_note ? " · " : ""}
+                                            {claim.scope_note ? String(claim.scope_note) : ""}
+                                          </p>
+                                        ) : null}
+                                      </div>
+                                      {/* Support-level pill */}
+                                      <span
+                                        className="shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded"
+                                        style={{ backgroundColor: `${chainColor}22`, color: chainColor, border: `1px solid ${chainColor}55` }}
+                                      >
+                                        {support}
+                                      </span>
+                                    </div>
+                                    {/* Evidence chain entries */}
+                                    {chain.length > 0 && (
+                                      <div className="mt-2 pl-7 space-y-1.5">
+                                        {chain.map((entry, ei) => {
+                                          const link = String(entry?.link || "").trim();
+                                          const strength = String(entry?.evidence_strength || "moderate").toLowerCase();
+                                          const entryColor =
+                                            strength === "strong" ? "#10b981"
+                                            : strength === "weak" ? "#f59e0b"
+                                            : "#64748b";
+                                          return (
+                                            <div key={ei} className="flex items-start gap-1.5 text-[11px] leading-snug">
+                                              <LinkIcon size={10} className="shrink-0 mt-[3px] text-slate-600" />
+                                              <div className="flex-1 min-w-0">
+                                                <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0">
+                                                  {link ? (
+                                                    <a
+                                                      href={link}
+                                                      target="_blank"
+                                                      rel="noreferrer"
+                                                      className="font-semibold text-blue-300 hover:text-blue-200 underline-offset-2 hover:underline break-words"
+                                                      title={link}
+                                                    >
+                                                      {String(entry?.title || "(untitled)")}
+                                                    </a>
+                                                  ) : (
+                                                    <span className="font-semibold text-slate-300 break-words">
+                                                      {String(entry?.title || "(untitled)")}
+                                                    </span>
+                                                  )}
+                                                  {entry?.year != null && entry.year !== "" && (
+                                                    <span className="text-slate-500">({String(entry.year)})</span>
+                                                  )}
+                                                  <span
+                                                    className="text-[9px] font-bold uppercase tracking-wider px-1 py-0 rounded"
+                                                    style={{ color: entryColor, border: `1px solid ${entryColor}55` }}
+                                                  >
+                                                    {strength}
+                                                  </span>
+                                                </div>
+                                                {entry?.authors ? (
+                                                  <div className="text-slate-500 text-[10px] break-words">
+                                                    {String(entry.authors)}
+                                                    {entry?.source ? <span className="text-slate-600"> · {String(entry.source)}</span> : null}
+                                                  </div>
+                                                ) : null}
+                                                {entry?.summary ? (
+                                                  <div className="mt-0.5 text-slate-400 text-[11px] leading-snug break-words">
+                                                    {String(entry.summary)}
+                                                  </div>
+                                                ) : null}
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {/* Copy / download — shortened since the
+                                  structured output is the better artefact.
+                                  Users who want a file can still reach this. */}
+                              <div className="flex flex-nowrap items-center gap-1.5">
                                 <button
                                   onClick={() => {
-                                    const text = [
-                                      deepRead.academic_summary || "",
-                                      deepRead.key_findings?.length
-                                        ? "\nKey Findings:\n" + deepRead.key_findings.map((f: string, i: number) => `${i+1}. ${f}`).join("\n")
-                                        : "",
-                                    ].join("\n");
-                                    void navigator.clipboard.writeText(text);
+                                    const lines: string[] = [];
+                                    lines.push(`# Evidence Chain: ${paper.title || "Paper"}`);
+                                    for (const c of (deepRead.claims || [])) {
+                                      const cText = String((c as Record<string, unknown>)?.claim || (c as Record<string, unknown>)?.claim_text || "").trim();
+                                      if (!cText) continue;
+                                      lines.push(`\n## ${cText}`);
+                                      const cc = (c as Record<string, unknown>)?.evidence_chain;
+                                      if (Array.isArray(cc)) {
+                                        for (const e of cc) {
+                                          const en = e as Record<string, unknown>;
+                                          lines.push(`- [${en.evidence_strength || "moderate"}] ${en.title || "(untitled)"} (${en.year ?? "—"}) — ${en.link || "no link"}`);
+                                        }
+                                      }
+                                    }
+                                    void navigator.clipboard.writeText(lines.join("\n"));
                                   }}
                                   className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-blue-400 hover:border-blue-500/50 transition-colors"
-                                ><ClipboardList size={11} className="shrink-0" /><span className="truncate">Copy</span></button>
-                                <select
-                                  id={`deepread-fmt-${paperKey}`}
-                                  defaultValue="html"
-                                  className="shrink-0 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-slate-400 focus:outline-none"
-                                >
-                                  <option value="html">HTML</option>
-                                  <option value="txt">TXT</option>
-                                  <option value="md">Markdown</option>
-                                </select>
-                                <button
-                                  onClick={() => {
-                                    const fmt = (document.getElementById(`deepread-fmt-${paperKey}`) as HTMLSelectElement)?.value as "html"|"txt"|"md" ?? "html";
-                                    const text = [
-                                      `# Deep Reading: ${paper.title || "Paper"}\n`,
-                                      deepRead.academic_summary || "",
-                                      deepRead.key_findings?.length
-                                        ? "\n## Key Findings\n" + deepRead.key_findings.map((f: string, i: number) => `${i+1}. ${f}`).join("\n")
-                                        : "",
-                                    ].join("\n");
-                                    const slug = (paper.title || "deep_read").replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 50);
-                                    downloadTextAs(text, `DeepRead_${slug}`, fmt);
-                                  }}
-                                  className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 transition-colors"
-                                ><span aria-hidden className="shrink-0">⬇</span><span className="truncate">Download</span></button>
+                                ><ClipboardList size={11} className="shrink-0" /><span className="truncate">Copy chain</span></button>
                               </div>
                             </div>
                           </details>

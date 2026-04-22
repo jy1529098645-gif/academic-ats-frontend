@@ -187,8 +187,14 @@ export default function TermsOfServiceGate({ children }: { children: React.React
             </p>
           </div>
 
-          {/* Scrollable body */}
-          <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4">
+          {/* Scrollable body — uses .hairline-scrollbar (3px wide, theme-
+              coloured thumb via --ats-scroll-thumb) so the scrollbar
+              follows Morning Mint / Warm Paper / Night / etc without
+              code changes. Without this class the browser falls back to
+              its default chunky grey scrollbar which clashes with any
+              theme and especially looks out of place against the panel
+              tokens we use everywhere else. */}
+          <div className="flex-1 min-h-0 overflow-y-auto hairline-scrollbar px-6 py-4 space-y-4">
             {TOS_SECTIONS.map(s => (
               <section key={s.title}>
                 <h3
