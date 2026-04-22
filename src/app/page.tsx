@@ -4058,6 +4058,20 @@ ${html}
                 {/* Right-aligned group — no wrapping: each button collapses width /
                     truncates its label before the row breaks into multiple lines. */}
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
+                  {/* Step-1 badge — subtle numeral sitting before the Query
+                      Understanding button so the user reads the row as an
+                      ordered workflow ("1. understand, 2. search"). Same
+                      palette as the rest of the surface: muted foreground
+                      on the subtle panel bg, no accent colour. */}
+                  <span
+                    aria-hidden
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border text-sm font-bold shrink-0 select-none"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-panel)",
+                      color:           "var(--ats-fg-secondary)",
+                    }}
+                  >1</span>
                   {/* Query Understanding — click again during analysis to cancel.
                       min-w locks the width so the label toggle (Understand ↔ Cancel) doesn't resize the button. */}
                   <button
@@ -4093,6 +4107,18 @@ ${html}
                     ><FlaskConical size={14} className="shrink-0" /><span className="truncate">Curated Analysis</span></button>
                   </div>
 
+                  {/* Step-2 badge — sibling of the step-1 badge above; same
+                      palette so the numerals read as a pair, not as two
+                      unrelated decorations. */}
+                  <span
+                    aria-hidden
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border text-sm font-bold shrink-0 select-none"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-panel)",
+                      color:           "var(--ats-fg-secondary)",
+                    }}
+                  >2</span>
                   {/* Start / Stop — compact circular action */}
                   {isSubmitting ? (
                     <button
@@ -5982,16 +6008,21 @@ ${html}
                     {autoPromptedFeedback ? (
                       <>
                         <h2 className="text-xl font-bold leading-tight" style={{ color: "var(--ats-fg-accent)" }}>
-                          We&apos;d really love your feedback
+                          We really need your feedback
                         </h2>
-                        <p className="mt-1 text-sm" style={{ color: "var(--ats-fg-secondary)" }}>
-                          It genuinely shapes what we build next. We read every note.
+                        <p className="mt-1 text-sm font-medium" style={{ color: "var(--ats-fg-primary)" }}>
+                          This <span className="font-bold" style={{ color: "var(--ats-fg-accent)" }}>really matters to us</span> — your input directly shapes what we ship next. We read every single note.
                         </p>
                       </>
                     ) : (
-                      <h2 className="text-lg font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
-                        Send feedback
-                      </h2>
+                      <>
+                        <h2 className="text-lg font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                          Send feedback
+                        </h2>
+                        <p className="mt-1 text-xs" style={{ color: "var(--ats-fg-secondary)" }}>
+                          We need your feedback — it matters to us. Every note gets read.
+                        </p>
+                      </>
                     )}
                   </div>
                   <button
