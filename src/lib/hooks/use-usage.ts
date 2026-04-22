@@ -92,12 +92,17 @@ export function useUsage(isAuthed: boolean): UsageState {
   return { data, loading, error, refresh };
 }
 
-/** Human-friendly labels for quota features. */
+/** Human-friendly labels for quota features. The `deep_read` key is an
+ *  INTERNAL identifier kept for backward compatibility with the quota
+ *  table column + /api/papers/deep-read URL; its user-facing label
+ *  however reads "Evidence Chain" — matching the renamed feature
+ *  throughout the product. New code should prefer reading this map
+ *  over hardcoding strings. */
 export const USAGE_FEATURE_LABELS: Record<keyof UsageSnapshot["limits"], string> = {
   quick_search: "Quick Search",
   deep_search:  "Deep Analysis",
   synthesis:    "Synthesis Lab",
-  deep_read:    "Deep Read",
+  deep_read:    "Evidence Chain",
 };
 
 /** Render a "12 / 150" or "12 / ∞" string. */

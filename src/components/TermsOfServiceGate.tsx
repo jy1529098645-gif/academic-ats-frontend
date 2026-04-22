@@ -47,7 +47,7 @@ const TOS_SECTIONS: Array<{ title: string; body: string }> = [
   {
     title: "1. What AcademiCats is",
     body:
-      `AcademiCats is an AI-assisted academic research assistant (currently ${APP_VERSION}). It helps you discover relevant papers from open-access databases (Semantic Scholar, OpenAlex, Crossref, arXiv, PubMed, and others), synthesises those papers into research briefs, and offers deep-read / translation tools for individual PDFs. The service is provided as-is during the Alpha testing period; features and limits may change without notice.`,
+      `AcademiCats is an AI-assisted academic research assistant (currently ${APP_VERSION}). It helps you discover relevant papers from open-access databases (Semantic Scholar, OpenAlex, Crossref, arXiv, PubMed, and others), synthesises those papers into research briefs, and offers Evidence Chain (per-claim source tracing) plus PDF translation tools for individual papers. The service is provided as-is during the Alpha testing period; features and limits may change without notice.`,
   },
   {
     title: "2. What data we collect and why",

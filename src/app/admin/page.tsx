@@ -1063,7 +1063,7 @@ export default function AdminPage() {
                   icon={<Sparkles size={14} />}
                   label={`Synthesis ${windowLabel}`}
                   value={win?.synthesis_count ?? "—"}
-                  sublabel={`${win?.deep_read_count ?? 0} deep reads`}
+                  sublabel={`${win?.deep_read_count ?? 0} evidence chains`}
                   color="#ec4899"
                 />
                 <KpiCard
@@ -1386,7 +1386,7 @@ export default function AdminPage() {
                 Recent activity
               </h3>
               <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                Every logged-in search / synthesis / deep-read emits one row.
+                Every logged-in search / synthesis / evidence-chain emits one row.
                 Refreshes every 30 s.
               </p>
             </div>
@@ -1986,14 +1986,17 @@ function UserDetailDrawer({
               🎁 Gift bonus quota
             </h4>
             <p className="text-[10px] mb-2" style={{ color: "var(--ats-fg-muted)" }}>
-              Current balance — +{user.bonus?.quick_search ?? 0} quick · +{user.bonus?.deep_search ?? 0} deep · +{user.bonus?.synthesis ?? 0} synth · +{user.bonus?.deep_read ?? 0} reads.
+              Current balance — +{user.bonus?.quick_search ?? 0} quick · +{user.bonus?.deep_search ?? 0} deep · +{user.bonus?.synthesis ?? 0} synth · +{user.bonus?.deep_read ?? 0} chains.
               Grants stack on top of tier limits and don&apos;t reset at UTC midnight.
             </p>
             <div className="grid grid-cols-2 gap-2 mb-2">
-              <QuotaGiftInput label="Quick searches" value={quickGrant} onChange={setQuickGrant} />
-              <QuotaGiftInput label="Deep searches"  value={deepGrant}  onChange={setDeepGrant} />
-              <QuotaGiftInput label="Syntheses"      value={synthGrant} onChange={setSynthGrant} />
-              <QuotaGiftInput label="Deep reads"     value={readsGrant} onChange={setReadsGrant} />
+              <QuotaGiftInput label="Quick searches"  value={quickGrant} onChange={setQuickGrant} />
+              <QuotaGiftInput label="Deep searches"   value={deepGrant}  onChange={setDeepGrant} />
+              <QuotaGiftInput label="Syntheses"       value={synthGrant} onChange={setSynthGrant} />
+              {/* `Evidence chains` grants hit the same deep_read DB column
+                  (kept for schema-backward-compat) — only the user-facing
+                  label is renamed. */}
+              <QuotaGiftInput label="Evidence chains" value={readsGrant} onChange={setReadsGrant} />
             </div>
             <button
               onClick={handleGrant}
@@ -2028,9 +2031,28 @@ function UserDetailDrawer({
                     style={{ borderColor: "var(--ats-border-subtle)" }}
                   >
                     <div className="flex items-center justify-between gap-2 mb-0.5">
-                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>
-                        {row.entry_type || "search"}
-                      </span>
+                      {/* Raw entry_type keys → product-facing labels so
+                          the chip reads "EVIDENCE CHAIN" instead of the
+                          internal `deep_read` string. Kept in-line here
+                          rather than a shared util because this is the
+                          only chip surface; the Top Queries breakdown
+                          has its own identical mapping above. */}
+                      {(() => {
+                        const LABELS: Record<string, string> = {
+                          search:         "SEARCH",
+                          quick_search:   "QUICK SEARCH",
+                          deep_search:    "DEEP SEARCH",
+                          synthesis:      "SYNTHESIS",
+                          deep_read:      "EVIDENCE CHAIN",
+                          evidence_chain: "EVIDENCE CHAIN",
+                        };
+                        const raw = row.entry_type || "search";
+                        return (
+                          <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>
+                            {LABELS[raw] ?? raw.replace(/_/g, " ").toUpperCase()}
+                          </span>
+                        );
+                      })()}
                       <span className="text-[9px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
                         {fmtDate(row.created_at)}
                       </span>
@@ -2493,7 +2515,7 @@ function TopUsersPanel({ rows, onOpenDrawer }: { rows: TopUserRow[]; onOpenDrawe
               </span>
             </div>
             <p className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
-              {u.quick_search_count}q · {u.deep_search_count}d · {u.synthesis_count}s · {u.deep_read_count}r
+              {u.quick_search_count}q · {u.deep_search_count}d · {u.synthesis_count}s · {u.deep_read_count}c
             </p>
           </button>
         );
@@ -2518,12 +2540,23 @@ function TopQueriesPanel({ rows }: { rows: TopQueryRow[] }) {
   const maxCount = Math.max(1, ...rows.map(r => r.count));
   return (
     <div className="space-y-1 max-h-96 overflow-y-auto thin-scrollbar pr-1">
+      {/* Map raw backend entry_type keys to product-facing display
+          names so the breakdown reads "2 evidence_chain" as
+          "2 Evidence Chain" etc. Keys absent from this map render
+          verbatim so new event types still show up (just un-themed). */}
       {rows.map((q, idx) => {
         const barPct = Math.max(4, Math.round((q.count / maxCount) * 100));
-        // Compact breakdown: "5 search · 2 deep_read"
+        const ENTRY_TYPE_LABELS: Record<string, string> = {
+          search:         "Search",
+          quick_search:   "Quick Search",
+          deep_search:    "Deep Search",
+          synthesis:      "Synthesis",
+          deep_read:      "Evidence Chain",
+          evidence_chain: "Evidence Chain",
+        };
         const breakdown = Object.entries(q.entry_types)
           .sort(([, a], [, b]) => b - a)
-          .map(([t, n]) => `${n} ${t}`)
+          .map(([t, n]) => `${n} ${ENTRY_TYPE_LABELS[t] ?? t}`)
           .join(" · ");
         return (
           <div
@@ -3087,7 +3120,7 @@ function TimeseriesLegend() {
     { color: "#3b82f6", label: "Quick search" },
     { color: "#8b5cf6", label: "Deep search" },
     { color: "#ec4899", label: "Synthesis" },
-    { color: "#10b981", label: "Deep reads" },
+    { color: "#10b981", label: "Evidence chain" },
   ];
   return (
     <div className="flex items-center gap-3 text-[10px]" style={{ color: "var(--ats-fg-secondary)" }}>
@@ -3194,10 +3227,10 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
             <th className="pb-2 pr-3 font-semibold">Email</th>
             <th className="pb-2 pr-3 font-semibold">Tier</th>
             <th className="pb-2 pr-3 font-semibold">Status</th>
-            <th className="pb-2 pr-3 font-semibold text-right">Quick</th>
-            <th className="pb-2 pr-3 font-semibold text-right">Deep</th>
-            <th className="pb-2 pr-3 font-semibold text-right">Synth</th>
-            <th className="pb-2 pr-3 font-semibold text-right">Reads</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Quick Search">Quick</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Deep Search">Deep</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Synthesis Lab runs">Synth</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Evidence Chain reports">Chain</th>
             <th className="pb-2 pr-3 font-semibold text-right">Cost (USD)</th>
             <th className="pb-2 pr-3 font-semibold">Last active</th>
             <th className="pb-2 pr-3 font-semibold">First seen</th>
@@ -3331,19 +3364,32 @@ function ActivityFeed({ rows }: { rows: ActivityEntry[] }) {
   if (rows.length === 0) {
     return (
       <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>
-        No activity yet. Rows appear here as soon as a signed-in user runs a search / synthesis / deep-read.
+        No activity yet. Rows appear here as soon as a signed-in user runs a search / synthesis / evidence-chain action.
       </div>
     );
   }
   const ACTION_COLOR: Record<string, string> = {
-    search:    "#3b82f6",
-    synthesis: "#8b5cf6",
-    deep_read: "#10b981",
+    search:          "#3b82f6",
+    synthesis:       "#8b5cf6",
+    deep_read:       "#10b981",
+    evidence_chain:  "#10b981",
+  };
+  // Display-label map — keeps backend action keys stable (the DB column
+  // and quota gateway still reference `deep_read`) while presenting the
+  // renamed feature name in the UI.
+  const ACTION_LABEL: Record<string, string> = {
+    search:          "SEARCH",
+    quick_search:    "QUICK SEARCH",
+    deep_search:     "DEEP SEARCH",
+    synthesis:       "SYNTHESIS",
+    deep_read:       "EVIDENCE CHAIN",
+    evidence_chain:  "EVIDENCE CHAIN",
   };
   return (
     <div className="max-h-96 overflow-y-auto thin-scrollbar pr-1 space-y-1">
       {rows.map(r => {
         const color = ACTION_COLOR[r.action] ?? "#64748b";
+        const label = ACTION_LABEL[r.action] ?? r.action.replace(/_/g, " ").toUpperCase();
         return (
           <div
             key={r.id}
@@ -3358,7 +3404,7 @@ function ActivityFeed({ rows }: { rows: ActivityEntry[] }) {
                 borderColor:     color + "55",
               }}
             >
-              {r.action}
+              {label}
             </span>
             <div className="flex-1 min-w-0">
               <div className="flex items-baseline justify-between gap-2">
@@ -3985,11 +4031,14 @@ function TierLimitsEditor({
   ) => Promise<void>;
 }) {
   const TIERS: string[] = ["free", "basic", "scholar", "dev"];
+  // Internal feature keys stay as-is (matches the quota table's column
+  // names); only the display labels map to the renamed "Evidence Chain"
+  // for deep_read.
   const FEATURES: { key: string; label: string }[] = [
-    { key: "quick_search", label: "Quick Search" },
-    { key: "deep_search",  label: "Deep Search"  },
-    { key: "synthesis",    label: "Synthesis"    },
-    { key: "deep_read",    label: "Deep Read"    },
+    { key: "quick_search", label: "Quick Search"   },
+    { key: "deep_search",  label: "Deep Search"    },
+    { key: "synthesis",    label: "Synthesis"      },
+    { key: "deep_read",    label: "Evidence Chain" },
   ];
 
   // Draft state keyed by tier → feature. Seed + re-seed from `data.effective`
