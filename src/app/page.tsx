@@ -6340,6 +6340,45 @@ ${html}
                   )}
                   {usage.data && (
                     <>
+                      {/* Dev badge — when the caller is a developer / internal
+                          operator (tier='dev' per /api/usage/me), show a
+                          prominent gold "DEV · Unlimited" pill so they
+                          don't second-guess whether the "0 left / 5" style
+                          numbers below apply to them (they don't — the
+                          backend short-circuits all quota checks for
+                          tier=dev). Pill floats at the top-right so it
+                          reads as "status stamp" rather than as UI chrome. */}
+                      {usage.data.tier === "dev" && (
+                        <div
+                          className="flex items-center justify-between rounded-xl border px-3 py-2"
+                          style={{
+                            background: "linear-gradient(135deg, rgba(250, 204, 21, 0.18), rgba(234, 179, 8, 0.10))",
+                            borderColor: "rgba(250, 204, 21, 0.45)",
+                          }}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-base" aria-hidden>👑</span>
+                            <div>
+                              <p className="text-xs font-bold" style={{ color: "#fde68a" }}>
+                                DEV · Unlimited
+                              </p>
+                              <p className="text-[10px]" style={{ color: "#fcd34d" }}>
+                                Developer account — no quota enforcement. Counters below are informational only.
+                              </p>
+                            </div>
+                          </div>
+                          <span
+                            className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded"
+                            style={{
+                              color: "#facc15",
+                              backgroundColor: "rgba(250, 204, 21, 0.15)",
+                              border: "1px solid rgba(250, 204, 21, 0.45)",
+                            }}
+                          >
+                            ∞
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-start justify-between flex-wrap gap-2">
                         <div>
                           <p className="text-xs font-bold text-slate-200">

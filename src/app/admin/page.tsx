@@ -245,6 +245,40 @@ type SystemHealth = {
   redis:    { configured: boolean; backend: string; url_set?: boolean; reason?: string };
   key_pool: Record<string, KeyPoolEntry[] | { error?: string }>;
   workers:  number;
+  // Live capacity — process-local counters from capacity.py. Optional so
+  // this file stays compatible with backends that predate the capacity
+  // module (older Railway deploys during rollout).
+  capacity?: {
+    sse?:          { active: number; peak_since_boot: number };
+    llm_last_60s?: {
+      window_seconds:  number;
+      rpm:             number;
+      tpm_in:          number;
+      tpm_out:         number;
+      cost_window_usd: number;
+      errors:          number;
+      by_provider:     Record<string, { rpm: number; tpm_in: number; tpm_out: number; cost_window_usd: number; errors: number }>;
+    };
+    error?: string;
+  };
+  openai_headroom?: {
+    tier: string;
+    caps: { rpm: number; tpm: number };
+    used: { rpm: number; tpm: number };
+    pct:  { rpm: number; tpm: number };
+  } | null;
+  openai_tiers_available?: string[];
+};
+
+// ── Audit log row (admin_audit_log table) ──────────────────────────────────
+type AuditLogRow = {
+  id:           number;
+  created_at:   string;
+  actor_email:  string;
+  action:       string;
+  target_type:  string | null;
+  target_id:    string | null;
+  meta:         Record<string, unknown>;
 };
 
 type TierLimitsResponse = {
@@ -525,6 +559,16 @@ export default function AdminPage() {
   const topUsers   = usePolling(fetchTopUsers,   DETAIL_POLL_MS, enabled);
   const topQueries = usePolling(fetchTopQueries, DETAIL_POLL_MS, enabled);
 
+  // Admin audit log — polled at the same cadence as the error log
+  // because both are "forensic" signals that the admin might be
+  // consulting reactively during an incident.
+  const fetchAuditLog = useCallback(async (): Promise<{ rows: AuditLogRow[] }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/audit-log?limit=200"));
+    if (!res.ok) throw new Error(`audit-log HTTP ${res.status}`);
+    return res.json();
+  }, []);
+  const auditLog = usePolling(fetchAuditLog, 30_000, enabled);
+
   const setUserBan = async (userId: string, banned: boolean, reason?: string) => {
     try {
       const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/ban`), {
@@ -586,6 +630,26 @@ export default function AdminPage() {
       await announcements.refresh();
     } catch (e) {
       alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // Edit an announcement's text in-place. Backend PATCH endpoint is
+  // dev-gated and tolerates editing any row (including user-posted ones,
+  // useful for trimming spam without deleting). The inline editor
+  // handles confirmation; this fn just fires the PATCH + refresh.
+  const editOneAnnouncement = async (id: string, newText: string) => {
+    const trimmed = (newText || "").trim();
+    if (trimmed.length < 3) { alert("Announcement text must be at least 3 characters."); return; }
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/announcements/${id}`), {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text: trimmed }),
+      });
+      if (!res.ok) throw new Error(`patch HTTP ${res.status}`);
+      await announcements.refresh();
+    } catch (e) {
+      alert(`Edit failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
   const deleteAllUserAnnouncements = async () => {
@@ -1021,6 +1085,28 @@ export default function AdminPage() {
           </div>
         </section>
 
+        {/* ── Admin audit log — full-width because meta JSON gets wide ──
+             Forensic "who did what when". Colour-codes rows by action
+             category (ban=red, maintenance=amber, edit=blue, grant=green,
+             tier=purple) so a quick skim reveals clusters. */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                Admin audit log
+              </h3>
+              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                Every admin mutation (ban, tier, maintenance, announcement edit/delete, quota grant) as a timestamped row.
+                Showing up to 200, newest first.
+              </p>
+            </div>
+            <button onClick={() => auditLog.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+              <RefreshCw size={10} /> Refresh
+            </button>
+          </div>
+          <AuditLogPanel rows={auditLog.data?.rows ?? []} />
+        </section>
+
         {/* ── Top users by cost + Top queries ────────────────────────
              These two panels answer "who's spending the most" and
              "what is everyone actually searching for" — the two
@@ -1224,7 +1310,7 @@ export default function AdminPage() {
                 </button>
               </div>
             </div>
-            <AnnouncementLog rows={annList} onDelete={deleteOneAnnouncement} />
+            <AnnouncementLog rows={annList} onDelete={deleteOneAnnouncement} onEdit={editOneAnnouncement} />
           </div>
 
           <div className="rounded-2xl border p-4" style={panelStyle}>
@@ -1760,6 +1846,106 @@ function QuotaGiftInput({ label, value, onChange }: { label: string; value: numb
         style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
       />
     </label>
+  );
+}
+
+
+// ── HeadroomBar (used by SystemHealthPanel) ────────────────────────────────
+// Horizontal usage bar: current / cap with a coloured fill. Fill colour
+// ladders green (<50%) → amber (<80%) → red (≥80%) so ops can tell
+// "OK / watch / upgrade now" at a glance. Percentage is pre-computed
+// on the backend (avoids client-side division by zero).
+
+function HeadroomBar({ label, used, cap, pct }: { label: string; used: number; cap: number; pct: number }) {
+  const color = pct >= 80 ? "#ef4444" : pct >= 50 ? "#f59e0b" : "#10b981";
+  const clamped = Math.max(0, Math.min(100, pct));
+  return (
+    <div>
+      <div className="flex items-center justify-between text-[10px] mb-0.5">
+        <span className="font-semibold" style={{ color: "var(--ats-fg-secondary)" }}>{label}</span>
+        <span className="tabular-nums" style={{ color }}>
+          {used.toLocaleString()} / {cap.toLocaleString()} ({pct.toFixed(1)}%)
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: "var(--ats-border-subtle)" }}>
+        <div className="h-full rounded-full transition-all" style={{ width: `${clamped}%`, backgroundColor: color }} />
+      </div>
+    </div>
+  );
+}
+
+
+// ── Admin audit log panel ──────────────────────────────────────────────────
+// Renders admin_audit_log rows newest-first. Each row shows actor, action
+// (colour-coded by category), target, and a relative timestamp. No
+// server-side pagination yet — capped at 200 rows, which covers weeks of
+// alpha-scale admin activity in a single fetch.
+
+function AuditLogPanel({ rows }: { rows: AuditLogRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No admin actions logged yet.
+      </div>
+    );
+  }
+  // Colour families by category so the log reads as "ban events cluster
+  // red, maintenance toggles amber, edits blue". No semantic meaning
+  // beyond visual scanning.
+  const actionColor = (action: string): string => {
+    if (action.includes("ban")) return "#ef4444";
+    if (action.includes("maintenance_on")) return "#f59e0b";
+    if (action.includes("maintenance_off")) return "#10b981";
+    if (action.includes("maintenance")) return "#f59e0b";
+    if (action.includes("nuke")) return "#ef4444";
+    if (action.includes("delete")) return "#ef4444";
+    if (action.includes("edit")) return "#3b82f6";
+    if (action.includes("grant")) return "#10b981";
+    if (action.includes("tier")) return "#8b5cf6";
+    return "var(--ats-fg-accent)";
+  };
+  return (
+    <div className="max-h-96 overflow-y-auto thin-scrollbar pr-1 space-y-1">
+      {rows.map(r => (
+        <div
+          key={r.id}
+          className="rounded-md border p-2 text-xs"
+          style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}
+        >
+          <div className="flex items-center justify-between gap-2 mb-0.5">
+            <div className="flex items-center gap-2 min-w-0">
+              <span
+                className="shrink-0 text-[9px] font-bold uppercase tracking-wider rounded px-1.5 py-0.5"
+                style={{
+                  color: actionColor(r.action),
+                  borderColor: actionColor(r.action) + "55",
+                  backgroundColor: actionColor(r.action) + "1a",
+                  border: "1px solid",
+                }}
+              >
+                {r.action}
+              </span>
+              <span className="truncate text-[11px] font-semibold" style={{ color: "var(--ats-fg-primary)" }} title={r.actor_email}>
+                {r.actor_email}
+              </span>
+            </div>
+            <span className="shrink-0 text-[10px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
+              {fmtDateTime(r.created_at)}
+            </span>
+          </div>
+          {(r.target_type || r.target_id) && (
+            <p className="text-[10px] font-mono" style={{ color: "var(--ats-fg-secondary)" }}>
+              <span style={{ color: "var(--ats-fg-muted)" }}>{r.target_type || "—"}:</span> {r.target_id || "—"}
+            </p>
+          )}
+          {r.meta && Object.keys(r.meta).length > 0 && (
+            <p className="text-[10px] mt-0.5 break-all" style={{ color: "var(--ats-fg-muted)" }}>
+              {JSON.stringify(r.meta)}
+            </p>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -2561,7 +2747,20 @@ function ActivityFeed({ rows }: { rows: ActivityEntry[] }) {
 
 // ── Announcement log ────────────────────────────────────────────────────────
 
-function AnnouncementLog({ rows, onDelete }: { rows: AdminAnnouncement[]; onDelete?: (id: string) => void | Promise<void> }) {
+function AnnouncementLog({
+  rows, onDelete, onEdit,
+}: {
+  rows: AdminAnnouncement[];
+  onDelete?: (id: string) => void | Promise<void>;
+  onEdit?: (id: string, newText: string) => void | Promise<void>;
+}) {
+  // Track which row is currently being edited + the draft text. Only
+  // one row can be in edit mode at a time; opening another edit cancels
+  // the current draft. Keeping this as a single string (id | null) is
+  // simpler than a Map and matches the "edit one thing at a time" UX.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft]         = useState<string>("");
+
   if (rows.length === 0) {
     return (
       <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
@@ -2569,17 +2768,33 @@ function AnnouncementLog({ rows, onDelete }: { rows: AdminAnnouncement[]; onDele
       </div>
     );
   }
+
+  const startEdit = (a: AdminAnnouncement) => {
+    setEditingId(a.id);
+    setDraft(a.text);
+  };
+  const cancelEdit = () => {
+    setEditingId(null);
+    setDraft("");
+  };
+  const saveEdit = async () => {
+    if (!editingId || !onEdit) return;
+    await onEdit(editingId, draft);
+    cancelEdit();
+  };
+
   return (
     <div className="max-h-96 overflow-y-auto thin-scrollbar pr-1 space-y-1.5">
       {rows.map(a => {
         const isSeed = a.author_email === "dev@academicats.com";
+        const isEditing = editingId === a.id;
         return (
           <div
             key={a.id}
-            className="group rounded-md border p-2 relative"
-            style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}
+            className="rounded-md border p-2 relative"
+            style={{ borderColor: isEditing ? "var(--ats-border-accent)" : "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}
           >
-            <div className="flex items-center justify-between gap-2 mb-0.5">
+            <div className="flex items-center justify-between gap-2 mb-1">
               <span
                 className="text-[10px] font-semibold"
                 style={{ color: isSeed ? "#d97706" : "var(--ats-fg-accent)" }}
@@ -2590,23 +2805,80 @@ function AnnouncementLog({ rows, onDelete }: { rows: AdminAnnouncement[]; onDele
                 <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
                   {fmtDateTime(a.created_at)}
                 </span>
-                {/* Per-row delete. Hidden by default, revealed on hover
-                    so the log stays clean when you're just reading. */}
-                {onDelete && (
+                {/* Per-row action buttons — ALWAYS visible (previously
+                    hover-only, which users reported was hard to find).
+                    Edit works on every row (dev-gated on the backend
+                    anyway); most common use is trimming a seed message
+                    without re-seeding or removing spam inline. */}
+                {onEdit && !isEditing && (
+                  <button
+                    onClick={() => startEdit(a)}
+                    title="Edit this announcement's text"
+                    className="text-[10px] rounded border px-1 leading-4 transition-colors"
+                    style={{ color: "var(--ats-fg-accent)", borderColor: "var(--ats-border-accent)" }}
+                  >
+                    ✎ Edit
+                  </button>
+                )}
+                {onDelete && !isEditing && (
                   <button
                     onClick={() => onDelete(a.id)}
-                    title="Delete this single announcement"
-                    className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] rounded border px-1 leading-4"
-                    style={{ color: "#ef4444", borderColor: "rgba(239,68,68,0.35)" }}
+                    title="Delete this announcement"
+                    className="text-[10px] rounded border px-1 leading-4 transition-colors"
+                    style={{ color: "#ef4444", borderColor: "rgba(239,68,68,0.45)" }}
                   >
-                    ✕
+                    ❌
                   </button>
                 )}
               </div>
             </div>
-            <p className="text-[11px] leading-relaxed break-words" style={{ color: "var(--ats-fg-secondary)" }}>
-              {a.text}
-            </p>
+            {isEditing ? (
+              <div className="space-y-1.5">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  rows={3}
+                  maxLength={280}
+                  autoFocus
+                  className="w-full rounded-md border px-2 py-1.5 text-[11px] resize-none outline-none focus:border-blue-500/50"
+                  style={{
+                    backgroundColor: "var(--ats-bg-panel)",
+                    borderColor:     "var(--ats-border-subtle)",
+                    color:           "var(--ats-fg-primary)",
+                  }}
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                    {draft.length}/280
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={cancelEdit}
+                      className="text-[10px] rounded border px-2 py-0.5"
+                      style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => void saveEdit()}
+                      disabled={draft.trim().length < 3 || draft === a.text}
+                      className="text-[10px] font-bold rounded border px-2 py-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{
+                        color:           "var(--ats-fg-accent)",
+                        borderColor:     "var(--ats-border-accent)",
+                        backgroundColor: "var(--ats-bg-accent-soft)",
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-[11px] leading-relaxed break-words" style={{ color: "var(--ats-fg-secondary)" }}>
+                {a.text}
+              </p>
+            )}
           </div>
         );
       })}
@@ -2761,6 +3033,16 @@ function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
     return { total: keys.length, available, disabled, errors };
   };
 
+  // Live capacity signals — active SSE streams + last-60s LLM rate.
+  // The SSE gauge is the single best proxy for "is the server saturated
+  // right now?" since each stream is a long-held connection. The LLM
+  // rate gauge shows OpenAI RPM / TPM consumption so ops can see a
+  // tier-limit approach BEFORE the 429s start landing.
+  const cap = data.capacity;
+  const sse = cap?.sse;
+  const llm = cap?.llm_last_60s;
+  const headroom = data.openai_headroom;
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3 text-xs">
@@ -2779,6 +3061,55 @@ function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
           <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>uvicorn procs</p>
         </div>
       </div>
+
+      {/* Capacity row — 2-up grid: Active SSE streams | Past-60s LLM rate.
+          Only renders if the backend returned the capacity dict (old
+          deploys without capacity.py get a graceful empty render). */}
+      {cap && (
+        <div className="grid grid-cols-2 gap-3 text-xs">
+          <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
+            <p className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>Active SSE streams</p>
+            <p className="font-bold tabular-nums" style={{
+              color: (sse?.active ?? 0) >= 20 ? "#ef4444" : (sse?.active ?? 0) >= 10 ? "#f59e0b" : "#10b981",
+            }}>
+              {sse?.active ?? 0}
+            </p>
+            <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+              peak {sse?.peak_since_boot ?? 0} since boot
+            </p>
+          </div>
+          <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
+            <p className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>LLM (last 60s)</p>
+            <p className="font-bold tabular-nums" style={{ color: "var(--ats-fg-primary)" }}>
+              {llm?.rpm ?? 0} <span className="text-[10px] font-normal" style={{ color: "var(--ats-fg-muted)" }}>req/min</span>
+            </p>
+            <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+              {((llm?.tpm_in ?? 0) + (llm?.tpm_out ?? 0)).toLocaleString()} tok · ${(llm?.cost_window_usd ?? 0).toFixed(4)}
+              {(llm?.errors ?? 0) > 0 && <span className="ml-1" style={{ color: "#ef4444" }}>· {llm?.errors} err</span>}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* OpenAI headroom — compares current RPM/TPM against a tier cap
+          so ops can see "we're at 35% of Tier-1 RPM" at a glance.
+          Colour of the bar ladders green → amber → red so a glance at
+          the panel tells you whether to consider upgrading tiers. */}
+      {headroom && (
+        <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
+          <div className="flex items-center justify-between mb-1.5">
+            <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: "var(--ats-fg-muted)" }}>
+              OpenAI headroom vs {headroom.tier.toUpperCase()}
+            </p>
+            <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+              caps: {headroom.caps.rpm.toLocaleString()} RPM · {headroom.caps.tpm.toLocaleString()} TPM
+            </span>
+          </div>
+          <HeadroomBar label="RPM" used={headroom.used.rpm} cap={headroom.caps.rpm} pct={headroom.pct.rpm} />
+          <div className="h-1" />
+          <HeadroomBar label="TPM" used={headroom.used.tpm} cap={headroom.caps.tpm} pct={headroom.pct.tpm} />
+        </div>
+      )}
       <div>
         <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: "var(--ats-fg-muted)" }}>LLM key pool</p>
         {poolError ? (
