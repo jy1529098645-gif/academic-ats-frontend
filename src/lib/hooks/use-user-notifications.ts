@@ -43,7 +43,12 @@ export type UserNotificationsState = {
   ack:     (id: string) => Promise<void>;
 };
 
-const POLL_INTERVAL_MS = 60_000;  // every 60 s — low volume, no realtime dependency
+// 20 s strikes the balance we want:
+//   - Admin hits Send → recipient sees the popup within 20 s while active.
+//   - 3 GETs/min per active user is trivial load (indexed WHERE seen_at IS NULL).
+//   - Much cheaper than a Supabase Realtime channel, which would be overkill
+//     for the tier-bump / quota-grant use case where sub-20 s isn't meaningful.
+const POLL_INTERVAL_MS = 20_000;
 
 export function useUserNotifications(isAuthed: boolean): UserNotificationsState {
   const [queue,   setQueue]   = useState<UserNotification[]>([]);
@@ -89,16 +94,27 @@ export function useUserNotifications(isAuthed: boolean): UserNotificationsState 
     }
   }, []);
 
-  // Initial fetch + interval + focus-refresh.
+  // Initial fetch + interval + multi-trigger refresh.
+  //
+  // visibilitychange fires reliably on mobile + Safari where `focus` is
+  // flaky (iOS Safari doesn't always fire focus when returning from the
+  // home screen). Listening to both covers every platform without extra
+  // cost — the refresh fn itself is a single cached GET and a few setState
+  // calls.
   useEffect(() => {
     if (!isAuthed) return;
     void refresh();
     const id = window.setInterval(() => { void refresh(); }, POLL_INTERVAL_MS);
     const onFocus = () => { void refresh(); };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.clearInterval(id);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [isAuthed, refresh]);
 
