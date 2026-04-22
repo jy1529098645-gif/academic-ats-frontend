@@ -203,6 +203,20 @@ type JobResponse = {
 
 type DeepReadResult = Record<string, any>;
 
+// ── Feature flag: Evidence Chain (temporarily disabled) ──────────────────
+// Evidence Chain is still under iteration — claim quality + source-trail
+// coverage need more work before we put it in front of users. Setting
+// this to `false` hides the button (greyed out + tooltip), removes the
+// marketing bullets from the subscription modal, and drops the
+// onboarding card. The backend endpoint also returns 503 when disabled,
+// so any cached client that still has an enabled button fails with a
+// clean "temporarily disabled" message rather than the LLM pipeline.
+// Flip to `true` to turn everything back on — no other code changes
+// required. Quota counters + admin panel keep tracking the key so
+// historical data stays intact across the disable window.
+const EVIDENCE_CHAIN_ENABLED = false;
+const EVIDENCE_CHAIN_DISABLED_NOTE = "Evidence Chain is temporarily offline while we refine claim quality — back soon.";
+
 type DragTarget = "left" | "center" | null;
 
 function clamp(value: number, min: number, max: number) {
@@ -4602,25 +4616,34 @@ ${html}
                               <ExternalLink size={12} className="shrink-0" /><span className="truncate">Open Paper</span>
                             </a>
                           )}
-                          {/* Evidence Chain — formerly "Deep Read". Renamed +
-                              repurposed to surface per-claim source trails
-                              from paper metadata (no PDF parsing needed), so
-                              it works on paywalled / anti-bot-protected
-                              papers too. That's why we DELIBERATELY do NOT
-                              gate this button on `isBlocked` like Download
-                              PDF / Translate PDF — the underlying endpoint
-                              no longer touches the PDF layer. */}
+                          {/* Evidence Chain — TEMPORARILY DISABLED via the
+                              EVIDENCE_CHAIN_ENABLED flag at the top of this
+                              file. When the flag is off, the button renders
+                              greyed-out with a tooltip explaining why;
+                              runDeepRead is gated by `disabled` so the
+                              click can't fire anyway. When re-enabled, the
+                              button restores to the normal action-button
+                              styling + `isBlocked` is NOT applied (Evidence
+                              Chain is metadata-only; no PDF paywall gate
+                              needed). */}
                           <button
-                            onClick={() => void runDeepRead(paper, paperKey)}
-                            disabled={deepReadLoading[paperKey]}
+                            onClick={() => { if (EVIDENCE_CHAIN_ENABLED) void runDeepRead(paper, paperKey); }}
+                            disabled={!EVIDENCE_CHAIN_ENABLED || deepReadLoading[paperKey]}
+                            title={!EVIDENCE_CHAIN_ENABLED ? EVIDENCE_CHAIN_DISABLED_NOTE : undefined}
                             className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
-                              deepReadLoading[paperKey]
+                              !EVIDENCE_CHAIN_ENABLED
+                                ? "border-slate-800 bg-slate-900/30 text-slate-500 cursor-not-allowed opacity-60"
+                                : deepReadLoading[paperKey]
                                 ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                             }`}
                           >
                             <ShieldCheck size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
-                            <span className="truncate">{deepReadLoading[paperKey] ? "Tracing…" : "Evidence Chain"}</span>
+                            <span className="truncate">
+                              {!EVIDENCE_CHAIN_ENABLED
+                                ? "Evidence Chain · soon"
+                                : deepReadLoading[paperKey] ? "Tracing…" : "Evidence Chain"}
+                            </span>
                             <ProgressStrip active={!!deepReadLoading[paperKey]} />
                           </button>
                           {/* Download PDF */}
@@ -5777,7 +5800,7 @@ ${html}
                                     <span>
                                       <span className="text-rose-300">Unreadable —</span> {u.reason || "abstract/body was missing"}
                                       {" "}
-                                      <span className="text-slate-600">(tip: try Evidence Chain or upload the PDF under Files to give the writer full text)</span>
+                                      <span className="text-slate-600">(tip: upload the PDF under Files to give the writer full text)</span>
                                     </span>
                                   </li>
                                 ))}
@@ -6734,7 +6757,21 @@ ${html}
                               }`}
                             >
                               <div className="flex items-center justify-between mb-1">
-                                <span className="text-sm font-semibold text-slate-200">{USAGE_FEATURE_LABELS[feature]}</span>
+                                <span className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
+                                  {USAGE_FEATURE_LABELS[feature]}
+                                  {/* Flag a temporarily-disabled feature so the user
+                                      understands why their "5 left" counter isn't
+                                      matched by a working button in the workspace. */}
+                                  {feature === "deep_read" && !EVIDENCE_CHAIN_ENABLED && (
+                                    <span
+                                      className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
+                                      style={{ color: "#f59e0b", borderColor: "rgba(245,158,11,0.45)", backgroundColor: "rgba(245,158,11,0.10)" }}
+                                      title={EVIDENCE_CHAIN_DISABLED_NOTE}
+                                    >
+                                      Soon
+                                    </span>
+                                  )}
+                                </span>
                                 <span className={`text-[11px] font-semibold tabular-nums ${empty ? "text-rose-300" : "text-slate-300"}`}>
                                   {limit === null
                                     ? "Unlimited"
@@ -6879,7 +6916,12 @@ ${html}
                           "150 Quick Searches / month",
                           "10 Deep Analyses / month",
                           "5 Synthesis Lab runs / month",
-                          "30 Evidence Chains / month",
+                          // Evidence Chain is temporarily offline. When
+                          // it comes back we restore "30 Evidence Chains /
+                          // month" here. The counter key (deep_read) is
+                          // untouched on the backend so allowances don't
+                          // have to be re-migrated.
+                          ...(EVIDENCE_CHAIN_ENABLED ? ["30 Evidence Chains / month"] : []),
                           "Fast-mode Literature Brief",
                           "Community support",
                         ],
@@ -6895,7 +6937,7 @@ ${html}
                           "1,500 Quick Searches / month",
                           "60 Deep Analyses / month",
                           "40 Synthesis Lab runs / month",
-                          "300 Evidence Chains / month",
+                          ...(EVIDENCE_CHAIN_ENABLED ? ["300 Evidence Chains / month"] : []),
                           "Up to 40 papers per search",
                           "Full Synthesis Lab · PDF export",
                           "Email support",
@@ -6912,7 +6954,7 @@ ${html}
                           "Unlimited Quick Searches",
                           "Unlimited Deep Analyses",
                           "Unlimited Synthesis Lab",
-                          "Unlimited Evidence Chains",
+                          ...(EVIDENCE_CHAIN_ENABLED ? ["Unlimited Evidence Chains"] : []),
                           "Up to 200 papers per search",
                           "6-agent multi-agent reasoning",
                           "Synthesis Lab with Scholar Writer access",
@@ -7201,7 +7243,12 @@ ${html}
                   {[
                     { icon: <Search size={14} />,       title: "How to search",  desc: "Enter a research question and click Run Search or Quick Search." },
                     { icon: <PenLine size={14} />,      title: "Synthesis Lab",  desc: "Select papers from results, then generate a literature review or proposal." },
-                    { icon: <FileText size={14} />,     title: "Evidence Chain", desc: "Click Evidence Chain on any paper to trace its claims to citable sources." },
+                    // Evidence Chain card is gated on the feature flag so
+                    // users don't see a help tip for a button that's
+                    // currently disabled — that would look like a bug.
+                    ...(EVIDENCE_CHAIN_ENABLED
+                      ? [{ icon: <FileText size={14} />, title: "Evidence Chain", desc: "Click Evidence Chain on any paper to trace its claims to citable sources." }]
+                      : []),
                     { icon: <Mail size={14} />,         title: "Contact us",     desc: "Email jy1529098645@gmail.com for feedback or support." },
                   ].map(({ icon, title, desc }) => (
                     <div key={title} className="rounded-xl bg-slate-800/50 px-4 py-3">
