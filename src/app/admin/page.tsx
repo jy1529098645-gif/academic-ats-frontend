@@ -302,6 +302,11 @@ type FunnelResponse = {
   end_utc?:    string;
   stages:      FunnelStage[];
   error?:      string;
+  // Surfaced by the backend when a schema column was missing and the
+  // funnel silently fell back to a different signal (e.g., updated_at
+  // instead of first_seen_at). The UI renders this above the chart so
+  // operators know to run the migration for accurate data.
+  warning?:    string;
 };
 
 // ── Audit log row (admin_audit_log table) ──────────────────────────────────
@@ -2262,6 +2267,10 @@ function ConversionFunnelPanel({ data }: { data: FunnelResponse | null }) {
     );
   }
   const stages = data.stages || [];
+  // Schema-drift warning (e.g. profiles.first_seen_at missing) — render
+  // inline above the bars so the operator sees why their cohort numbers
+  // might be inflated, with the exact migration SQL nudged for clarity.
+  const warning = data.warning;
   if (stages.length === 0 || stages[0].count === 0) {
     return (
       <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
@@ -2277,6 +2286,20 @@ function ConversionFunnelPanel({ data }: { data: FunnelResponse | null }) {
   };
   return (
     <div className="space-y-2">
+      {warning && (
+        <div
+          className="rounded-md border px-2 py-1.5 mb-1 flex items-start gap-1.5"
+          style={{
+            borderColor: "rgba(245,158,11,0.45)",
+            backgroundColor: "rgba(245,158,11,0.10)",
+          }}
+        >
+          <span aria-hidden>⚠️</span>
+          <p className="text-[10px] leading-snug" style={{ color: "#f59e0b" }}>
+            {warning}
+          </p>
+        </div>
+      )}
       {stages.map((s, i) => {
         const widthPct = Math.max(6, Math.round((s.count / top) * 100));
         return (
