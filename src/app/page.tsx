@@ -1264,9 +1264,13 @@ export default function HomePage() {
     if (limit === null || limit === undefined) return true;
     const used = (usage.data.used as any)[`${feature}_count`] ?? 0;
     if (used < limit) return true;
-    // Exhausted — open the Usage modal and deny.
+    // Exhausted — open the Usage modal and deny. Copy is INTENTIONALLY
+    // gentle: reaching a quota cap isn't an error, it's a routine part
+    // of using a free tier. The prefix "__quota__" is a sentinel the
+    // error-banner renderer uses to switch to amber styling + softer
+    // tone; the user never sees the prefix (it's stripped on render).
     setUserPanel("usage");
-    setUiError(`You're out of ${USAGE_FEATURE_LABELS[feature]} for this month (${used}/${limit}). Upgrade or wait until next cycle.`);
+    setUiError(`__quota__You've used your ${USAGE_FEATURE_LABELS[feature]} allowance for today (${used}/${limit}). It refreshes at 00:00 UTC — or upgrade anytime for more headroom.`);
     return false;
   }, [usage.data]);
 
@@ -1285,10 +1289,13 @@ export default function HomePage() {
     setUserPanel("usage");
     const limit = res.headers.get("X-Quota-Limit");
     const used  = res.headers.get("X-Quota-Used");
+    // `__quota__` sentinel → amber + gentle styling in the banner (see
+    // the error-banner render site). Copy is reassuring, not alarming:
+    // hitting a daily/monthly cap is an expected outcome on free tiers.
     setUiError(
       limit && used
-        ? `Monthly limit reached (${used}/${limit}). Upgrade your plan or wait until next cycle.`
-        : "Monthly quota reached. Upgrade your plan or wait until next cycle."
+        ? `__quota__You've reached today's allowance (${used}/${limit}). It refreshes at 00:00 UTC — or upgrade anytime for more headroom.`
+        : "__quota__You've used your allowance for today. It refreshes at 00:00 UTC, or upgrade anytime for more headroom."
     );
     return true;
   }, [usage]);
@@ -3472,15 +3479,54 @@ ${html}
           </div>
         </div>
 
-        {(uiError || (job?.status === "error" && job?.error)) && (
-          <div className="mb-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 flex items-start gap-3 flex-wrap">
-            <span className="flex-1 min-w-0">{uiError || (job?.status === "error" && `Search failed: ${job.error}`)}</span>
-            <button
-              onClick={() => { setUiError(""); void handleSearch(); }}
-              className="shrink-0 rounded-lg border border-red-400/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors"
-            >↺ Retry</button>
-          </div>
-        )}
+        {(uiError || (job?.status === "error" && job?.error)) && (() => {
+          // Two classes of message render through this banner:
+          //   1. QUOTA NOTICES — not errors, just "you've hit the cap".
+          //      Marked by a "__quota__" sentinel prefix set in
+          //      ensureQuota / handleQuotaResponse. Rendered in amber
+          //      with softer copy + a "View usage" CTA rather than a
+          //      Retry button (retrying won't help until the counter
+          //      resets).
+          //   2. ACTUAL ERRORS — search failed, backend exploded, etc.
+          //      Rendered in red with a Retry button as before.
+          const raw = uiError || (job?.status === "error" && job?.error ? `Search failed: ${job.error}` : "");
+          const isQuotaNotice = raw.startsWith("__quota__");
+          const message = isQuotaNotice ? raw.slice("__quota__".length) : raw;
+
+          if (isQuotaNotice) {
+            return (
+              <div
+                className="mb-4 rounded-2xl border px-4 py-3 text-sm flex items-start gap-3 flex-wrap"
+                style={{
+                  borderColor:     "rgba(245, 158, 11, 0.35)",
+                  backgroundColor: "rgba(245, 158, 11, 0.08)",
+                  color:           "#fcd34d",
+                }}
+              >
+                <span aria-hidden className="shrink-0 mt-0.5" style={{ color: "#fbbf24" }}>⏳</span>
+                <span className="flex-1 min-w-0 leading-relaxed">{message}</span>
+                <button
+                  onClick={() => { setUiError(""); setUserPanel("usage"); }}
+                  className="shrink-0 rounded-lg border px-3 py-1 text-xs font-semibold transition-colors"
+                  style={{
+                    borderColor:     "rgba(245, 158, 11, 0.45)",
+                    color:           "#fbbf24",
+                    backgroundColor: "transparent",
+                  }}
+                >View usage</button>
+              </div>
+            );
+          }
+          return (
+            <div className="mb-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 flex items-start gap-3 flex-wrap">
+              <span className="flex-1 min-w-0">{message}</span>
+              <button
+                onClick={() => { setUiError(""); void handleSearch(); }}
+                className="shrink-0 rounded-lg border border-red-400/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors"
+              >↺ Retry</button>
+            </div>
+          );
+        })()}
 
         <div
           ref={gridRef}
@@ -6053,11 +6099,11 @@ ${html}
                           aria-label="Open usage dashboard"
                         >
                           <span className="flex items-center gap-2 text-sm font-semibold">
-                            <BarChart2 size={14} className={empty ? "text-rose-400" : "text-blue-400"} />
+                            <BarChart2 size={14} className={empty ? "text-amber-400" : "text-blue-400"} />
                             Usage
-                            {empty && <span className="text-[10px] font-bold uppercase tracking-wide text-rose-400">Limit reached</span>}
+                            {empty && <span className="text-[10px] font-bold uppercase tracking-wide text-amber-400">Refreshes at 00:00 UTC</span>}
                           </span>
-                          <span className={`text-[11px] tabular-nums ${empty ? "text-rose-300" : "text-slate-400"}`}>
+                          <span className={`text-[11px] tabular-nums ${empty ? "text-amber-300" : "text-slate-400"}`}>
                             {tightest
                               ? (tightest.limit === null
                                   ? "Unlimited"
@@ -6750,9 +6796,15 @@ ${html}
                           return (
                             <div
                               key={feature}
+                              // Empty state uses amber (not rose/red). Reaching a
+                              // tier cap on a free plan is routine — alarming
+                              // red made it feel like the product broke, when
+                              // really the user just needs to wait for the
+                              // daily reset or upgrade. Amber reads as
+                              // "heads up" without panic.
                               className={`rounded-xl border px-4 py-3 transition-all cursor-default hover:-translate-y-0.5 hover:shadow-lg ${
                                 empty
-                                  ? "border-rose-500/40 bg-rose-500/10 hover:border-rose-400"
+                                  ? "border-amber-500/40 bg-amber-500/10 hover:border-amber-400"
                                   : "border-slate-700/60 bg-slate-900/40 hover:border-blue-500/60"
                               }`}
                             >
@@ -6772,7 +6824,7 @@ ${html}
                                     </span>
                                   )}
                                 </span>
-                                <span className={`text-[11px] font-semibold tabular-nums ${empty ? "text-rose-300" : "text-slate-300"}`}>
+                                <span className={`text-[11px] font-semibold tabular-nums ${empty ? "text-amber-300" : "text-slate-300"}`}>
                                   {limit === null
                                     ? "Unlimited"
                                     : `${remaining} left / ${limit}`}
@@ -6780,7 +6832,7 @@ ${html}
                               </div>
                               <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
                                 <div
-                                  className={`h-full rounded-full transition-all duration-500 ${empty ? "bg-rose-500" : remainingRatio < 0.2 ? "bg-amber-500" : "bg-blue-500"}`}
+                                  className={`h-full rounded-full transition-all duration-500 ${empty ? "bg-amber-500" : remainingRatio < 0.2 ? "bg-amber-500" : "bg-blue-500"}`}
                                   style={{ width: `${Math.round(remainingRatio * 100)}%` }}
                                 />
                               </div>
@@ -6790,8 +6842,8 @@ ${html}
                                   : `${used} used today.`}
                               </p>
                               {empty && (
-                                <p className="mt-1 text-[10px] text-rose-400">
-                                  Daily limit reached — wait for the refresh above or upgrade.
+                                <p className="mt-1 text-[10px] text-amber-400">
+                                  All used for today — refreshes at 00:00 UTC, or upgrade for more headroom.
                                 </p>
                               )}
                             </div>
@@ -6866,13 +6918,13 @@ ${html}
                             <div key={feature} className="rounded-lg border border-slate-800/60 bg-slate-900/40 px-3 py-2">
                               <div className="flex items-center justify-between text-[11px]">
                                 <span className="font-semibold text-slate-300">{USAGE_FEATURE_LABELS[feature]}</span>
-                                <span className={`tabular-nums ${empty ? "text-rose-400" : "text-slate-400"}`}>
+                                <span className={`tabular-nums ${empty ? "text-amber-300" : "text-slate-400"}`}>
                                   {limit === null ? "Unlimited" : `${remaining} left / ${limit}`}
                                 </span>
                               </div>
                               <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-slate-800">
                                 <div
-                                  className={`h-full rounded-full transition-all duration-500 ${empty ? "bg-rose-500" : remainingRatio < 0.2 ? "bg-amber-500" : "bg-blue-500"}`}
+                                  className={`h-full rounded-full transition-all duration-500 ${empty ? "bg-amber-500" : remainingRatio < 0.2 ? "bg-amber-500" : "bg-blue-500"}`}
                                   style={{ width: `${Math.round(remainingRatio * 100)}%` }}
                                 />
                               </div>
