@@ -4038,28 +4038,21 @@ ${html}
               </div>
             )}
 
-            {/* Understanding progress bar — with live status text + shimmer.
-                Previous version was just a static-width bar; users reported
-                thinking the UI was stuck when the width held at 15% / 45%
-                / 75% for several seconds between backend status events.
-                Three layers of "still working" signalling now:
-                  1. Status text (from understandStatus) updates as the
-                     backend emits progress events — gives users a concrete
-                     "what step am I on".
-                  2. Pulsing dot before the text — always animates, so
-                     even when the step label is the same, the dot proves
-                     the component is live.
-                  3. Shimmer gradient overlay on the bar itself — animates
-                     regardless of the underlying width so the bar never
-                     sits still. Keyframe in globals.css (query-shimmer). */}
+            {/* Understanding progress bar — uses the product-wide
+                `progress-slide` keyframe (same one driving ProgressStrip on
+                every action button + the agent progress bar). A single
+                narrow fill segment glides left↔right, which is the pattern
+                users now associate with "something's working" everywhere
+                else in the app. Unifying on this keyframe kills two problems
+                at once: the previous shimmer-over-determinate combo looked
+                bespoke and occasionally read as "stuck" when the backing
+                percentage held steady between backend events, and having
+                two different indeterminate idioms in one product was
+                visually inconsistent. Status text + pulsing dot above the
+                bar still show the current stage label, but the bar itself
+                is now indeterminate + always in motion so there's no
+                "which of these percentage bands am I in" guessing. */}
             {isUnderstanding && (() => {
-              const pct = understandStatus.toLowerCase().includes("analysing") || understandStatus.toLowerCase().includes("analyzing") || understandStatus.toLowerCase().includes("mapping")
-                ? 75
-                : understandStatus.toLowerCase().includes("found") || understandStatus.toLowerCase().includes("preview")
-                  ? 45
-                  : understandStatus.toLowerCase().includes("identifying") || understandStatus.toLowerCase().includes("concepts")
-                    ? 30
-                    : 15;
               const statusText = understandStatus || "Starting query analysis…";
               return (
                 <div className="mt-2">
@@ -4074,22 +4067,20 @@ ${html}
                     />
                     <span className="italic truncate">{statusText}</span>
                   </div>
-                  <div className="relative h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                    {/* Determinate filled portion */}
+                  {/* Indeterminate bar — rail + sliding fill segment.
+                      Rail uses --ats-border-subtle so it picks up the
+                      theme; fill segment uses --ats-fg-accent so the
+                      motion colour matches the rest of the product's
+                      accent highlights. */}
+                  <div
+                    className="relative h-1 w-full overflow-hidden rounded-full"
+                    style={{ backgroundColor: "var(--ats-border-subtle)" }}
+                  >
                     <div
-                      className="h-full rounded-full bg-blue-500 transition-all duration-700"
-                      style={{ width: `${pct}%` }}
-                    />
-                    {/* Shimmer overlay — always animating so the bar
-                        never looks frozen while waiting for the next
-                        backend status event. Transparent endpoints so
-                        the gradient fades naturally into the panel. */}
-                    <div
-                      className="absolute inset-0 rounded-full pointer-events-none"
+                      className="absolute inset-y-0 left-0 w-1/3 rounded-full"
                       style={{
-                        background:       "linear-gradient(90deg, transparent 0%, rgba(147,197,253,0.45) 50%, transparent 100%)",
-                        backgroundSize:   "200% 100%",
-                        animation:        "query-shimmer 1.4s linear infinite",
+                        backgroundColor: "var(--ats-fg-accent)",
+                        animation:       "progress-slide 1.2s ease-in-out infinite",
                       }}
                     />
                   </div>
@@ -4204,8 +4195,25 @@ ${html}
                         // Selection is strictly user-driven; no recommended-as-default so the
                         // user can pick a main direction without committing to a sub-option.
                         const isSelDir = selectedDirIndex === di;
+                        // Token-based styling for both states. Selected uses
+                        // the accent tokens so the card follows the active
+                        // theme (Morning Mint = emerald, Warm Paper = amber,
+                        // Night Blue = blue, etc). Unselected uses the
+                        // panel tokens so nothing hardcoded-slate-gray
+                        // bleeds through in day themes.
+                        const dirCardStyle: React.CSSProperties = isSelDir
+                          ? {
+                              borderColor:     "var(--ats-border-accent)",
+                              backgroundColor: "var(--ats-bg-accent-soft)",
+                            }
+                          : {
+                              borderColor:     "var(--ats-border-subtle)",
+                              backgroundColor: "var(--ats-bg-panel)",
+                            };
                         return (
-                          <div key={di} className={`qu-direction-card rounded-xl border p-2 cursor-pointer transition-all ${isSelDir ? "border-blue-500/50 bg-blue-500/8" : "border-slate-800 bg-slate-900/30 hover:border-slate-700"}`}
+                          <div key={di}
+                            className="qu-direction-card rounded-xl border p-2 cursor-pointer transition-colors"
+                            style={dirCardStyle}
                             onClick={() => {
                               // Clicking an already-selected direction toggles it off.
                               if (isSelDir) {
@@ -4217,12 +4225,28 @@ ${html}
                                 setCustomQueryEnabled(false);
                               }
                             }}>
-                            <div className={`flex items-start gap-1.5 text-xs font-semibold leading-snug ${isSelDir ? "text-blue-300" : "text-slate-300"}`}>
-                              <span className={`shrink-0 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-md px-1 text-[10px] font-bold tabular-nums ${isSelDir ? "bg-blue-500/20 text-blue-300" : "bg-slate-800 text-slate-400"}`}>{di + 1}</span>
+                            <div
+                              className="flex items-start gap-1.5 text-xs font-semibold leading-snug"
+                              style={{ color: isSelDir ? "var(--ats-fg-accent)" : "var(--ats-fg-primary)" }}
+                            >
+                              <span
+                                className="shrink-0 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-md px-1 text-[10px] font-bold tabular-nums"
+                                style={{
+                                  backgroundColor: isSelDir ? "var(--ats-bg-accent-soft)" : "var(--ats-border-subtle)",
+                                  color:           isSelDir ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                                }}
+                              >{di + 1}</span>
                               {di === (directionData.recommended_direction ?? 0) && <Star size={10} className="shrink-0 mt-0.5 fill-amber-400 text-amber-400" />}
                               <span className="min-w-0">{dir.label}</span>
                             </div>
-                            {dir.description && <div className="mt-0.5 text-[10px] leading-tight text-slate-500 line-clamp-2">{dir.description}</div>}
+                            {dir.description && (
+                              <div
+                                className="mt-0.5 text-[10px] leading-tight line-clamp-2"
+                                style={{ color: "var(--ats-fg-muted)" }}
+                              >
+                                {dir.description}
+                              </div>
+                            )}
                             {/* Sub-options — visible only when this direction is selected. A sub is optional;
                                 re-clicking the same one cancels it. */}
                             {isSelDir && dir.sub_options?.length > 0 && (
@@ -4236,6 +4260,26 @@ ${html}
                                     setSelectedSubIndex(prev => (prev === si ? null : si));
                                     setCustomQueryEnabled(false);
                                   };
+                                  // Token-based sub-option style. Selected
+                                  // + hovered + idle states all use theme
+                                  // tokens so NOTHING shows up as a hard-
+                                  // coded slate-gray block. Hover-only
+                                  // feedback lives on the individual row
+                                  // (class `.qu-sub-option:hover` below)
+                                  // because the parent card's hover class
+                                  // would otherwise cascade to all children
+                                  // through `filter: brightness()` — that
+                                  // was the "hover one sub, all turn grey"
+                                  // bug.
+                                  const subStyle: React.CSSProperties = isSelSub
+                                    ? {
+                                        borderColor:     "var(--ats-border-accent)",
+                                        backgroundColor: "var(--ats-bg-accent-soft)",
+                                      }
+                                    : {
+                                        borderColor:     "var(--ats-border-subtle)",
+                                        backgroundColor: "var(--ats-bg-base)",
+                                      };
                                   return (
                                     // Plain <div> (not <label>) so clicking anywhere in the row goes
                                     // through one handler. <label> + <input radio> previously fired
@@ -4245,14 +4289,34 @@ ${html}
                                       role="radio"
                                       aria-checked={isSelSub}
                                       tabIndex={0}
-                                      className={`flex items-start gap-1.5 rounded-lg border px-2 py-1 cursor-pointer transition-all ${isSelSub ? "border-blue-500/60 bg-blue-500/15" : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"}`}
+                                      className="qu-sub-option flex items-start gap-1.5 rounded-lg border px-2 py-1 cursor-pointer transition-colors"
+                                      style={subStyle}
                                       onClick={toggleSub}
                                       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSub(e); } }}>
                                       {/* Decorative radio disc — visual only, click is handled by the row. */}
-                                      <span aria-hidden className={`mt-1 shrink-0 h-3 w-3 rounded-full border ${isSelSub ? "border-blue-400 bg-blue-500" : "border-slate-600 bg-transparent"}`} />
+                                      <span
+                                        aria-hidden
+                                        className="mt-1 shrink-0 h-3 w-3 rounded-full border"
+                                        style={{
+                                          borderColor:     isSelSub ? "var(--ats-fg-accent)" : "var(--ats-border-subtle)",
+                                          backgroundColor: isSelSub ? "var(--ats-fg-accent)" : "transparent",
+                                        }}
+                                      />
                                       <div className="min-w-0">
-                                        <div className={`text-[11px] font-semibold leading-snug ${isSelSub ? "text-blue-300" : "text-slate-300"}`}>{sub.label}</div>
-                                        {sub.reason && <div className="mt-0.5 text-[10px] leading-tight text-slate-500">{sub.reason}</div>}
+                                        <div
+                                          className="text-[11px] font-semibold leading-snug"
+                                          style={{ color: isSelSub ? "var(--ats-fg-accent)" : "var(--ats-fg-primary)" }}
+                                        >
+                                          {sub.label}
+                                        </div>
+                                        {sub.reason && (
+                                          <div
+                                            className="mt-0.5 text-[10px] leading-tight"
+                                            style={{ color: "var(--ats-fg-muted)" }}
+                                          >
+                                            {sub.reason}
+                                          </div>
+                                        )}
                                       </div>
                                     </div>
                                   );

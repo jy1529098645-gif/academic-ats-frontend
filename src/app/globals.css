@@ -99,23 +99,13 @@ body {
   .megaphone-breath { box-shadow: none; }
 }
 
-/* Query understanding progress shimmer — always-moving gradient sweep
- * that plays OVER a determinate progress bar. Purpose: the underlying
- * percentage only advances when the backend emits a new status event
- * (often 5-15s between), during which the bar sits at 15% / 45% / 75%
- * unchanged. Users reported thinking the UI was stuck. This overlay
- * gradient keeps moving regardless of the underlying width, so the
- * stationary phase still reads as "actively working" rather than
- * "frozen".
- *
- * Drives the overlay in page.tsx's `{isUnderstanding && ...}` block.
- * Works with any background colour — the gradient's transparent endpoints
- * blend naturally into the panel the bar sits in.
+/* Query understanding progress now reuses the product-wide
+ * `progress-slide` keyframe (see line ~280) — same sliding-fill idiom
+ * the ProgressStrip component + agent progress bar use elsewhere.
+ * The previous bespoke `query-shimmer` overlay was removed to unify the
+ * loading-animation style across the product; only one keyframe to
+ * maintain now.
  */
-@keyframes query-shimmer {
-  0%   { background-position: -200% 0; }
-  100% { background-position:  200% 0; }
-}
 
 /* Danmu (bullet comment) flow animation.
  *
@@ -1038,9 +1028,33 @@ main[data-tone="day"] { color: #0f172a !important; }
 /* Query Understanding six-direction cards — in day mode the default
    border-slate-800 (#e2e8f0) is almost invisible on the light panel.
    Strengthen the unselected-card borders with the accent token so the
-   six boxes stay clearly delineated.                                    */
+   six boxes stay clearly delineated.
+   ─────────────────────────────────────────────────────────────────────
+   Hover feedback: DO NOT use `filter: brightness()` here. `filter`
+   cascades to every child element, so hovering anywhere inside the
+   card (including over a sub-direction row) dimmed the entire card
+   AND its sub-options — users reported "all sub-directions turn grey
+   when I hover one". Use a background tint instead; background doesn't
+   cascade in the same way, and it still gives the card a clear
+   "you're over me" affordance. */
 [data-tone="day"] .qu-direction-card          { border-color: var(--ats-border-accent) !important; }
-[data-tone="day"] .qu-direction-card:hover    { border-color: var(--ats-border-accent) !important; filter: brightness(0.95); }
+[data-tone="day"] .qu-direction-card:hover    {
+  border-color: var(--ats-border-accent) !important;
+  background-color: var(--ats-bg-accent-soft) !important;
+}
+
+/* Sub-option hover — scoped to the individual row, so hovering one
+   sub-direction inside a selected card highlights ONLY that row. The
+   parent card's own :hover still fires (cascading to a background tint),
+   but because the sub-option's own :hover selector is MORE specific
+   here and sets its own background explicitly, the sub uses its own
+   tint (accent-soft, a shade lighter than the card's) — rows the mouse
+   isn't over keep their idle background. No `filter: brightness()` here
+   either, for the same cascade-prevention reason as the parent card. */
+.qu-sub-option:hover {
+  border-color: var(--ats-border-accent) !important;
+  background-color: var(--ats-bg-accent-soft) !important;
+}
 [data-tone="day"] .border-slate-800\/50       { border-color: rgba(226,232,240,0.60) !important; }
 [data-tone="day"] .border-blue-500\/15        { border-color: rgb(from var(--ats-bg-accent) r g b / 0.18) !important; }
 [data-tone="day"] .border-blue-500\/20        { border-color: rgb(from var(--ats-bg-accent) r g b / 0.25) !important; }
