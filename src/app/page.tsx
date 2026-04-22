@@ -16,7 +16,6 @@ import {
 } from "@/lib/stores/prefs-store";
 import {
   useUsagePromptStore, hydrateUsagePromptStore, shouldPromptFeedback,
-  FEEDBACK_PROMPT_THRESHOLD,
 } from "@/lib/stores/usage-prompt-store";
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import ErrorBoundary from "@/components/ErrorBoundary";
@@ -44,7 +43,7 @@ import {
   PenLine, ListChecks, Ruler, Quote, Globe, Sparkles, Square, Play, Star,
   ChevronRight, ChevronLeft, ChevronDown, Trash2, Download, ClipboardList,
   X, Gem, Check, Mail, Moon, Sun, User, Settings, CreditCard, HelpCircle, Users,
-  Plus, Minus, ArrowRight, Lightbulb, ExternalLink, MessageCircle, ClipboardCheck,
+  Plus, Minus, ArrowRight, Lightbulb, ExternalLink, MessageCircle,
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   Link as LinkIcon, ShieldCheck,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical
@@ -5958,11 +5957,10 @@ ${html}
               onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }}
             >
               <div
-                className={`w-full max-w-xl rounded-2xl border shadow-2xl ${autoPromptedFeedback ? "ring-4 ring-offset-2" : ""}`}
+                className={`w-full max-w-lg rounded-2xl border shadow-2xl ${autoPromptedFeedback ? "ring-4 ring-offset-2" : ""}`}
                 style={{
                   borderColor:     autoPromptedFeedback ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                   backgroundColor: "var(--ats-bg-panel)",
-                  // CSS custom properties — cast through Record so TS accepts the `--*` keys
                   ...({
                     "--tw-ring-color":        autoPromptedFeedback ? "var(--ats-border-accent)" : "transparent",
                     "--tw-ring-offset-color": "var(--ats-bg-panel)",
@@ -5970,78 +5968,35 @@ ${html}
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                {/* Highlighted auto-prompt banner — only shown when we auto-open
-                    after N uses. Big, loud, clearly asks for feedback. */}
-                {autoPromptedFeedback && (
-                  <div
-                    className="rounded-t-2xl px-6 py-4 border-b-2"
-                    style={{
-                      background: "linear-gradient(135deg, var(--ats-bg-accent-soft) 0%, var(--ats-bg-panel) 100%)",
-                      borderColor: "var(--ats-border-accent)",
-                      color:       "var(--ats-fg-accent)",
-                    }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <MessageCircle size={28} className="shrink-0 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        <h2 className="text-2xl font-extrabold leading-tight tracking-tight">
-                          我们非常需要你的反馈！
-                        </h2>
-                        <p className="mt-1.5 text-base font-medium" style={{ color: "var(--ats-fg-primary)" }}>
-                          这对我们改进产品<span className="font-extrabold" style={{ color: "var(--ats-fg-accent)" }}>极其重要</span>。
-                          花 30 秒告诉我们你的想法,我们会认真读每一条。
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                <div className="flex items-center gap-3 px-6 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
-                  {!autoPromptedFeedback && (
-                    <MessageCircle size={20} style={{ color: "var(--ats-fg-accent)" }} />
-                  )}
+                {/* Header — merges title + close. When auto-opened after N uses
+                    it shows a bold ask; otherwise a plain "Send feedback". */}
+                <div className="flex items-start gap-3 px-6 pt-5 pb-4">
                   <div className="flex-1 min-w-0">
-                    <h3 className="text-lg font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
-                      {autoPromptedFeedback ? "留下你的反馈" : "Send feedback"}
-                    </h3>
+                    {autoPromptedFeedback ? (
+                      <>
+                        <h2 className="text-xl font-bold leading-tight" style={{ color: "var(--ats-fg-accent)" }}>
+                          We&apos;d really love your feedback
+                        </h2>
+                        <p className="mt-1 text-sm" style={{ color: "var(--ats-fg-secondary)" }}>
+                          It genuinely shapes what we build next. We read every note.
+                        </p>
+                      </>
+                    ) : (
+                      <h2 className="text-lg font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                        Send feedback
+                      </h2>
+                    )}
                   </div>
                   <button
                     onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }}
-                    className="transition-colors p-1 rounded hover:bg-black/5"
+                    className="transition-colors p-1 rounded hover:bg-black/5 shrink-0"
                     aria-label="Close"
                     style={{ color: "var(--ats-fg-muted)" }}
                   >
-                    <X size={20} />
+                    <X size={18} />
                   </button>
                 </div>
-                <div className="px-6 py-5 space-y-4">
-                  <a
-                    href="https://docs.google.com/forms/d/e/1FAIpQLScnQgLQm4TupGcGZ2OYkTZlnUwUFRyFMaIyLnp_sgPupGVXdg/viewform?usp=publish-editor"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-3 rounded-lg border border-dashed px-4 py-3 hover:brightness-110 transition-all"
-                    style={{
-                      borderColor:     "var(--ats-border-accent)",
-                      backgroundColor: "var(--ats-bg-accent-soft)",
-                      color:           "var(--ats-fg-accent)",
-                    }}
-                  >
-                    <ClipboardCheck size={20} className="shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold">Take the full survey</p>
-                      <p className="text-xs mt-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
-                        A few minutes · shapes the product roadmap
-                      </p>
-                    </div>
-                    <ExternalLink size={14} className="shrink-0 opacity-70" />
-                  </a>
-                  <div
-                    className="flex items-center gap-2 text-xs uppercase tracking-wider font-medium"
-                    style={{ color: "var(--ats-fg-muted)" }}
-                  >
-                    <span className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
-                    <span>or drop a quick note</span>
-                    <span className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
-                  </div>
+                <div className="px-6 pb-5 space-y-3">
                   <div className="flex gap-2">
                     {(["bug", "feature", "general"] as const).map(c => {
                       const active = feedbackCategory === c;
@@ -6049,7 +6004,7 @@ ${html}
                         <button
                           key={c}
                           onClick={() => setFeedbackCategory(c)}
-                          className="flex-1 rounded-lg border px-4 py-2 text-sm font-semibold transition-colors"
+                          className="flex-1 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors"
                           style={{
                             borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                             backgroundColor: active ? "var(--ats-bg-accent-soft)" : "transparent",
@@ -6066,27 +6021,24 @@ ${html}
                     onChange={(e) => setFeedbackText(e.target.value)}
                     rows={6}
                     maxLength={4000}
+                    autoFocus
                     placeholder={
                       feedbackCategory === "bug"
-                        ? "What happened? What did you expect? Steps if you remember them."
+                        ? "What happened? What did you expect?"
                         : feedbackCategory === "feature"
                           ? "What would you like AcademiCats to do?"
-                          : "Tell us anything — compliments, confusions, ideas."
+                          : "Share anything — ideas, confusions, compliments."
                     }
-                    className="w-full rounded-lg border p-4 text-base outline-none resize-y"
+                    className="w-full rounded-lg border p-3 text-sm outline-none resize-y"
                     style={{
                       borderColor:     "var(--ats-border-subtle)",
                       backgroundColor: "var(--ats-bg-base)",
                       color:           "var(--ats-fg-primary)",
                     }}
                   />
-                  <div className="flex items-center justify-between gap-2 text-xs" style={{ color: "var(--ats-fg-muted)" }}>
-                    <span className="tabular-nums">{feedbackText.length} / 4000</span>
-                    <span>Sent as <code>{authUser.email}</code></span>
-                  </div>
                   {feedbackMsg && (
                     <p
-                      className="text-sm rounded-lg px-4 py-2 border"
+                      className="text-sm rounded-lg px-3 py-2 border"
                       style={{
                         borderColor:     feedbackMsg.error ? "#ef444455" : "#10b98155",
                         backgroundColor: feedbackMsg.error ? "#ef44441a" : "#10b9811a",
@@ -6096,12 +6048,10 @@ ${html}
                       {feedbackMsg.text}
                     </p>
                   )}
-                  <div className="flex items-center justify-end gap-3 pt-1">
-                    <button
-                      onClick={() => setFeedbackOpen(false)}
-                      className="rounded-lg px-4 py-2 text-sm transition-colors"
-                      style={{ color: "var(--ats-fg-muted)" }}
-                    >Cancel</button>
+                  <div className="flex items-center justify-between gap-3 pt-1">
+                    <span className="text-xs tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
+                      {feedbackText.length} / 4000
+                    </span>
                     <button
                       onClick={() => void submitFeedback()}
                       disabled={feedbackSending || feedbackText.trim().length < 3}
