@@ -114,6 +114,7 @@ type AdminUser = {
   tier: "free" | "basic" | "scholar" | "dev" | string;
   tier_updated_at: string | null;
   profile_updated: string | null;
+  first_seen_at:   string | null;
   today: {
     quick_search_count: number;
     deep_search_count:  number;
@@ -121,6 +122,16 @@ type AdminUser = {
     deep_read_count:    number;
     llm_cost_usd:       number;
   };
+};
+
+type ActivityEntry = {
+  id:         number;
+  created_at: string;
+  user_id:    string;
+  email:      string;
+  action:     string;
+  query:      string;
+  summary:    string;
 };
 
 type AdminAnnouncement = {
@@ -336,6 +347,12 @@ export default function AdminPage() {
     return res.json();
   }, []);
 
+  const fetchActivity = useCallback(async (): Promise<{ activity: ActivityEntry[] }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/activity?limit=100"));
+    if (!res.ok) throw new Error(`activity HTTP ${res.status}`);
+    return res.json();
+  }, []);
+
   const overview     = usePolling(fetchOverview,     OVERVIEW_POLL_MS, enabled);
   const timeseries   = usePolling(fetchTimeseries,   DETAIL_POLL_MS,   enabled);
   const users        = usePolling(fetchUsers,        DETAIL_POLL_MS,   enabled);
@@ -346,6 +363,7 @@ export default function AdminPage() {
   const sysHealth    = usePolling(fetchSystemHealth, OVERVIEW_POLL_MS, enabled);
   const feedback     = usePolling(fetchFeedback,     30_000,           enabled);
   const tierLimits   = usePolling(fetchTierLimits,   60_000,           enabled);
+  const activity     = usePolling(fetchActivity,     30_000,           enabled);
 
   const refreshAll = () => {
     overview.refresh();
@@ -358,6 +376,7 @@ export default function AdminPage() {
     sysHealth.refresh();
     feedback.refresh();
     tierLimits.refresh();
+    activity.refresh();
   };
 
   // Batch-save every pending tier-limit edit. The editor accumulates
@@ -757,6 +776,29 @@ export default function AdminPage() {
             </div>
             <ErrorLogPanel rows={errors.data?.errors ?? []} />
           </div>
+        </section>
+
+        {/* Activity feed — what each user actually did, newest first */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                Recent activity
+              </h3>
+              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                Every logged-in search / synthesis / deep-read emits one row.
+                Refreshes every 30 s.
+              </p>
+            </div>
+            <button
+              onClick={() => activity.refresh()}
+              className="text-[10px] inline-flex items-center gap-1"
+              style={{ color: "var(--ats-fg-muted)" }}
+            >
+              <RefreshCw size={10} /> Refresh
+            </button>
+          </div>
+          <ActivityFeed rows={activity.data?.activity ?? []} />
         </section>
 
         {/* Tier limits editor — full width because it's a table */}
@@ -1226,6 +1268,7 @@ function UserTable({ users }: { users: AdminUser[] }) {
             <th className="pb-2 pr-3 font-semibold text-right">Synth</th>
             <th className="pb-2 pr-3 font-semibold text-right">Reads</th>
             <th className="pb-2 pr-3 font-semibold text-right">Cost (USD)</th>
+            <th className="pb-2 pr-3 font-semibold">First seen</th>
             <th className="pb-2 font-semibold">Tier changed</th>
           </tr>
         </thead>
@@ -1259,6 +1302,9 @@ function UserTable({ users }: { users: AdminUser[] }) {
               <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
                 {u.today.llm_cost_usd.toFixed(4)}
               </td>
+              <td className="py-1.5 pr-3" style={{ color: "var(--ats-fg-secondary)" }} title={u.first_seen_at ?? ""}>
+                {fmtDate(u.first_seen_at)}
+              </td>
               <td className="py-1.5" style={{ color: "var(--ats-fg-muted)" }}>
                 {fmtDate(u.tier_updated_at)}
               </td>
@@ -1269,6 +1315,67 @@ function UserTable({ users }: { users: AdminUser[] }) {
     </div>
   );
 }
+
+// ── Activity feed ─────────────────────────────────────────────────────────
+// Reverse-chronological list of user actions, each row one entry from
+// history_entries. Colour-codes the action type for fast scanning
+// (search=blue, synthesis=purple, deep_read=emerald, other=grey).
+
+function ActivityFeed({ rows }: { rows: ActivityEntry[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No activity yet. Rows appear here as soon as a signed-in user runs a search / synthesis / deep-read.
+      </div>
+    );
+  }
+  const ACTION_COLOR: Record<string, string> = {
+    search:    "#3b82f6",
+    synthesis: "#8b5cf6",
+    deep_read: "#10b981",
+  };
+  return (
+    <div className="max-h-96 overflow-y-auto thin-scrollbar pr-1 space-y-1">
+      {rows.map(r => {
+        const color = ACTION_COLOR[r.action] ?? "#64748b";
+        return (
+          <div
+            key={r.id}
+            className="rounded-md border p-2 flex items-start gap-2"
+            style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}
+          >
+            <span
+              className="shrink-0 mt-0.5 text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded border"
+              style={{
+                color,
+                backgroundColor: color + "1a",
+                borderColor:     color + "55",
+              }}
+            >
+              {r.action}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[11px] font-semibold truncate" style={{ color: "var(--ats-fg-primary)" }}>
+                  {r.email || <em style={{ color: "var(--ats-fg-muted)" }}>(no email)</em>}
+                </span>
+                <span className="text-[10px] shrink-0" style={{ color: "var(--ats-fg-muted)" }}>
+                  {fmtDateTime(r.created_at)}
+                </span>
+              </div>
+              {r.query && (
+                <p className="text-[11px] truncate" style={{ color: "var(--ats-fg-secondary)" }}>
+                  {r.query}
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 
 // ── Announcement log ────────────────────────────────────────────────────────
 
