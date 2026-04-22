@@ -296,6 +296,8 @@ type QueryDirection = {
   label: string;
   description?: string;
   sub_options: QuerySubOption[];
+  search_query?: string;
+  keywords?: string[];
 };
 type QueryDirectionsResponse = {
   original_query?: string;
@@ -304,6 +306,47 @@ type QueryDirectionsResponse = {
   recommended_sub?: number;
   error?: string;
 };
+
+function mergeParentSubQuery(subQuery: string, parentAnchor: string): string {
+  // Keep the sub-option's search_query as the base (it's the specific angle)
+  // and append any word tokens from the parent direction that aren't already
+  // present, so the final query stays grounded in the larger direction even
+  // when the sub's phrasing is terse.
+  const sub = (subQuery || "").trim();
+  const parent = (parentAnchor || "").trim();
+  if (!sub) return parent;
+  if (!parent) return sub;
+  const normalize = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const seen = new Set<string>();
+  for (const w of sub.split(/\s+/)) { const k = normalize(w); if (k) seen.add(k); }
+  const extras: string[] = [];
+  for (const w of parent.split(/\s+/)) {
+    const k = normalize(w);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    extras.push(w);
+  }
+  return extras.length ? `${sub} ${extras.join(" ")}` : sub;
+}
+
+function mergeIntentProfiles(
+  subIntent: Record<string, unknown> | undefined,
+  parentKeywords: string[] | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(subIntent || {}) };
+  if (!parentKeywords?.length) return out;
+  const existingInclude = Array.isArray(out.include) ? (out.include as unknown[]).map(String) : [];
+  const seen = new Set(existingInclude.map(s => s.toLowerCase().trim()).filter(Boolean));
+  const merged = [...existingInclude];
+  for (const kw of parentKeywords) {
+    const k = (kw || "").toLowerCase().trim();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    merged.push(kw);
+  }
+  out.include = merged;
+  return out;
+}
 
 function scoreChip(score: number | undefined | null): { label: string; cls: string } {
   const s = score ?? 0;
@@ -1511,19 +1554,19 @@ export default function HomePage() {
   // open the modal ONCE and immediately mark it as prompted so we don't
   // loop. The modal itself handles dismiss/submit; both paths leave
   // promptedAt set, so this effect never re-fires for this browser.
-  const promptUsageCount = useUsagePromptStore(s => s.usageCount);
-  const promptPromptedAt = useUsagePromptStore(s => s.promptedAt);
+  const promptUsageCount       = useUsagePromptStore(s => s.usageCount);
+  const promptLastPromptedCount = useUsagePromptStore(s => s.lastPromptedCount);
   useEffect(() => {
-    if (!shouldPromptFeedback({ usageCount: promptUsageCount, promptedAt: promptPromptedAt })) return;
+    if (!shouldPromptFeedback({ usageCount: promptUsageCount, lastPromptedCount: promptLastPromptedCount })) return;
     // Open the feedback modal in "gentle nudge" mode. category=general is
     // the right default for unsolicited feedback (they didn't click "bug").
     setFeedbackCategory("general");
     setAutoPromptedFeedback(true);
     setFeedbackOpen(true);
-    // Persist the prompt flag immediately so a reload during the modal
-    // session doesn't re-trigger this effect on next hydration.
+    // Persist the prompt marker immediately so this effect doesn't re-fire
+    // on the same usageCount (e.g. after a reload during the modal session).
     useUsagePromptStore.getState().markPrompted();
-  }, [promptUsageCount, promptPromptedAt]);
+  }, [promptUsageCount, promptLastPromptedCount]);
 
   // ── Dev account sign-in (login-required overlay) ─────────────────────────
   // Lets operators sign in as dev01/02/03 from the main login screen
@@ -2081,19 +2124,28 @@ export default function HomePage() {
     // If a direction is chosen but no sub, fall back to the direction's label
     // as the search query (broad-mode). If neither, return null so the query
     // resolver uses the raw textarea value.
+    //
+    // When BOTH a direction and a sub-option are chosen we merge them: the
+    // sub-option alone is often too narrow (its short phrasing drops the
+    // parent anchor terms), so we append the parent direction's anchor words
+    // that aren't already in the sub's query. Preserves sub focus while
+    // grounding the query in the larger direction.
     if (directionData?.directions?.length && selectedDirIndex !== null) {
       const dir = directionData.directions[selectedDirIndex];
       if (dir) {
         if (selectedSubIndex !== null && dir.sub_options?.[selectedSubIndex]) {
           const sub = dir.sub_options[selectedSubIndex];
-          return { label: sub.label, search_query: sub.search_query, reason: sub.reason, intent_profile: sub.intent_profile };
+          const parentAnchor = (dir.search_query || dir.label || "").trim();
+          const mergedQuery = mergeParentSubQuery(sub.search_query, parentAnchor);
+          const mergedIntent = mergeIntentProfiles(sub.intent_profile, dir.keywords);
+          return { label: sub.label, search_query: mergedQuery, reason: sub.reason, intent_profile: mergedIntent };
         }
         // Direction chosen, no sub → search the direction's label directly.
         return {
           label: dir.label,
-          search_query: dir.label,
+          search_query: dir.search_query || dir.label,
           reason: dir.description ?? "",
-          intent_profile: {},
+          intent_profile: dir.keywords?.length ? { include: dir.keywords } : {},
         };
       }
     }
@@ -5902,78 +5954,102 @@ ${html}
 
           {feedbackOpen && (
             <div
-              className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm"
+              className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm"
               onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }}
             >
               <div
-                className="w-full max-w-md rounded-2xl border shadow-2xl"
+                className={`w-full max-w-xl rounded-2xl border shadow-2xl ${autoPromptedFeedback ? "ring-4 ring-offset-2" : ""}`}
                 style={{
-                  borderColor:     "var(--ats-border-subtle)",
+                  borderColor:     autoPromptedFeedback ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                   backgroundColor: "var(--ats-bg-panel)",
+                  // CSS custom properties — cast through Record so TS accepts the `--*` keys
+                  ...({
+                    "--tw-ring-color":        autoPromptedFeedback ? "var(--ats-border-accent)" : "transparent",
+                    "--tw-ring-offset-color": "var(--ats-bg-panel)",
+                  } as Record<string, string>),
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                <div className="flex items-center gap-2 px-5 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
-                  <MessageCircle size={16} style={{ color: "var(--ats-fg-accent)" }} />
-                  <div className="flex-1 min-w-0">
-                    <h2 className="text-base font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
-                      {autoPromptedFeedback
-                        ? `How's AcademiCats going so far?`
-                        : `Send feedback`}
-                    </h2>
-                    {autoPromptedFeedback && (
-                      <p className="text-[11px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
-                        You&apos;ve used {FEEDBACK_PROMPT_THRESHOLD}+ features — drop us a line. It genuinely shapes what we ship next. You won&apos;t see this prompt again.
-                      </p>
-                    )}
+                {/* Highlighted auto-prompt banner — only shown when we auto-open
+                    after N uses. Big, loud, clearly asks for feedback. */}
+                {autoPromptedFeedback && (
+                  <div
+                    className="rounded-t-2xl px-6 py-4 border-b-2"
+                    style={{
+                      background: "linear-gradient(135deg, var(--ats-bg-accent-soft) 0%, var(--ats-bg-panel) 100%)",
+                      borderColor: "var(--ats-border-accent)",
+                      color:       "var(--ats-fg-accent)",
+                    }}
+                  >
+                    <div className="flex items-start gap-3">
+                      <MessageCircle size={28} className="shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <h2 className="text-2xl font-extrabold leading-tight tracking-tight">
+                          我们非常需要你的反馈！
+                        </h2>
+                        <p className="mt-1.5 text-base font-medium" style={{ color: "var(--ats-fg-primary)" }}>
+                          这对我们改进产品<span className="font-extrabold" style={{ color: "var(--ats-fg-accent)" }}>极其重要</span>。
+                          花 30 秒告诉我们你的想法,我们会认真读每一条。
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                  <button onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }} className="transition-colors" style={{ color: "var(--ats-fg-muted)" }}>
-                    <X size={16} />
+                )}
+                <div className="flex items-center gap-3 px-6 py-4 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                  {!autoPromptedFeedback && (
+                    <MessageCircle size={20} style={{ color: "var(--ats-fg-accent)" }} />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-lg font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                      {autoPromptedFeedback ? "留下你的反馈" : "Send feedback"}
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }}
+                    className="transition-colors p-1 rounded hover:bg-black/5"
+                    aria-label="Close"
+                    style={{ color: "var(--ats-fg-muted)" }}
+                  >
+                    <X size={20} />
                   </button>
                 </div>
-                <div className="px-5 py-4 space-y-3">
-                  {/* Longer-form survey shortcut — opens the Google Form in a
-                      new tab. Positioned above the quick-feedback composer so
-                      users see both options but default to the lightweight
-                      "leave a message" path. Styled as a dashed-border callout
-                      so it reads as "auxiliary" rather than competing with the
-                      main Send button below. */}
+                <div className="px-6 py-5 space-y-4">
                   <a
                     href="https://docs.google.com/forms/d/e/1FAIpQLScnQgLQm4TupGcGZ2OYkTZlnUwUFRyFMaIyLnp_sgPupGVXdg/viewform?usp=publish-editor"
                     target="_blank"
                     rel="noreferrer"
-                    className="flex items-center gap-2.5 rounded-lg border border-dashed px-3 py-2.5 hover:brightness-110 transition-all"
+                    className="flex items-center gap-3 rounded-lg border border-dashed px-4 py-3 hover:brightness-110 transition-all"
                     style={{
                       borderColor:     "var(--ats-border-accent)",
                       backgroundColor: "var(--ats-bg-accent-soft)",
                       color:           "var(--ats-fg-accent)",
                     }}
                   >
-                    <ClipboardCheck size={16} className="shrink-0" />
+                    <ClipboardCheck size={20} className="shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-semibold">Take the full survey</p>
-                      <p className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
+                      <p className="text-sm font-semibold">Take the full survey</p>
+                      <p className="text-xs mt-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
                         A few minutes · shapes the product roadmap
                       </p>
                     </div>
-                    <ExternalLink size={12} className="shrink-0 opacity-70" />
+                    <ExternalLink size={14} className="shrink-0 opacity-70" />
                   </a>
                   <div
-                    className="flex items-center gap-2 text-[10px] uppercase tracking-wider"
+                    className="flex items-center gap-2 text-xs uppercase tracking-wider font-medium"
                     style={{ color: "var(--ats-fg-muted)" }}
                   >
                     <span className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
                     <span>or drop a quick note</span>
                     <span className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
                   </div>
-                  <div className="flex gap-1.5">
+                  <div className="flex gap-2">
                     {(["bug", "feature", "general"] as const).map(c => {
                       const active = feedbackCategory === c;
                       return (
                         <button
                           key={c}
                           onClick={() => setFeedbackCategory(c)}
-                          className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors"
+                          className="flex-1 rounded-lg border px-4 py-2 text-sm font-semibold transition-colors"
                           style={{
                             borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                             backgroundColor: active ? "var(--ats-bg-accent-soft)" : "transparent",
@@ -5988,7 +6064,7 @@ ${html}
                   <textarea
                     value={feedbackText}
                     onChange={(e) => setFeedbackText(e.target.value)}
-                    rows={5}
+                    rows={6}
                     maxLength={4000}
                     placeholder={
                       feedbackCategory === "bug"
@@ -5997,20 +6073,20 @@ ${html}
                           ? "What would you like AcademiCats to do?"
                           : "Tell us anything — compliments, confusions, ideas."
                     }
-                    className="w-full rounded-lg border p-3 text-sm outline-none resize-y"
+                    className="w-full rounded-lg border p-4 text-base outline-none resize-y"
                     style={{
                       borderColor:     "var(--ats-border-subtle)",
                       backgroundColor: "var(--ats-bg-base)",
                       color:           "var(--ats-fg-primary)",
                     }}
                   />
-                  <div className="flex items-center justify-between gap-2 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  <div className="flex items-center justify-between gap-2 text-xs" style={{ color: "var(--ats-fg-muted)" }}>
                     <span className="tabular-nums">{feedbackText.length} / 4000</span>
                     <span>Sent as <code>{authUser.email}</code></span>
                   </div>
                   {feedbackMsg && (
                     <p
-                      className="text-xs rounded-lg px-3 py-1.5 border"
+                      className="text-sm rounded-lg px-4 py-2 border"
                       style={{
                         borderColor:     feedbackMsg.error ? "#ef444455" : "#10b98155",
                         backgroundColor: feedbackMsg.error ? "#ef44441a" : "#10b9811a",
@@ -6020,16 +6096,16 @@ ${html}
                       {feedbackMsg.text}
                     </p>
                   )}
-                  <div className="flex items-center justify-end gap-2">
+                  <div className="flex items-center justify-end gap-3 pt-1">
                     <button
                       onClick={() => setFeedbackOpen(false)}
-                      className="rounded-lg px-3 py-1.5 text-xs transition-colors"
+                      className="rounded-lg px-4 py-2 text-sm transition-colors"
                       style={{ color: "var(--ats-fg-muted)" }}
                     >Cancel</button>
                     <button
                       onClick={() => void submitFeedback()}
                       disabled={feedbackSending || feedbackText.trim().length < 3}
-                      className="rounded-lg border px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-lg border px-5 py-2 text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       style={{
                         borderColor:     "var(--ats-border-accent)",
                         backgroundColor: "var(--ats-bg-accent-soft)",

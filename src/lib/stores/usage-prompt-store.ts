@@ -16,20 +16,23 @@
 //   important later, add lifetime_usage_count + feedback_prompted_at
 //   columns to the profiles table and mirror this state server-side.
 //
-// Threshold:
-//   5 actions — enough that the user has had a real taste of the product
-//   and has opinions, but not so many that early-friction feedback is lost.
-//   Tunable via FEEDBACK_PROMPT_THRESHOLD.
+// Threshold & cadence:
+//   Every 4 metered actions we re-open the feedback modal (previously we
+//   prompted once at 5 and never again). We need ongoing signal, not a
+//   single one-shot ask. To avoid re-prompting the SAME user the same
+//   time, we remember the count at which we last prompted; the next
+//   multiple of FEEDBACK_PROMPT_THRESHOLD above that count triggers again.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { create } from "zustand";
 
 const STORAGE = {
-  count:     "ats-usage-prompt-count",
-  prompted:  "ats-usage-prompt-shown-at",   // ISO timestamp or empty string
+  count:        "ats-usage-prompt-count",
+  prompted:     "ats-usage-prompt-shown-at",     // ISO timestamp or empty string (legacy)
+  lastPromptAt: "ats-usage-prompt-last-count",   // integer — usageCount value at last prompt
 } as const;
 
-export const FEEDBACK_PROMPT_THRESHOLD = 5;
+export const FEEDBACK_PROMPT_THRESHOLD = 4;
 
 function _readInt(key: string, fallback: number): number {
   if (typeof window === "undefined") return fallback;
@@ -58,11 +61,15 @@ type UsagePromptState = {
    *  Persisted to localStorage. */
   usageCount: number;
 
-  /** ISO timestamp of when we last showed the feedback modal to the
-   *  user. Non-empty = "don't prompt again". Empty string = not yet
-   *  prompted. We store the timestamp (not just a bool) so future
-   *  "prompt again after 90 days" logic can check it cheaply. */
+  /** ISO timestamp of when we last showed the feedback modal. Kept for
+   *  telemetry / "prompt again after N days" logic; no longer the
+   *  primary gate (we use lastPromptedCount for that). */
   promptedAt: string;
+
+  /** usageCount value at the last prompt. Used to decide whether the
+   *  current usageCount has crossed a fresh multiple of the threshold
+   *  so we can re-prompt on every 4th action rather than just once. */
+  lastPromptedCount: number;
 
   /** Bump the counter by 1. Call this on every successful metered
    *  action (search result arrives, synthesis completes, deep-read
@@ -71,7 +78,8 @@ type UsagePromptState = {
   increment: () => void;
 
   /** Mark the feedback modal as shown. Call on dismiss OR on submit;
-   *  the goal is "don't pester". */
+   *  records the current usageCount so the next prompt waits another
+   *  FEEDBACK_PROMPT_THRESHOLD actions. */
   markPrompted: () => void;
 
   /** Reset counter + prompt flag. Used by Settings → "Reset local
@@ -82,6 +90,7 @@ type UsagePromptState = {
 export const useUsagePromptStore = create<UsagePromptState>()((set, get) => ({
   usageCount: 0,
   promptedAt: "",
+  lastPromptedCount: 0,
 
   increment: () => {
     const next = get().usageCount + 1;
@@ -91,14 +100,17 @@ export const useUsagePromptStore = create<UsagePromptState>()((set, get) => ({
 
   markPrompted: () => {
     const iso = new Date().toISOString();
+    const c   = get().usageCount;
     _write(STORAGE.prompted, iso);
-    set({ promptedAt: iso });
+    _write(STORAGE.lastPromptAt, String(c));
+    set({ promptedAt: iso, lastPromptedCount: c });
   },
 
   reset: () => {
     _write(STORAGE.count, "0");
     _write(STORAGE.prompted, "");
-    set({ usageCount: 0, promptedAt: "" });
+    _write(STORAGE.lastPromptAt, "0");
+    set({ usageCount: 0, promptedAt: "", lastPromptedCount: 0 });
   },
 }));
 
@@ -111,14 +123,23 @@ export const useUsagePromptStore = create<UsagePromptState>()((set, get) => ({
  */
 export function hydrateUsagePromptStore(): void {
   useUsagePromptStore.setState({
-    usageCount: _readInt(STORAGE.count, 0),
-    promptedAt: _readStr(STORAGE.prompted),
+    usageCount:        _readInt(STORAGE.count, 0),
+    promptedAt:        _readStr(STORAGE.prompted),
+    lastPromptedCount: _readInt(STORAGE.lastPromptAt, 0),
   });
 }
 
-/** Convenience selector — returns true when we've hit the threshold AND
- *  haven't prompted yet. The main page.tsx effect uses this to decide
- *  whether to auto-open the feedback modal after the next metered action. */
-export function shouldPromptFeedback(state: Pick<UsagePromptState, "usageCount" | "promptedAt">): boolean {
-  return state.usageCount >= FEEDBACK_PROMPT_THRESHOLD && !state.promptedAt;
+/** Convenience selector — returns true when we've crossed the next
+ *  multiple of FEEDBACK_PROMPT_THRESHOLD since the last prompt. This
+ *  fires the modal repeatedly (every 4 actions by default), not just
+ *  once in the browser's lifetime. */
+export function shouldPromptFeedback(
+  state: Pick<UsagePromptState, "usageCount" | "lastPromptedCount">,
+): boolean {
+  const { usageCount, lastPromptedCount } = state;
+  if (usageCount <= 0) return false;
+  if (usageCount <= lastPromptedCount) return false;
+  // Fire whenever usageCount is the next multiple of the threshold above
+  // lastPromptedCount — i.e. we crossed the boundary in this bump.
+  return usageCount % FEEDBACK_PROMPT_THRESHOLD === 0;
 }
