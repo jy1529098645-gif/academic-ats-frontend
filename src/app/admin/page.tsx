@@ -172,9 +172,18 @@ type CostAlert = {
   counts:    { quick: number; deep: number; synth: number; reads: number };
 };
 
+type KeyPoolEntry = {
+  key_id?:  string;
+  status?:  string;    // "available" | "disabled" | string
+  errors?:  number;
+  // Other telemetry fields the backend might tack on later; we don't
+  // reference them, so `unknown` is fine.
+  [k: string]: unknown;
+};
+
 type SystemHealth = {
-  redis:    { configured: boolean; backend: string };
-  key_pool: Record<string, unknown>;
+  redis:    { configured: boolean; backend: string; url_set?: boolean; reason?: string };
+  key_pool: Record<string, KeyPoolEntry[] | { error?: string }>;
   workers:  number;
 };
 
@@ -1517,20 +1526,36 @@ function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
     return <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>;
   }
   const redisGood = data.redis.configured;
-  // Flatten the key pool dict (provider → {active, disabled, total}) into a
-  // compact tabular view. Shape may vary slightly per provider, so we're
-  // defensive about missing fields.
   const pool = data.key_pool ?? {};
-  const providers = Object.entries(pool).filter(([k]) => k !== "error");
+
+  // Filter out the reserved "error" key (backend uses it to report a
+  // gateway-level failure) — we render its message separately so it
+  // doesn't collide with the per-provider rows.
+  const poolError    = (pool as { error?: string }).error;
+  const providers    = Object.entries(pool).filter(([k]) => k !== "error");
+
+  // Aggregate per-provider counts so the display is "anthropic · 1 key
+  // · 0 errors" rather than the raw JSON blob it was showing before.
+  const summarise = (info: KeyPoolEntry[] | { error?: string } | unknown) => {
+    if (!Array.isArray(info)) return null;
+    const keys = info as KeyPoolEntry[];
+    const available = keys.filter(k => k.status === "available").length;
+    const disabled  = keys.length - available;
+    const errors    = keys.reduce((s, k) => s + (typeof k.errors === "number" ? k.errors : 0), 0);
+    return { total: keys.length, available, disabled, errors };
+  };
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
           <p className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>Redis</p>
           <p className="font-bold" style={{ color: redisGood ? "#10b981" : "#f59e0b" }}>
-            {redisGood ? "Connected" : "Not configured"}
+            {redisGood ? "Connected" : "In-memory fallback"}
           </p>
-          <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>{data.redis.backend}</p>
+          <p className="text-[10px] leading-snug" style={{ color: "var(--ats-fg-muted)" }}>
+            {data.redis.reason ?? data.redis.backend}
+          </p>
         </div>
         <div className="rounded-lg border p-2" style={{ borderColor: "var(--ats-border-subtle)" }}>
           <p className="text-[10px] uppercase tracking-wider mb-0.5" style={{ color: "var(--ats-fg-muted)" }}>Workers</p>
@@ -1540,21 +1565,52 @@ function SystemHealthPanel({ data }: { data: SystemHealth | null }) {
       </div>
       <div>
         <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: "var(--ats-fg-muted)" }}>LLM key pool</p>
-        {providers.length === 0 ? (
+        {poolError ? (
+          <p className="text-xs" style={{ color: "#ef4444" }}>{poolError}</p>
+        ) : providers.length === 0 ? (
           <p className="text-xs italic" style={{ color: "var(--ats-fg-muted)" }}>No key pool data available.</p>
         ) : (
           <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-[10px] uppercase tracking-wider border-b" style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}>
+                <th className="pb-1.5 pr-3 font-semibold">Provider</th>
+                <th className="pb-1.5 pr-3 font-semibold text-right">Keys</th>
+                <th className="pb-1.5 pr-3 font-semibold text-right">Available</th>
+                <th className="pb-1.5 pr-3 font-semibold text-right">Disabled</th>
+                <th className="pb-1.5 font-semibold text-right">Errors</th>
+              </tr>
+            </thead>
             <tbody style={{ color: "var(--ats-fg-primary)" }}>
-              {providers.map(([name, info]) => (
-                <tr key={name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
-                  <td className="py-1 pr-3 font-semibold">{name}</td>
-                  <td className="py-1 text-[11px]" style={{ color: "var(--ats-fg-secondary)" }}>
-                    {typeof info === "object" && info !== null
-                      ? JSON.stringify(info).slice(0, 200)
-                      : String(info)}
-                  </td>
-                </tr>
-              ))}
+              {providers.map(([name, info]) => {
+                const s = summarise(info);
+                if (!s) {
+                  return (
+                    <tr key={name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                      <td className="py-1 pr-3 font-semibold">{name}</td>
+                      <td className="py-1 pr-3 text-right" colSpan={4} style={{ color: "var(--ats-fg-muted)" }}>
+                        (no keys configured)
+                      </td>
+                    </tr>
+                  );
+                }
+                const health = s.disabled > 0 || s.errors > 0
+                  ? "#f59e0b" // amber — something's wrong
+                  : s.available > 0
+                    ? "#10b981" // emerald — healthy
+                    : "var(--ats-fg-muted)";
+                return (
+                  <tr key={name} className="border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                    <td className="py-1 pr-3 font-semibold flex items-center gap-1.5">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ backgroundColor: health }} />
+                      {name}
+                    </td>
+                    <td className="py-1 pr-3 text-right tabular-nums">{s.total}</td>
+                    <td className="py-1 pr-3 text-right tabular-nums" style={{ color: s.available > 0 ? "#10b981" : "var(--ats-fg-muted)" }}>{s.available}</td>
+                    <td className="py-1 pr-3 text-right tabular-nums" style={{ color: s.disabled > 0 ? "#f59e0b" : "var(--ats-fg-muted)" }}>{s.disabled}</td>
+                    <td className="py-1 text-right tabular-nums" style={{ color: s.errors > 0 ? "#ef4444" : "var(--ats-fg-muted)" }}>{s.errors}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

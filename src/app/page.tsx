@@ -298,8 +298,14 @@ const DEV_SEED_EMAIL = "dev@academicats.com";
 // Small indeterminate progress strip used across action buttons to show
 // "something is happening" while an async operation is in flight. Pair
 // with a spinning icon on the same button for a consistent running-state
-// visual. `color` defaults to currentColor so the strip picks up the
-// button's theme-token text colour automatically.
+// visual.
+//
+// Defaults to currentColor so the strip inherits the button's own text
+// colour — which is already either a Tailwind text-* class (violet-300,
+// emerald-300, etc) OR a var(--ats-fg-*) token. Callers shouldn't pass
+// an explicit `color` unless they deliberately want to break that
+// inheritance; doing so reintroduces off-palette colours the user was
+// complaining about in the alpha UI review.
 function ProgressStrip({ active, color }: { active: boolean; color?: string }) {
   if (!active) return null;
   return (
@@ -3483,7 +3489,7 @@ ${html}
                                   ? "Show Translation"
                                   : "Translate"}
                           </span>
-                          <ProgressStrip active={briefTranslating} color="var(--ats-fg-accent)" />
+                          <ProgressStrip active={briefTranslating} />
                         </button>
                       </div>
                     )}
@@ -4261,7 +4267,7 @@ ${html}
                           >
                             <Microscope size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
                             <span className="truncate">{deepReadLoading[paperKey] ? "Running…" : "Deep Read"}</span>
-                            <ProgressStrip active={!!deepReadLoading[paperKey]} color="#60a5fa" />
+                            <ProgressStrip active={!!deepReadLoading[paperKey]} />
                           </button>
                           {/* Download PDF */}
                           <button
@@ -4275,7 +4281,7 @@ ${html}
                           >
                             <Download size={12} className={`shrink-0 ${originalLoading[`${paperKey}-original`] ? "animate-pulse" : ""}`} />
                             <span className="truncate">{originalLoading[`${paperKey}-original`] ? "Downloading…" : "Download PDF"}</span>
-                            <ProgressStrip active={!!originalLoading[`${paperKey}-original`]} color="#34d399" />
+                            <ProgressStrip active={!!originalLoading[`${paperKey}-original`]} />
                           </button>
                           {/* Translate PDF + inline language selector */}
                           <button
@@ -4289,7 +4295,7 @@ ${html}
                           >
                             <Globe size={12} className={`shrink-0 ${translateLoading[`${paperKey}-translate`] ? "animate-spin" : ""}`} />
                             <span className="truncate">{translateLoading[`${paperKey}-translate`] ? "Translating…" : "Translate PDF"}</span>
-                            <ProgressStrip active={!!translateLoading[`${paperKey}-translate`]} color="#c084fc" />
+                            <ProgressStrip active={!!translateLoading[`${paperKey}-translate`]} />
                           </button>
                           <select
                             value={langs[0] ?? "Chinese (Simplified)"}
@@ -4783,7 +4789,7 @@ ${html}
                         <Sparkles size={14} className={labGenerating ? "animate-spin" : ""} />
                         {labGenerating ? "Composing…" : "Generate Academic Text"}
                       </span>
-                      <ProgressStrip active={labGenerating} color="#a78bfa" />
+                      <ProgressStrip active={labGenerating} />
                     </button>
                     {labGenerating && (
                       <button
