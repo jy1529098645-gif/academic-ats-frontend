@@ -166,6 +166,19 @@ type SearchResponse = {
   final_search_query?: string;
   original_query?: string;
   settings?: Record<string, unknown>;
+  // Retrieval funnel — shows the sample pool size at each stage so the UI
+  // can render "X of Y retrieved" instead of just the final paper count.
+  // retrieved_total is the biggest number (raw hits from Semantic Scholar /
+  // OpenAlex / Crossref / etc. before dedup + filters + LLM re-ranking).
+  diagnostics?: {
+    retrieval_funnel?: {
+      retrieved_total?: number;
+      after_filters?: number;
+      stage2_pool?: number;
+      final_count?: number;
+    };
+    [key: string]: unknown;
+  };
 };
 
 type JobResponse = {
@@ -2249,6 +2262,24 @@ export default function HomePage() {
   // Phase-1 streaming only applies in deep mode (fast mode shows final card immediately)
   const papersAreStreaming = !fastMode && isSubmitting && streamPapers.length > 0 && !result;
 
+  // Retrieved sample-pool size for the header counter ("X of Y retrieved").
+  // We take the MAX across the whole retrieval funnel so the label always
+  // reflects the biggest candidate pool we ever saw — typically
+  // retrieved_total (raw hits from Semantic Scholar / OpenAlex / Crossref /
+  // arXiv / etc. before dedup, filters, and LLM re-ranking). This makes the
+  // selection provenance visible: the user sees we surfaced N strong papers
+  // out of hundreds of candidates, not just "here are N papers".
+  const retrievedPoolSize: number = useMemo(() => {
+    const f = result?.diagnostics?.retrieval_funnel;
+    if (!f) return 0;
+    return Math.max(
+      Number(f.retrieved_total) || 0,
+      Number(f.after_filters)   || 0,
+      Number(f.stage2_pool)     || 0,
+      Number(f.final_count)     || 0,
+    );
+  }, [result]);
+
   // Agents: merge streamed results with final result (stream takes live priority)
   const agentData = {
     evidence_mapper: (streamAgents.evidence_mapper ?? result?.evidence_mapper) as AgentPayload | undefined,
@@ -4120,7 +4151,11 @@ ${html}
                   </span>
                 )}
                 {displayedPapers.length > 0 && (
-                  <span className="text-sm text-slate-500">{displayedPapers.length} papers</span>
+                  <span className="text-sm text-slate-500">
+                    {retrievedPoolSize > displayedPapers.length
+                      ? <>Selected <span className="font-semibold text-slate-300">{displayedPapers.length}</span> from <span className="font-semibold text-slate-300">{retrievedPoolSize.toLocaleString()}</span> retrieved</>
+                      : <>{displayedPapers.length} papers</>}
+                  </span>
                 )}
               </div>
               {papersAreStreaming && (
