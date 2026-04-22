@@ -166,6 +166,32 @@ type AdminAnnouncement = {
   created_at: string;
 };
 
+// Top-N users as returned by /api/admin/top-users — ranked by total cost
+// in the rolling window. `email` is denormalised from profiles for easy
+// display; tier is normalised to "dev" for allowlisted operators (matches
+// the auth gate).
+type TopUserRow = {
+  user_id:             string;
+  email?:              string;
+  tier?:               string;
+  is_banned?:          boolean;
+  total_cost:          number;
+  total_actions:       number;
+  quick_search_count:  number;
+  deep_search_count:   number;
+  synthesis_count:     number;
+  deep_read_count:     number;
+};
+
+// Top-N queries as returned by /api/admin/top-queries.
+type TopQueryRow = {
+  query:         string;
+  count:         number;      // total occurrences in the window
+  unique_users:  number;      // distinct user_ids (engagement breadth)
+  last_seen_at:  string;
+  entry_types:   Record<string, number>;  // per-entry-type breakdown ({"search": 8, "deep_read": 2})
+};
+
 // Maintenance-mode singleton as returned by GET /api/maintenance.
 // `eta_at` is nullable: when null the countdown is hidden and only the
 // static message is rendered to the user-facing overlay.
@@ -337,7 +363,11 @@ export default function AdminPage() {
   }, []);
 
   const fetchUsers = useCallback(async (): Promise<{ users: AdminUser[] }> => {
-    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/users?limit=50"));
+    // Default limit raised 50 → 500 so the panel shows EVERY signed-up
+    // account during alpha (realistic max). If we ever exceed 500 real
+    // users we'll switch this to pagination; until then, one fetch with
+    // the whole roster is simpler to operate than lazy-loading pages.
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/users?limit=500"));
     if (!res.ok) throw new Error(`users HTTP ${res.status}`);
     return res.json();
   }, []);
@@ -474,6 +504,27 @@ export default function AdminPage() {
     try { window.localStorage.setItem("ats-admin-kpi-window", kpiWindow); } catch { /* ignore */ }
   }, [kpiWindow]);
 
+  // Top-N users by cost + top-N queries — the "who is burning money"
+  // and "what are they asking about" panels. Both scope to `kpiWindow`
+  // so they move in lockstep with the admin's Today/Week/Month toggle
+  // at the top of the dashboard.
+  const fetchTopUsers = useCallback(async (): Promise<{ users: TopUserRow[] }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-users?window=${kpiWindow}&limit=10`));
+    if (!res.ok) throw new Error(`top-users HTTP ${res.status}`);
+    return res.json();
+  }, [kpiWindow]);
+
+  const fetchTopQueries = useCallback(async (): Promise<{ queries: TopQueryRow[] }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-queries?window=${kpiWindow}&limit=15`));
+    if (!res.ok) throw new Error(`top-queries HTTP ${res.status}`);
+    return res.json();
+  }, [kpiWindow]);
+
+  // Pollers for the top-N panels. Declared AFTER kpiWindow + the
+  // fetchers because both depend on `kpiWindow` being initialised.
+  const topUsers   = usePolling(fetchTopUsers,   DETAIL_POLL_MS, enabled);
+  const topQueries = usePolling(fetchTopQueries, DETAIL_POLL_MS, enabled);
+
   const setUserBan = async (userId: string, banned: boolean, reason?: string) => {
     try {
       const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/ban`), {
@@ -520,6 +571,45 @@ export default function AdminPage() {
     const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/activity?limit=50`));
     if (!res.ok) throw new Error(`user-activity HTTP ${res.status}`);
     return res.json();
+  };
+
+  // ── Announcement deletion: three scopes (by-id / user-posted / all) ────
+  // Backend exposes three dev-gated DELETE endpoints. The UI surfaces
+  // them all — per-row pill for surgical cleanup, two header buttons
+  // for bulk operations. Every destructive call goes through confirm()
+  // with a concrete message so it's clear what's about to vanish.
+  const deleteOneAnnouncement = async (id: string) => {
+    if (!confirm("Delete this announcement? This cannot be undone.")) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/announcements/${id}`), { method: "DELETE" });
+      if (!res.ok) throw new Error(`delete HTTP ${res.status}`);
+      await announcements.refresh();
+    } catch (e) {
+      alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const deleteAllUserAnnouncements = async () => {
+    const userPostedCount = (announcements.data?.announcements ?? []).filter(a => a.author_email !== "dev@academicats.com").length;
+    if (!confirm(`Clear all ${userPostedCount} user-posted announcements? Seed messages (dev@academicats.com) will be kept. Cannot be undone.`)) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/announcements/user"), { method: "DELETE" });
+      if (!res.ok) throw new Error(`delete HTTP ${res.status}`);
+      await announcements.refresh();
+    } catch (e) {
+      alert(`Bulk delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const nukeAllAnnouncements = async () => {
+    const total = (announcements.data?.announcements ?? []).length;
+    if (!confirm(`Delete ALL ${total} announcements — including seed messages? Hard reset. Cannot be undone.`)) return;
+    if (!confirm("Are you absolutely sure? This wipes the entire announcement feed.")) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/announcements/all"), { method: "DELETE" });
+      if (!res.ok) throw new Error(`delete HTTP ${res.status}`);
+      await announcements.refresh();
+    } catch (e) {
+      alert(`Nuke-all failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   const refreshAll = () => {
@@ -931,6 +1021,73 @@ export default function AdminPage() {
           </div>
         </section>
 
+        {/* ── Top users by cost + Top queries ────────────────────────
+             These two panels answer "who's spending the most" and
+             "what is everyone actually searching for" — the two
+             questions you'd otherwise only be able to answer by
+             dumping data to a spreadsheet and pivoting. Both scope
+             to the KPI window toggle (today/week/month) so the
+             numbers line up with the hero-card totals above. */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Top users by cost ({kpiWindow})
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Highest LLM spend in the selected window. Click any row to open their detail drawer.
+                </p>
+              </div>
+              <button onClick={() => topUsers.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <TopUsersPanel
+              rows={topUsers.data?.users ?? []}
+              onOpenDrawer={(row) => {
+                // Find the matching AdminUser (they share user_id). Fall
+                // back to a minimal synthesized row if the user list
+                // hasn't loaded yet — the drawer will still fetch live
+                // activity on mount.
+                const match = userList.find(u => u.id === row.user_id);
+                setUserDrawer(match || {
+                  id: row.user_id,
+                  email: row.email || null,
+                  tier: (row.tier as AdminUser["tier"]) || "free",
+                  tier_updated_at: null,
+                  profile_updated: null,
+                  first_seen_at:   null,
+                  is_banned:       !!row.is_banned,
+                  today: {
+                    quick_search_count: row.quick_search_count,
+                    deep_search_count:  row.deep_search_count,
+                    synthesis_count:    row.synthesis_count,
+                    deep_read_count:    row.deep_read_count,
+                    llm_cost_usd:       row.total_cost,
+                  },
+                });
+              }}
+            />
+          </div>
+          <div className="rounded-2xl border p-4" style={panelStyle}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                  Top queries ({kpiWindow})
+                </h3>
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Most-searched text in the selected window, case-insensitive. Good signal for "what are people trying to research".
+                </p>
+              </div>
+              <button onClick={() => topQueries.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
+                <RefreshCw size={10} /> Refresh
+              </button>
+            </div>
+            <TopQueriesPanel rows={topQueries.data?.queries ?? []} />
+          </div>
+        </section>
+
         {/* ── Recent activity — what each user actually did, newest first ── */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
           <div className="flex items-center justify-between mb-3">
@@ -959,10 +1116,11 @@ export default function AdminPage() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                Recent users
+                All users
               </h3>
               <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                Sorted by most-recent tier change. Showing {userList.length}.
+                Every signed-up account, newest first. Showing {userList.length}
+                {userList.length >= 500 && " (capped at 500 — paginate if you need older)"}.
               </p>
             </div>
             <button
@@ -1024,7 +1182,7 @@ export default function AdminPage() {
              snapshot duplicates top-of-page KPI info in a different shape. */}
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="rounded-2xl border p-4" style={panelStyle}>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-start justify-between mb-3 gap-2">
               <div>
                 <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
                   Announcements — full log
@@ -1035,15 +1193,38 @@ export default function AdminPage() {
                   {" "}{annList.filter(a => a.author_email !== "dev@academicats.com").length} user-posted
                 </p>
               </div>
-              <button
-                onClick={() => announcements.refresh()}
-                className="text-[10px] inline-flex items-center gap-1 transition-colors"
-                style={{ color: "var(--ats-fg-muted)" }}
-              >
-                <RefreshCw size={10} /> Refresh
-              </button>
+              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                {/* Bulk delete — user posts only. Keeps seeds so the
+                    ticker still has opening copy after the sweep. */}
+                <button
+                  onClick={deleteAllUserAnnouncements}
+                  disabled={annList.filter(a => a.author_email !== "dev@academicats.com").length === 0}
+                  title="Delete every user-posted announcement. Seeded dev@academicats.com messages are preserved."
+                  className="text-[10px] inline-flex items-center gap-1 rounded border px-1.5 py-0.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ color: "#f59e0b", borderColor: "rgba(245,158,11,0.4)" }}
+                >
+                  Clear user posts
+                </button>
+                {/* Nuke-all — full wipe including seeds. Double-confirmed. */}
+                <button
+                  onClick={nukeAllAnnouncements}
+                  disabled={annList.length === 0}
+                  title="Delete every announcement, including seeds. Full reset — double-confirmed."
+                  className="text-[10px] inline-flex items-center gap-1 rounded border px-1.5 py-0.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ color: "#ef4444", borderColor: "rgba(239,68,68,0.4)" }}
+                >
+                  Nuke all
+                </button>
+                <button
+                  onClick={() => announcements.refresh()}
+                  className="text-[10px] inline-flex items-center gap-1 transition-colors"
+                  style={{ color: "var(--ats-fg-muted)" }}
+                >
+                  <RefreshCw size={10} /> Refresh
+                </button>
+              </div>
             </div>
-            <AnnouncementLog rows={annList} />
+            <AnnouncementLog rows={annList} onDelete={deleteOneAnnouncement} />
           </div>
 
           <div className="rounded-2xl border p-4" style={panelStyle}>
@@ -1579,6 +1760,153 @@ function QuotaGiftInput({ label, value, onChange }: { label: string; value: numb
         style={{ backgroundColor: "var(--ats-bg-panel)", borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-primary)" }}
       />
     </label>
+  );
+}
+
+
+// ── Top users by cost ──────────────────────────────────────────────────────
+// Compact ranked list. Each row renders a rank pill, email, tier badge,
+// total cost in USD, total actions, and a small action-breakdown bar.
+// Click-through opens the existing UserDetailDrawer so ban/gift/tier
+// flows are one click away from the "this user is expensive" signal.
+
+function TopUsersPanel({ rows, onOpenDrawer }: { rows: TopUserRow[]; onOpenDrawer: (u: TopUserRow) => void }) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No usage yet in this window.
+      </div>
+    );
+  }
+  // Find the max total_cost so we can render a bar chart that's
+  // proportional to the top row. All subsequent rows normalise to it.
+  const maxCost = Math.max(0.0001, ...rows.map(r => r.total_cost));
+  return (
+    <div className="space-y-1 max-h-96 overflow-y-auto thin-scrollbar pr-1">
+      {rows.map((u, idx) => {
+        const barPct = Math.max(4, Math.round((u.total_cost / maxCost) * 100));
+        return (
+          <button
+            key={u.user_id}
+            onClick={() => onOpenDrawer(u)}
+            className="w-full text-left rounded-md border p-2 transition-colors hover:bg-[var(--ats-bg-accent-soft)]"
+            style={{ borderColor: "var(--ats-border-subtle)" }}
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <span className="shrink-0 inline-flex items-center justify-center h-5 w-5 rounded-full text-[10px] font-bold"
+                style={{
+                  backgroundColor: idx < 3 ? "rgba(239, 68, 68, 0.12)" : "var(--ats-bg-panel)",
+                  color:           idx < 3 ? "#ef4444" : "var(--ats-fg-muted)",
+                  border: "1px solid var(--ats-border-subtle)",
+                }}
+              >
+                {idx + 1}
+              </span>
+              <span className="flex-1 min-w-0 truncate text-[11px] font-semibold" title={u.email ?? ""} style={{ color: "var(--ats-fg-primary)" }}>
+                {u.email || <span className="italic" style={{ color: "var(--ats-fg-muted)" }}>(no email · {u.user_id.slice(0, 8)}…)</span>}
+              </span>
+              {u.tier && (
+                <span
+                  className="shrink-0 inline-flex text-[9px] font-bold px-1 py-0.5 rounded uppercase tracking-wide"
+                  style={{
+                    color: TIER_COLORS[u.tier] ?? "#64748b",
+                    backgroundColor: (TIER_COLORS[u.tier] ?? "#64748b") + "22",
+                    borderColor:     (TIER_COLORS[u.tier] ?? "#64748b") + "55",
+                    borderWidth: 1, borderStyle: "solid",
+                  }}
+                >
+                  {u.tier}
+                </span>
+              )}
+              {u.is_banned && (
+                <span className="shrink-0 text-[9px] font-bold" style={{ color: "#ef4444" }}>BANNED</span>
+              )}
+              <span className="shrink-0 text-[11px] font-bold tabular-nums" style={{ color: "#ef4444" }}>
+                ${u.total_cost.toFixed(3)}
+              </span>
+            </div>
+            {/* Bar + breakdown */}
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-1 rounded-full" style={{ backgroundColor: "var(--ats-border-subtle)" }}>
+                <div className="h-full rounded-full" style={{ width: `${barPct}%`, backgroundColor: "#ef4444" }} />
+              </div>
+              <span className="shrink-0 text-[10px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
+                {u.total_actions} actions
+              </span>
+            </div>
+            <p className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+              {u.quick_search_count}q · {u.deep_search_count}d · {u.synthesis_count}s · {u.deep_read_count}r
+            </p>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Top queries ────────────────────────────────────────────────────────────
+// Most-searched text strings. Each row shows the query verbatim,
+// occurrence count, unique-users count (engagement breadth), and a
+// compact by-entry-type breakdown (search/synthesis/deep_read).
+
+function TopQueriesPanel({ rows }: { rows: TopQueryRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
+        No queries in this window.
+      </div>
+    );
+  }
+  const maxCount = Math.max(1, ...rows.map(r => r.count));
+  return (
+    <div className="space-y-1 max-h-96 overflow-y-auto thin-scrollbar pr-1">
+      {rows.map((q, idx) => {
+        const barPct = Math.max(4, Math.round((q.count / maxCount) * 100));
+        // Compact breakdown: "5 search · 2 deep_read"
+        const breakdown = Object.entries(q.entry_types)
+          .sort(([, a], [, b]) => b - a)
+          .map(([t, n]) => `${n} ${t}`)
+          .join(" · ");
+        return (
+          <div
+            key={`${q.query}-${idx}`}
+            className="rounded-md border p-2"
+            style={{ borderColor: "var(--ats-border-subtle)" }}
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <span className="shrink-0 inline-flex items-center justify-center h-5 w-5 rounded-full text-[10px] font-bold"
+                style={{
+                  backgroundColor: idx < 3 ? "rgba(139, 92, 246, 0.12)" : "var(--ats-bg-panel)",
+                  color:           idx < 3 ? "#8b5cf6" : "var(--ats-fg-muted)",
+                  border: "1px solid var(--ats-border-subtle)",
+                }}
+              >
+                {idx + 1}
+              </span>
+              <span className="flex-1 min-w-0 truncate text-[11px] font-semibold" title={q.query} style={{ color: "var(--ats-fg-primary)" }}>
+                {q.query}
+              </span>
+              <span className="shrink-0 text-[11px] font-bold tabular-nums" style={{ color: "#8b5cf6" }}>
+                ×{q.count}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-1 rounded-full" style={{ backgroundColor: "var(--ats-border-subtle)" }}>
+                <div className="h-full rounded-full" style={{ width: `${barPct}%`, backgroundColor: "#8b5cf6" }} />
+              </div>
+              <span className="shrink-0 text-[10px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
+                {q.unique_users} user{q.unique_users !== 1 ? "s" : ""}
+              </span>
+            </div>
+            {breakdown && (
+              <p className="text-[10px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+                {breakdown}
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -2233,7 +2561,7 @@ function ActivityFeed({ rows }: { rows: ActivityEntry[] }) {
 
 // ── Announcement log ────────────────────────────────────────────────────────
 
-function AnnouncementLog({ rows }: { rows: AdminAnnouncement[] }) {
+function AnnouncementLog({ rows, onDelete }: { rows: AdminAnnouncement[]; onDelete?: (id: string) => void | Promise<void> }) {
   if (rows.length === 0) {
     return (
       <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
@@ -2248,7 +2576,7 @@ function AnnouncementLog({ rows }: { rows: AdminAnnouncement[] }) {
         return (
           <div
             key={a.id}
-            className="rounded-md border p-2"
+            className="group rounded-md border p-2 relative"
             style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}
           >
             <div className="flex items-center justify-between gap-2 mb-0.5">
@@ -2258,9 +2586,23 @@ function AnnouncementLog({ rows }: { rows: AdminAnnouncement[] }) {
               >
                 {isSeed ? "SEED" : (a.author_email || "NAMELESS CAT")}
               </span>
-              <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                {fmtDateTime(a.created_at)}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  {fmtDateTime(a.created_at)}
+                </span>
+                {/* Per-row delete. Hidden by default, revealed on hover
+                    so the log stays clean when you're just reading. */}
+                {onDelete && (
+                  <button
+                    onClick={() => onDelete(a.id)}
+                    title="Delete this single announcement"
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] rounded border px-1 leading-4"
+                    style={{ color: "#ef4444", borderColor: "rgba(239,68,68,0.35)" }}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
             </div>
             <p className="text-[11px] leading-relaxed break-words" style={{ color: "var(--ats-fg-secondary)" }}>
               {a.text}
