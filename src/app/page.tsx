@@ -4271,7 +4271,20 @@ ${html}
                   // in the useLayoutEffect above — pre-search we push toward the
                   // same clamp(1.25rem, 11cqw, 4.25rem) + bold the overlay uses;
                   // post-search we shrink back to a normal editing body size.
+                  // `caret-color` + experimental `caret-shape: block` make the
+                  // blinking caret more prominent — native caret width can't
+                  // be styled via CSS in any shipped browser, so we lean on
+                  // colour + the `block` caret shape (Chrome 134+) to match
+                  // the slogan's chunky 3-px fake cursor as closely as the
+                  // platform allows. Browsers that don't know `caret-shape`
+                  // fall back to the thin default, which is fine.
                   className="relative z-10 block w-full resize-none bg-transparent px-5 text-center leading-[1.2] text-slate-100 outline-none hairline-scrollbar transition-all duration-300 ease-out"
+                  style={{
+                    caretColor: "var(--ats-fg-primary)",
+                    // `caret-shape` is experimental CSS-UI-4; harmless for
+                    // browsers that ignore it.
+                    caretShape: "block",
+                  } as React.CSSProperties}
                 />
                 {/* Rotating greeting — shown only when textarea is empty AND not focused.
                     On click, focus fires → overlay hides → native caret takes over.
@@ -4291,7 +4304,12 @@ ${html}
                         gets the remainder — matching the spec "more on top, less below". */}
                     <span className="max-w-full">
                       {WORKSPACE_PLACEHOLDERS[placeholderIdx]}
-                      <span aria-hidden className="inline-block w-[2px] h-[0.9em] ml-1 bg-current align-[-2px]" />
+                      {/* Slogan fake cursor — slightly chunkier (3px) so it
+                          reads as the same visual weight as the native
+                          caret in the textarea now that `caret-shape:block`
+                          is in play for Chromium. Roughly matches the "|"
+                          thickness in the user's bold 11cqw text. */}
+                      <span aria-hidden className="inline-block w-[3px] h-[0.9em] ml-1 bg-current align-[-2px] rounded-[1px]" />
                     </span>
                   </div>
                 )}
@@ -4430,15 +4448,17 @@ ${html}
               const showFindingAngles    = isUnderstanding;
               if (!showThinking && !showMessage && !showDefault && !showChoiceBubbles && !showDirectionBubbles && !showFindingAngles) return null;
               return (
-                <div className="stage-reveal mt-3 flex flex-col items-center gap-2">
-                  {/* Sprite voice line */}
+                <div className="stage-reveal mt-3 flex flex-col items-center gap-2.5">
+                  {/* Sprite voice line. Bumped from text-xs (12 px) to text-sm
+                      (14 px) — the old size was too small to read at a glance.
+                      Sparkles icon + thinking dot scaled to match. */}
                   {showThinking && (
                     <p
-                      className="inline-flex items-center gap-2 text-xs italic animate-pulse"
+                      className="inline-flex items-center gap-2 text-sm italic animate-pulse"
                       style={{ color: "var(--ats-fg-muted)" }}
                     >
                       <span
-                        className="inline-block h-1.5 w-1.5 rounded-full"
+                        className="inline-block h-2 w-2 rounded-full"
                         style={{ backgroundColor: "var(--ats-fg-accent)" }}
                       />
                       thinking…
@@ -4446,11 +4466,11 @@ ${html}
                   )}
                   {showFindingAngles && !showMessage && (
                     <p
-                      className="inline-flex items-center gap-2 text-xs italic animate-pulse"
+                      className="inline-flex items-center gap-2 text-sm italic animate-pulse"
                       style={{ color: "var(--ats-fg-muted)" }}
                     >
                       <span
-                        className="inline-block h-1.5 w-1.5 rounded-full"
+                        className="inline-block h-2 w-2 rounded-full"
                         style={{ backgroundColor: "var(--ats-fg-accent)" }}
                       />
                       looking for angles…
@@ -4463,15 +4483,15 @@ ${html}
                     // like the sprite is "saying" a new line each time.
                     <p
                       key={assessmentMessage}
-                      className="stage-reveal inline-flex items-center gap-2 text-xs italic leading-snug"
+                      className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
                       style={{ color: "var(--ats-fg-secondary)" }}
                     >
-                      <Sparkles size={11} style={{ color: "var(--ats-fg-accent)" }} />
+                      <Sparkles size={14} style={{ color: "var(--ats-fg-accent)" }} />
                       <span>{assessmentMessage}</span>
                       {introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
                         <span
                           aria-hidden
-                          className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold not-italic tracking-wide"
+                          className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold not-italic tracking-wide"
                           style={{
                             borderColor:     "var(--ats-border-accent)",
                             backgroundColor: "var(--ats-bg-accent-soft)",
@@ -4485,13 +4505,13 @@ ${html}
                   )}
                   {showDefault && (
                     <p
-                      className="inline-flex items-center gap-2 text-xs leading-snug"
+                      className="inline-flex items-center gap-2 text-sm leading-snug"
                       style={{ color: "var(--ats-fg-muted)" }}
                     >
                       <span>Type any key words, topic or theme you want to explore</span>
                       <span
                         aria-hidden
-                        className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide animate-pulse"
+                        className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide animate-pulse"
                         style={{
                           borderColor:     "var(--ats-border-accent)",
                           backgroundColor: "var(--ats-bg-accent-soft)",
@@ -4503,34 +4523,37 @@ ${html}
                     </p>
                   )}
 
-                  {/* Choice bubbles — two conversational chips under the
-                      sprite's voice, shown when the query is brief or
-                      balanced and the user hasn't committed yet. */}
+                  {/* Choice bubbles — the wording is first-person from the
+                      USER's point of view (asking the sprite to do something)
+                      rather than the sprite volunteering. Kept plain-English:
+                      no "as-is" (ESL-unfriendly), no CTA jargon. Font
+                      bumped to text-xs and padding stretched a touch so the
+                      bubbles feel tappable. */}
                   {showChoiceBubbles && (
                     <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
                       <button
                         onClick={handleFindAnglesFromSprite}
-                        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition-all hover:brightness-105"
+                        className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
                         style={{
                           borderColor:     "var(--ats-border-accent)",
                           backgroundColor: "var(--ats-bg-accent-soft)",
                           color:           "var(--ats-fg-accent)",
                         }}
                       >
-                        <Search size={11} />
-                        <span>Let me find angles for this</span>
+                        <Search size={12} />
+                        <span>Find angles for me</span>
                       </button>
                       <button
                         onClick={handleSearchAsIsFromSprite}
-                        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition-all hover:brightness-105"
+                        className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
                         style={{
                           borderColor:     "var(--ats-border-subtle)",
                           backgroundColor: "var(--ats-bg-panel)",
                           color:           "var(--ats-fg-secondary)",
                         }}
                       >
-                        <ArrowRight size={11} />
-                        <span>Search as-is anyway</span>
+                        <ArrowRight size={12} />
+                        <span>Just search it</span>
                       </button>
                     </div>
                   )}
@@ -4538,7 +4561,9 @@ ${html}
                   {/* Direction chat bubbles — once handleUnderstand has
                       returned, the sprite serves up the angles as clickable
                       options. Picking one advances to the full action bar
-                      with the refined query already selected. */}
+                      with the refined query already selected. Matched font
+                      size with the choice bubbles (text-xs) so the two
+                      types of bubble feel like siblings. */}
                   {showDirectionBubbles && !showFindingAngles && (
                     <div className="stage-reveal flex flex-wrap items-center justify-center gap-1.5 max-w-2xl">
                       {directions.slice(0, 6).map((dir, di) => {
@@ -4548,14 +4573,14 @@ ${html}
                             key={di}
                             onClick={() => handleDirectionPickFromSprite(di)}
                             title={dir.description || dir.label}
-                            className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-medium transition-all hover:brightness-105 max-w-[18rem]"
+                            className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all hover:brightness-105 max-w-[18rem]"
                             style={{
                               borderColor:     isRecommended ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                               backgroundColor: isRecommended ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
                               color:           isRecommended ? "var(--ats-fg-accent)"    : "var(--ats-fg-primary)",
                             }}
                           >
-                            {isRecommended && <Star size={10} className="shrink-0" />}
+                            {isRecommended && <Star size={11} className="shrink-0" />}
                             <span className="truncate">{dir.label}</span>
                           </button>
                         );

@@ -156,28 +156,26 @@ body {
 }
 
 /* Fade-in + slide-up for SSE-streamed content */
+/* ── Unified reveal timing ────────────────────────────────────────────────
+   Every fade-in across the product now shares ONE duration + curve so the
+   UI's breathing rhythm feels consistent wherever you are. Picked 0.75 s
+   on a soft slightly-overshooting ease-out — long enough to read as
+   intentional motion, short enough to stay snappy (the user wanted
+   "lively, not too fast"). Both `.fade-in` and `.stage-reveal` are
+   aliases of the same keyframe + timing, so callers can pick whichever
+   name reads best in context. The larger `retrieved-papers-rise` below
+   still has its own longer duration because it travels from 60vh away —
+   matching its distance to this speed would feel sluggish.                */
 @keyframes fadeSlideIn {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.fade-in {
-  animation: fadeSlideIn 0.35s ease-out both;
-}
-
-/* Stage-reveal — used by elements that appear as the user progresses
-   through blank → explore → full in the landing workspace. 1.1 s duration
-   on a slow ease-out so new chrome glides in rather than popping; the
-   2-px lift is deliberately tiny so the longer duration reads as a
-   softness rather than sluggish movement. Opacity is the primary cue.
-   Both `prefers-reduced-motion` users see an instant transition. */
-@keyframes stageReveal {
-  from { opacity: 0; transform: translateY(2px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+.fade-in,
 .stage-reveal {
-  animation: stageReveal 1.1s cubic-bezier(0.25, 0.8, 0.3, 1) both;
+  animation: fadeSlideIn 0.75s cubic-bezier(0.22, 0.8, 0.28, 1) both;
 }
 @media (prefers-reduced-motion: reduce) {
+  .fade-in,
   .stage-reveal { animation: none; }
 }
 
