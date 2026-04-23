@@ -165,17 +165,17 @@ body {
 }
 
 /* Stage-reveal — used by elements that appear as the user progresses
-   through blank → explore → full in the landing workspace. Pure opacity
-   with a slight downward-lift (3px) + 0.55 s so new buttons / banner /
-   retrieved-papers section glide in softly rather than popping. Shorter
-   than `retrieved-papers-rise` so it stacks cleanly when both fire at
-   once. Both reduce motion users see an instant transition instead. */
+   through blank → explore → full in the landing workspace. 1.1 s duration
+   on a slow ease-out so new chrome glides in rather than popping; the
+   2-px lift is deliberately tiny so the longer duration reads as a
+   softness rather than sluggish movement. Opacity is the primary cue.
+   Both `prefers-reduced-motion` users see an instant transition. */
 @keyframes stageReveal {
-  from { opacity: 0; transform: translateY(3px); }
+  from { opacity: 0; transform: translateY(2px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 .stage-reveal {
-  animation: stageReveal 0.55s cubic-bezier(0.22, 0.9, 0.25, 1) both;
+  animation: stageReveal 1.1s cubic-bezier(0.25, 0.8, 0.3, 1) both;
 }
 @media (prefers-reduced-motion: reduce) {
   .stage-reveal { animation: none; }
