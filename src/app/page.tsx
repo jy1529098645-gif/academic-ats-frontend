@@ -50,7 +50,8 @@ import {
   Plus, Minus, ArrowRight, Lightbulb, ExternalLink, MessageCircle,
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   Link as LinkIcon, ShieldCheck,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical,
+  Megaphone,
 } from "lucide-react";
 
 // Transport / auth / error-copy helpers live in src/lib/api.ts. They used to
@@ -1317,6 +1318,12 @@ export default function HomePage() {
   // server-backed feed — every open tab now sees the same list.
   const announcementsFeed = useAnnouncements();
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
+  // Announcement banner is OFF by default now — a megaphone button next to
+  // the mascot toggles it. Users who never need the banner get a cleaner
+  // header; users who want it are one click away. Toggling the state
+  // mounts / unmounts the banner wrapper so our stage-reveal fade fires
+  // on every reveal rather than just the first one.
+  const [announcementsVisible, setAnnouncementsVisible] = useState(false);
   const [msgInput, setMsgInput] = useState("");
   // Two send modes, both post to the public ticker. SIGNED includes the
   // user's email local-part next to the message; ANONYMOUS hides the
@@ -2486,7 +2493,7 @@ export default function HomePage() {
     "Bottom Line": true, "What This Literature Actually Covers": true,
     "Strongest Signals": true, "Conceptual Framing": true,
     "Methodological Reading": true, "Where the Evidence Is Thin": true,
-    "Research Gaps": true, "What This Means for Your Query": true,
+    "Research Gaps": true, "What This Means for Your Question": true,
     "Best Next Directions": true, "Confidence & Scope Note": true,
     "Key Papers & Themes": true, "Methodological Profile": true,
     "Gaps & What's Missing": true, "Confidence Note": true,
@@ -3705,19 +3712,36 @@ ${html}
                 className="h-12 w-12 object-contain select-none pointer-events-none shrink-0"
                 draggable={false}
               />
+              {/* Megaphone toggle — sits to the RIGHT of the mascot. Click
+                  to fade the announcement banner in; click again to fade
+                  it back out. Active state tinted with the accent token
+                  so users know where the current toggle is. Replaces the
+                  old "always-on" banner + in-banner theme toggle layout. */}
+              <button
+                onClick={() => setAnnouncementsVisible(v => !v)}
+                title={announcementsVisible ? "Hide announcements" : "Show announcements"}
+                aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
+                aria-pressed={announcementsVisible}
+                className="shrink-0 flex h-9 w-9 items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
+                style={{
+                  borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                  backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                  color:           announcementsVisible ? "var(--ats-fg-accent)"     : "var(--ats-fg-muted)",
+                }}
+              >
+                <Megaphone size={16} />
+              </button>
             </div>
             {/* Tagline is sized so the whole line (descriptor + version)
                 fits within the wordmark + mascot row width above — no
                 overflow past the mascot's right edge. */}
             <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.7.0-Alpha</span></p>
           </div>
-          {/* Announcement banner – hidden during the "blank" landing stage
-              so new arrivals see only the logo + workspace. Reappears once
-              the user has moved past the initial decision point (pressing
-              Enter or clicking Explore Angles). Flex-1 / pl-4 still apply
-              so the top row layout stays unchanged in the full stage. */}
+          {/* Announcement banner — off by default; revealed only when the
+              user clicks the megaphone toggle above. `stage-reveal` gives
+              the reveal the same 0.75 s fade every other surface uses. */}
           <div className="relative min-w-0 flex-1 pl-4">
-            {introStage !== "blank" && (
+            {announcementsVisible && (
               <div className="stage-reveal">
               <AnnouncementBanner
                 collapsed={announcementCollapsed}
@@ -3756,7 +3780,7 @@ ${html}
           if (isQuotaNotice) {
             return (
               <div
-                className="mb-4 rounded-2xl border px-4 py-3 text-sm flex items-start gap-3 flex-wrap"
+                className="stage-reveal mb-4 rounded-2xl border px-4 py-3 text-sm flex items-start gap-3 flex-wrap"
                 style={{
                   borderColor:     "rgba(245, 158, 11, 0.35)",
                   backgroundColor: "rgba(245, 158, 11, 0.08)",
@@ -3778,7 +3802,7 @@ ${html}
             );
           }
           return (
-            <div className="mb-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 flex items-start gap-3 flex-wrap">
+            <div className="stage-reveal mb-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 flex items-start gap-3 flex-wrap">
               <span className="flex-1 min-w-0">{message}</span>
               <button
                 onClick={() => { setUiError(""); void handleSearch(); }}
@@ -4271,19 +4295,15 @@ ${html}
                   // in the useLayoutEffect above — pre-search we push toward the
                   // same clamp(1.25rem, 11cqw, 4.25rem) + bold the overlay uses;
                   // post-search we shrink back to a normal editing body size.
-                  // `caret-color` + experimental `caret-shape: block` make the
-                  // blinking caret more prominent — native caret width can't
-                  // be styled via CSS in any shipped browser, so we lean on
-                  // colour + the `block` caret shape (Chrome 134+) to match
-                  // the slogan's chunky 3-px fake cursor as closely as the
-                  // platform allows. Browsers that don't know `caret-shape`
-                  // fall back to the thin default, which is fine.
+                  // `caret-color` only — `caret-shape: block` turned out to
+                  // render an overly-chunky block in Chrome 134+. We want
+                  // the caret to MATCH the slogan's 3-px fake cursor in
+                  // feel, not dwarf it, so we accept the browser's native
+                  // thin bar and just colour it with the primary text
+                  // token so it stays crisply visible on every theme.
                   className="relative z-10 block w-full resize-none bg-transparent px-5 text-center leading-[1.2] text-slate-100 outline-none hairline-scrollbar transition-all duration-300 ease-out"
                   style={{
                     caretColor: "var(--ats-fg-primary)",
-                    // `caret-shape` is experimental CSS-UI-4; harmless for
-                    // browsers that ignore it.
-                    caretShape: "block",
                   } as React.CSSProperties}
                 />
                 {/* Rotating greeting — shown only when textarea is empty AND not focused.
@@ -4678,10 +4698,11 @@ ${html}
               );
             })()}
 
-            {/* Settings panel — controlled */}
+            {/* Settings panel — controlled. `stage-reveal` smooths the open
+                transition so the panel doesn't pop into place. */}
             {settingsOpen && (
             <div
-              className="mt-4 rounded-2xl bg-slate-950/40 px-4 py-3"
+              className="stage-reveal mt-4 rounded-2xl bg-slate-950/40 px-4 py-3"
             >
               <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-2" onClick={() => setSettingsOpen(false)}><SlidersHorizontal size={14} /><span>Settings & Controls</span><ChevronDown size={12} className="ml-auto rotate-180" /></div>
               <div className="mt-2 space-y-2.5">
@@ -4740,17 +4761,17 @@ ${html}
             </div>
             )}
 
-            {/* Query Understanding section — stays mounted as long as
-                directionData holds a result (only cleared by a fresh
-                Understand click, NOT by a Search run). During Search
-                we close the accordion (setUnderstandOpen(false) in the
-                submit handler) but keep the data so the user can open
-                it back up to review which direction they picked.
-                When collapsed we annotate the header with the direction
-                count + a small "preserved" dot so users see that the
-                data is still there, it's just tucked away. */}
-            {(isUnderstanding || Boolean(directionData?.directions?.length)) && (
-            <div className="mt-5 rounded-xl bg-[var(--ats-bg-card-muted)] px-3 py-2.5">
+            {/* Research Angles section — visible ONLY once directionData
+                actually holds results. Previously we mounted it as soon
+                as the Understand call started, which meant an empty
+                accordion flashed onto the page for a few seconds while
+                the request was in flight. Now the accordion only
+                appears when there are directions to show, fades in via
+                `stage-reveal`, and during the Understand request the
+                SPRITE's "looking for angles…" line covers the waiting
+                state instead. */}
+            {Boolean(directionData?.directions?.length) && (
+            <div className="stage-reveal mt-5 rounded-xl bg-[var(--ats-bg-card-muted)] px-3 py-2.5">
               <div
                 className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-1"
                 onClick={() => setUnderstandOpen(o => !o)}
