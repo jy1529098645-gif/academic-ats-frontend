@@ -3597,6 +3597,7 @@ ${html}
               so the top row layout stays unchanged in the full stage. */}
           <div className="relative min-w-0 flex-1 pl-4">
             {introStage !== "blank" && (
+              <div className="stage-reveal">
               <AnnouncementBanner
                 collapsed={announcementCollapsed}
                 onCollapse={() => setAnnouncementCollapsed(true)}
@@ -3612,6 +3613,7 @@ ${html}
                 themeMode={themeMode}
                 onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
               />
+              </div>
             )}
           </div>
         </div>
@@ -4175,7 +4177,7 @@ ${html}
                   Everything uses the same layout / classes so the row
                   visually grows as the stage unlocks. */}
               {introStage !== "blank" && (
-              <div className="flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden">
+              <div className="stage-reveal flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden">
                 <button
                   onClick={() => setSettingsOpen(o => !o)}
                   className="shrink min-w-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm font-semibold text-slate-200 hover:border-blue-500/40 transition-colors"
@@ -4207,8 +4209,10 @@ ${html}
 
                   {introStage === "full" && (
                     <>
-                      {/* Fast / Curated mode toggle */}
-                      <div className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
+                      {/* Fast / Curated mode toggle — wrapped in stage-reveal
+                          so the upgrade from "explore" to "full" isn't an
+                          abrupt pop of three new controls. */}
+                      <div className="stage-reveal inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
                         <button
                           type="button"
                           onClick={() => setFastMode(true)}
@@ -4231,7 +4235,7 @@ ${html}
                           onClick={handleStop}
                           title="Stop search"
                           aria-label="Stop search"
-                          className="flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                          className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
                         >
                           <Square size={13} fill="currentColor" />
                         </button>
@@ -4241,7 +4245,7 @@ ${html}
                           disabled={!query.trim()}
                           title="Start search"
                           aria-label="Start search"
-                          className="flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           <ArrowRight size={15} />
                         </button>
@@ -4257,9 +4261,10 @@ ${html}
                 Replaces the inline in-card hint. Sits BELOW the textarea,
                 centred, and includes a visual cue that Enter submits. Once
                 the user has chosen a direction (explore or full), this is
-                replaced by the usual mode description below. */}
+                replaced by the usual mode description below. `stage-reveal`
+                smooths the initial landing entrance. */}
             {introStage === "blank" && (
-              <div className="mt-3 flex justify-center">
+              <div className="stage-reveal mt-3 flex justify-center">
                 <p
                   className="inline-flex items-center gap-2 text-xs leading-snug"
                   style={{ color: "var(--ats-fg-muted)" }}
@@ -4283,7 +4288,7 @@ ${html}
             {/* Mode description — only relevant once the Quick / Curated
                 toggle is visible (full stage). */}
             {introStage === "full" && (
-              <div className="mt-2 flex justify-end pr-1">
+              <div className="stage-reveal mt-2 flex justify-end pr-1">
                 <p className="max-w-[22rem] text-center text-[11px] leading-snug text-slate-500">
                   {fastMode
                     ? "Seconds-fast results with smart ranking. Great for rapid literature scanning."
@@ -4292,15 +4297,12 @@ ${html}
               </div>
             )}
 
-            {/* Selected search query — shown below the card once a direction is chosen */}
-            {selectedSearchQuery && (
-              <div className="mt-3 rounded-xl border border-blue-500/30 bg-blue-500/8 px-3 py-1.5">
-                <div className="flex items-center gap-2">
-                  <span className="shrink-0 text-[10px] font-bold uppercase tracking-widest text-blue-400">Query</span>
-                  <span className="flex-1 min-w-0 text-xs font-semibold text-slate-100 break-words leading-snug">{selectedSearchQuery}</span>
-                </div>
-              </div>
-            )}
+            {/* The "QUERY: <selectedSearchQuery>" echo pill was removed —
+                it duplicated the text already visible in the workspace
+                textarea above and cluttered the landing view. The refined
+                query is still applied internally when a direction is
+                selected from Explore Angles; it just isn't rendered as a
+                separate chip. */}
 
             {/* Inline query analysis — small lighter text while a deep search is running */}
             {plannerThinking && isSubmitting && !result && (

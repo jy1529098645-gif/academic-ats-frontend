@@ -164,6 +164,23 @@ body {
   animation: fadeSlideIn 0.35s ease-out both;
 }
 
+/* Stage-reveal — used by elements that appear as the user progresses
+   through blank → explore → full in the landing workspace. Pure opacity
+   with a slight downward-lift (3px) + 0.55 s so new buttons / banner /
+   retrieved-papers section glide in softly rather than popping. Shorter
+   than `retrieved-papers-rise` so it stacks cleanly when both fire at
+   once. Both reduce motion users see an instant transition instead. */
+@keyframes stageReveal {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.stage-reveal {
+  animation: stageReveal 0.55s cubic-bezier(0.22, 0.9, 0.25, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-reveal { animation: none; }
+}
+
 /* Custom <details> marker reset — when a <details> is tagged with
    `.ats-details-reset`, suppress the default disclosure triangle so the
    component can render its own chevron indicator.                        */
