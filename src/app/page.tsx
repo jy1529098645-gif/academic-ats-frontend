@@ -227,6 +227,28 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+/**
+ * Read the current `zoom` factor on <html>. The responsive zoom media
+ * queries in globals.css set `html { zoom: 0.XX }` below 2200 px so the
+ * whole page shrinks proportionally on smaller screens.
+ *
+ * `window.innerHeight` / `innerWidth` return PHYSICAL viewport pixels (they
+ * ignore zoom), but `getBoundingClientRect()` and `event.clientX/Y` return
+ * values in the ZOOMED (logical) coordinate system. Mixing the two breaks
+ * scroll / drag math at smaller viewports. Use `getVisualVH()` / `getVisualVW()`
+ * whenever the math has to interop with rect or client coords under zoom.
+ */
+function getDocumentZoom(): number {
+  if (typeof document === "undefined") return 1;
+  const raw = getComputedStyle(document.documentElement).zoom;
+  const n = parseFloat(raw || "1");
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+function getVisualVH(): number {
+  if (typeof window === "undefined") return 0;
+  return window.innerHeight / getDocumentZoom();
+}
+
 function formatDuration(seconds: number) {
   const total = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(total / 3600);
@@ -941,11 +963,19 @@ export default function HomePage() {
   // doesn't briefly slow down its entry transitions.
   const _themeMountedRef = useRef(false);
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    // Mirror the active theme + tone onto <html> so the theme CSS vars
+    // resolve at the root level too. Needed for globals.css to paint the
+    // `html` element with `var(--ats-bg-base)` — otherwise `zoom` <100 %
+    // leaves an uncovered canvas strip rendering as browser-default white.
+    // Kept in sync every theme change so a day→night switch also updates
+    // the canvas colour seamlessly.
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.setAttribute("data-tone", themeMode);
     if (!_themeMountedRef.current) {
       _themeMountedRef.current = true;
       return;
     }
-    if (typeof document === "undefined") return;
     document.documentElement.classList.add("theme-transitioning");
     // +60 ms buffer past the configured duration so the class is still
     // present when the final frame paints.
@@ -954,7 +984,7 @@ export default function HomePage() {
       document.documentElement.classList.remove("theme-transitioning");
     }, hold);
     return () => window.clearTimeout(t);
-  }, [themeMode, dayThemeId, nightThemeId, themeTransitionMs]);
+  }, [theme, themeMode, dayThemeId, nightThemeId, themeTransitionMs]);
 
   // Per-panel translucency (0.4–1.0). Applied to the three main panel backgrounds
   // via `rgb(from <token> r g b / <alpha>)` — lets the page gradient bleed through
@@ -1099,10 +1129,16 @@ export default function HomePage() {
   // advances the stage once the verdict arrives.
   const pendingEnterRef      = useRef<boolean>(false);
 
+  // Track the latest verdict via a ref so the short-circuit check below
+  // can read the freshest value without re-creating `runAssessment` on
+  // every verdict change (which would also re-register the debounce
+  // useEffect that depends on `runAssessment`).
+  const assessmentVerdictRef = useRef<AssessVerdict | null>(null);
+  useEffect(() => { assessmentVerdictRef.current = assessmentVerdict; }, [assessmentVerdict]);
   const runAssessment = useCallback(async (text: string): Promise<void> => {
     // Skip redundant calls — if the text hasn't actually changed since the
     // last completed assessment, reuse the existing verdict / message.
-    if (text === lastAssessedTextRef.current && assessmentVerdict) return;
+    if (text === lastAssessedTextRef.current && assessmentVerdictRef.current) return;
     // Abort any in-flight assessment — a newer edit should override.
     assessAbortRef.current?.abort();
     const ac = new AbortController();
@@ -1149,7 +1185,12 @@ export default function HomePage() {
     } finally {
       setAssessing(false);
     }
-  }, [assessmentVerdict]);
+    // No deps — state we need is read via refs (`assessmentVerdictRef`,
+    // `lastAssessedTextRef`, `pendingEnterRef`) so this callback is stable
+    // across renders. A stable callback keeps the debounce useEffect from
+    // re-registering on every verdict change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Sprite-driven Explore Angles flow ─────────────────────────────────────
   // The sprite-choice flag is declared here; the three handler functions +
@@ -1237,6 +1278,9 @@ export default function HomePage() {
   function handleSearchAsIsFromSprite() {
     setSpriteChoiceMade(true);
     setAssessmentMessage("got it, going broad (◡‿◡)");
+    // Wipe any pending instant-reaction rotation so the advanced stage
+    // doesn't momentarily flash a stale "mm ok ok" under the new voice.
+    setInstantReaction("");
     setIntroStage("full");
     setCommittedQuery(query.trim());
     // Recommend Quick Search for a broad query — user explicitly
@@ -1275,7 +1319,7 @@ export default function HomePage() {
     "mm, something fresh?",
     "going somewhere new? (｡•́ᴗ•̀｡)",
     "whole new angle?",
-    "changed your mind? ✨",
+    "changed your mind? (˙ᵕ˙)",
     "different topic brewing?",
     "oh, pivoting?",
     "new thread starting?",
@@ -1305,7 +1349,11 @@ export default function HomePage() {
     setSpriteChoiceMade(false);
     setAssessmentMessage("");
     setAssessmentVerdict(null);
+    setInstantReaction("");
     lastAssessedTextRef.current = "";
+    // Drop any queued Enter from a previous in-flight assessment — user
+    // explicitly chose to restart, so the old Enter intent is stale.
+    pendingEnterRef.current = false;
   }
 
   function handleKeepCurrentFromSprite() {
@@ -1354,10 +1402,13 @@ export default function HomePage() {
     setSelectedDirIndex(di);
     setSelectedSubIndex(null);
     setCustomQueryEnabled(false);
+    // Clear any lingering instant reaction so it doesn't swap in between
+    // "nice pick" and the mode recommendation a moment later.
+    setInstantReaction("");
     setIntroStage("full");
     setCommittedQuery(query.trim());
     const dir = directionData?.directions?.[di];
-    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()} ✨`);
+    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()} (◕‿◕)`);
     // Sprite follows up with a mode + paper-count recommendation. Small
     // delay lets the "nice pick" line breathe for ~0.7 s before the
     // recommendation replaces it; feels like two sentences in a
@@ -1476,7 +1527,10 @@ export default function HomePage() {
       // Expanded greeting box — compute height, then derive a padding
       // that pushes the caret + typed text into the vertical centre.
       const top = ta.getBoundingClientRect().top;
-      const target = Math.max(window.innerHeight * (2 / 3) - top, 180);
+      // `top` comes from getBoundingClientRect which lives in ZOOMED
+      // layout coords; `window.innerHeight` is physical px. Normalise via
+      // getVisualVH() so the math stays correct under `zoom: <1`.
+      const target = Math.max(getVisualVH() * (2 / 3) - top, 180);
       ta.style.height = `${target}px`;
       // 38% top padding visually centres a 1-3 line question. Minimum
       // 28px so a short viewport (rare) never collapses it entirely.
@@ -7267,7 +7321,9 @@ ${html}
               const onMove = (ev: MouseEvent) => {
                 if (!historyDragRef.current) return;
                 const delta = historyDragRef.current.startY - ev.clientY;
-                const next = Math.max(120, Math.min(window.innerHeight * 0.85, historyDragRef.current.startH + delta));
+                // `ev.clientY` is in zoomed coords; normalise innerHeight to
+                // the same space so the 85 % cap matches what the user sees.
+                const next = Math.max(120, Math.min(getVisualVH() * 0.85, historyDragRef.current.startH + delta));
                 setHistoryPanelHeight(next);
               };
               const onUp = () => {

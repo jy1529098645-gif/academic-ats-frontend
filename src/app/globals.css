@@ -21,10 +21,25 @@
 @media (max-width: 2200px) { html { zoom: 0.92; } }
 @media (max-width: 1920px) { html { zoom: 0.82; } }
 @media (max-width: 1680px) { html { zoom: 0.74; } }
+@media (max-width: 1560px) { html { zoom: 0.70; } }
 @media (max-width: 1440px) { html { zoom: 0.66; } }
 @media (max-width: 1280px) { html { zoom: 0.60; } }
 @media (max-width: 1024px) { html { zoom: 0.52; } }
 @media (max-width: 820px)  { html { zoom: 0.45; } }
+
+/* ── Zoom canvas fill ───────────────────────────────────────────────────────
+   When `zoom` shrinks the <html> element to <100 %, the rendered canvas
+   can leave a strip of uncovered area at the bottom (or right) that shows
+   through as the browser's default white. To keep the viewport fully
+   painted, mirror `data-theme` + `data-tone` onto <html> (handled in
+   page.tsx's theme effect) so the theme vars resolve at the root level,
+   then paint BOTH <html> and <body> with the theme's base colour. Even
+   if zoom math leaves an uncovered strip, it'll be the SAME mint (or
+   prism) the app already uses — seamless. Fallback colour = Morning
+   Mint day base so a first-paint before hydration still looks on-theme. */
+html, body {
+  background-color: var(--ats-bg-base, #E4F1EA);
+}
 
 :root {
   --background: #ffffff;
@@ -39,7 +54,17 @@
 }
 
 body {
-  background: var(--background);
+  /* Paint body with the theme's base colour rather than the old hardcoded
+     --background white. Reason: when `html { zoom: <1 }` shrinks the
+     rendered content, the visual area NOT covered by <main> (which uses
+     `h-screen` = 100vh) would otherwise show body's default white,
+     producing a visible white strip. Matching body to the theme's base
+     mint (or prism-night) colour makes the uncovered strip blend in.
+     `data-theme` is mirrored onto <html> in page.tsx's theme effect so
+     `--ats-bg-base` resolves here; the #E4F1EA fallback covers the brief
+     first-paint before hydration. Text colour stays on the old
+     --foreground token so globals base typography is unchanged.         */
+  background-color: var(--ats-bg-base, #E4F1EA);
   color: var(--foreground);
   /* Font stack ordered: Geist (branded Latin) → platform UI fonts → CJK
      fallbacks → emoji fallbacks. Without the CJK + emoji fonts, browsers on
