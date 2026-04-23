@@ -2,6 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Responsive viewport scaling ──────────────────────────────────────────
+   The product was designed on a 27" 2K monitor (2560×1440). Without any
+   accommodation, the same design on MacBook 14" (1512 logical), MacBook
+   Air (1440), laptops (1366), and tablets (1024-1194) starts clipping
+   buttons + truncating text. Instead of responsive breakpoints rewriting
+   the layout at each size, we simply zoom out the ENTIRE document at
+   smaller viewports — the result is visually identical proportionally,
+   just smaller. Tailwind classes, hardcoded px, cqw — everything
+   scales together.
+
+   `zoom` is now widely supported (Chrome/Edge/Safari for years; Firefox
+   since 117 / Aug 2023). Breakpoints chosen to match common real
+   devices, with the zoom factor roughly = (viewport-width / 2400) so
+   a 1920 screen shows ~1920 / 0.8 = 2400 CSS px of content ≈ most of
+   the original layout, and a 1440 shows ~1440 / 0.6 = 2400 CSS px
+   roughly matching the 27" experience but smaller.                       */
+@media (max-width: 2200px) { html { zoom: 0.92; } }
+@media (max-width: 1920px) { html { zoom: 0.82; } }
+@media (max-width: 1680px) { html { zoom: 0.74; } }
+@media (max-width: 1440px) { html { zoom: 0.66; } }
+@media (max-width: 1280px) { html { zoom: 0.60; } }
+@media (max-width: 1024px) { html { zoom: 0.52; } }
+@media (max-width: 820px)  { html { zoom: 0.45; } }
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

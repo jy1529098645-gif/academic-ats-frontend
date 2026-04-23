@@ -4841,7 +4841,13 @@ ${html}
                         aria-hidden
                       />
                       <span>{currentMessage}</span>
-                      {introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
+                      {/* Enter badge only shows alongside a FRESH AI verdict
+                          — during the instant-reaction layer the sprite
+                          hasn't judged yet, and the user's Enter at that
+                          point would just queue up for the real verdict
+                          anyway. Show it only when there's a real
+                          actionable decision on screen. */}
+                      {freshMessage && introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
                         <span
                           aria-hidden
                           className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold not-italic tracking-wide"
