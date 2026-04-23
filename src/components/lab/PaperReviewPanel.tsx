@@ -26,6 +26,36 @@ import {
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider-name scrub
+// Strip specific LLM model / vendor names from any string that reaches the
+// UI. Users shouldn't have to know which model is behind which phase — and
+// even a careful backend can leak names accidentally (an error surfaced from
+// the provider SDK, a docstring echoed into a log, a new agent someone adds
+// later). Centralising the sanitiser here means every status line, every
+// error, every streamed chunk goes through the same filter.
+//
+// Replacements aim for meaning preservation: "Claude specialist" becomes
+// "specialist", "GPT-4o rebuttal" becomes "rebuttal". A catch-all collapse
+// of double spaces keeps sentences tidy after a removal.
+// ─────────────────────────────────────────────────────────────────────────────
+function scrubProviderNames(s: string): string {
+  if (!s) return s;
+  return s
+    // "Claude Sonnet 4.6" / "Claude Sonnet" / "Claude-sonnet-4-6" / "Claude"
+    .replace(/\bclaude(?:[\s-](?:sonnet|opus|haiku))?(?:[\s-][\d.]+)?\b/gi, "")
+    // "GPT-4o" / "gpt-5.4-mini" / "GPT-4" / "gpt-3.5-turbo"
+    .replace(/\bgpt[\s-]?[\d.]+[a-z0-9-]*\b/gi, "")
+    // Reasoning model family "o1" / "o3-mini" / "o4-preview"
+    .replace(/\bo[134](?:-(?:mini|preview))?\b/gi, "")
+    // Vendor names
+    .replace(/\b(openai|anthropic)\b/gi, "")
+    // Collapse the empty gap left behind + trim.
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 type Severity = "low" | "medium" | "high";
 
 type SpecialistIssue = {
@@ -287,10 +317,16 @@ export function PaperReviewPanel() {
           try {
             const obj = JSON.parse(payload) as Record<string, string>;
             if (obj.chunk) setResult(prev => prev + obj.chunk);
-            if (obj.error) setError(obj.error);
+            if (obj.error) setError(scrubProviderNames(obj.error));
             if (obj.status) {
-              setStatus(obj.status);
-              const m = obj.status.match(/^\[([^\]]+)\]\s*(.*)/);
+              // Belt-and-braces scrub: even if a backend status line, an LLM
+              // error, or a future code change leaks a specific model or
+              // provider name, the frontend strips it before the user sees
+              // it. Users shouldn't have to track which LLM is behind which
+              // phase.
+              const cleanStatus = scrubProviderNames(obj.status);
+              setStatus(cleanStatus);
+              const m = cleanStatus.match(/^\[([^\]]+)\]\s*(.*)/);
               if (m) {
                 const name = m[1];
                 const msg  = m[2];
