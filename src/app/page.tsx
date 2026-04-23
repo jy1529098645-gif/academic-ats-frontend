@@ -4022,7 +4022,7 @@ ${html}
             {/* Tagline is sized so the whole line (descriptor + version)
                 fits within the wordmark + mascot row width above — no
                 overflow past the mascot's right edge. */}
-            <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.7.0-Alpha</span></p>
+            <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">{APP_VERSION}</span></p>
           </div>
           {/* Announcement banner — ALWAYS mounted so its height is
               always part of the top-bar flex row, preventing any pixel

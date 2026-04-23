@@ -20,7 +20,7 @@ export const TOS_VERSION = "1.0";
 // Product version — shown in the TOS header + Section 1 so users know
 // exactly which build of the product they're agreeing to. Bump alongside
 // TOS_VERSION when the product ships a materially different build.
-export const APP_VERSION = "v1.7.0-Alpha";
+export const APP_VERSION = "v1.7.1-Alpha";
 
 export type TosSection = {
   title: string;
