@@ -1029,28 +1029,32 @@ export default function HomePage() {
   //             Explore Angles returns directions.
   const [introStage, setIntroStage] = useState<"blank" | "explore" | "full">("blank");
 
-  // AI-driven triage state. `/api/workspace/assess-input` returns a verdict
-  // (brief / balanced / detailed) plus a short humanised message rendered in
-  // the action-bar middle space so the user sees WHY we're steering them
-  // toward one path or the other. While the call is in flight `assessing`
-  // is true and the message slot shows a "Let me read that…" placeholder
-  // so the wait feels like the AI is thinking, not the app hanging.
+  // AI-driven triage state. A debounced effect below runs the AI as the user
+  // types — the sprite "watches" the textarea and whispers short reactions.
+  // Pressing Enter then uses the current verdict to decide which action bar
+  // to reveal (explore vs full). Separating assessment from stage-transition
+  // lets the sprite react freely while the user stays in control of when to
+  // progress.
   type AssessVerdict = "brief" | "balanced" | "detailed";
   const [assessing,         setAssessing]         = useState(false);
   const [assessmentMessage, setAssessmentMessage] = useState<string>("");
   const [assessmentVerdict, setAssessmentVerdict] = useState<AssessVerdict | null>(null);
-  const assessAbortRef = useRef<AbortController | null>(null);
+  const assessAbortRef       = useRef<AbortController | null>(null);
+  const lastAssessedTextRef  = useRef<string>("");
+  // Flag: if the user presses Enter while an assessment is still in flight
+  // (or before the debounce fires), we mark this and the success handler
+  // advances the stage once the verdict arrives.
+  const pendingEnterRef      = useRef<boolean>(false);
 
   const runAssessment = useCallback(async (text: string): Promise<void> => {
-    // Abort any in-flight assessment — if the user presses Enter twice
-    // quickly, the second press should override the first rather than
-    // race with it.
+    // Skip redundant calls — if the text hasn't actually changed since the
+    // last completed assessment, reuse the existing verdict / message.
+    if (text === lastAssessedTextRef.current && assessmentVerdict) return;
+    // Abort any in-flight assessment — a newer edit should override.
     assessAbortRef.current?.abort();
     const ac = new AbortController();
     assessAbortRef.current = ac;
     setAssessing(true);
-    setAssessmentMessage("");
-    setAssessmentVerdict(null);
     try {
       const res = await fetchWithApiFallback("/api/workspace/assess-input", {
         method:  "POST",
@@ -1060,26 +1064,53 @@ export default function HomePage() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { verdict: AssessVerdict; message: string };
+      lastAssessedTextRef.current = text;
       setAssessmentVerdict(data.verdict);
       setAssessmentMessage(data.message || "");
-      // Brief → only Explore Angles. Balanced + Detailed → full action bar
-      // (Explore Angles is still clickable in full too, in case the user
-      // wants to refine even on a rich question).
-      setIntroStage(data.verdict === "brief" ? "explore" : "full");
+      // If user pressed Enter while we were waiting, advance stage now.
+      if (pendingEnterRef.current) {
+        pendingEnterRef.current = false;
+        setIntroStage(data.verdict === "brief" ? "explore" : "full");
+      }
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
-      // Network failure — fall back to a length heuristic so the user
-      // isn't stuck on the landing indefinitely. Mild message too.
+      // Network failure — heuristic fallback so the sprite isn't silent.
       const trimmed = text.trim();
       const words   = trimmed.split(/\s+/).filter(Boolean);
       const deep    = trimmed.length >= 30 && words.length >= 6;
+      lastAssessedTextRef.current = text;
       setAssessmentVerdict(deep ? "detailed" : "brief");
-      setAssessmentMessage(deep ? "Looks specific — ready when you are." : "Pretty short — I'll help find more angles.");
-      setIntroStage(deep ? "full" : "explore");
+      setAssessmentMessage(deep ? "looks specific" : "pretty short");
+      if (pendingEnterRef.current) {
+        pendingEnterRef.current = false;
+        setIntroStage(deep ? "full" : "explore");
+      }
     } finally {
       setAssessing(false);
     }
-  }, []);
+  }, [assessmentVerdict]);
+
+  // Debounced real-time assessment. Every substantive change to `query` kicks
+  // off a fresh AI call after 900 ms of typing quiet. Too-short / empty text
+  // clears the message so the sprite goes silent rather than jumping on an
+  // empty box. 900 ms is the sweet spot between "feels reactive" and "doesn't
+  // fire 10 times while the user finishes their sentence".
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length < 3) {
+      // Too short — blank the sprite out.
+      setAssessmentMessage("");
+      setAssessmentVerdict(null);
+      lastAssessedTextRef.current = "";
+      return;
+    }
+    // Only run the sprite while the user is still on the landing or the
+    // explore step — once in "full" with a running search, the sprite's
+    // opinion isn't what they need anymore.
+    if (introStage === "full" && hasRunSearch) return;
+    const handle = window.setTimeout(() => { void runAssessment(trimmed); }, 900);
+    return () => window.clearTimeout(handle);
+  }, [query, introStage, hasRunSearch, runAssessment]);
 
   // Adaptive placeholder font size is handled via CSS container-query units
   // (`cqh` / `cqw`) on the wrapper below — no JS observer needed. The wrapper
@@ -1166,11 +1197,14 @@ export default function HomePage() {
     const ta = taRef.current;
     if (!ta) return;
     if (hasRunSearch || isSubmitting) {
-      // Compact box — normal editing mode, no centering dance.
+      // Compact box — normal editing mode, no centering dance. Font
+      // weight drops back to normal + regular size so editing a long
+      // query doesn't feel shouty.
       ta.style.height       = "4.5rem";
       ta.style.paddingTop   = "1.25rem";
       ta.style.paddingBottom = "1.25rem";
       ta.style.fontSize     = "1.125rem";
+      ta.style.fontWeight   = "400";
     } else {
       // Expanded greeting box — compute height, then derive a padding
       // that pushes the caret + typed text into the vertical centre.
@@ -1181,11 +1215,16 @@ export default function HomePage() {
       // 28px so a short viewport (rare) never collapses it entirely.
       ta.style.paddingTop    = `${Math.max(28, Math.round(target * 0.38))}px`;
       ta.style.paddingBottom = "28px";
-      // Font scales with height: 240px height → 1.125rem floor,
-      // every extra 240px adds ~1rem, capped at 3rem so we don't
-      // overwhelm the card at very tall viewports.
-      const fontRem = Math.min(3, Math.max(1.5, target / 220));
-      ta.style.fontSize = `${fontRem.toFixed(2)}rem`;
+      // Font sizing MIRRORS the placeholder overlay exactly — same
+      // clamp formula, same font-weight, same line-height — so the
+      // moment the user starts typing, the text slots into the same
+      // visual rhythm as the slogan was occupying. No typographic
+      // jump between the decorative state and the editing state.
+      // `11cqw` means "11 % of the container's inline size", so font
+      // scales smoothly with panel width. The wrapper has
+      // `containerType: inline-size` set above, which powers cqw.
+      ta.style.fontSize   = "clamp(1.25rem, 11cqw, 4.25rem)";
+      ta.style.fontWeight = "700";
     }
   }, [hasRunSearch, isSubmitting]);
   const [retrievalCount, setRetrievalCount] = useState<number | null>(null);
@@ -4133,23 +4172,28 @@ ${html}
                     // that withholds the trailing onChange.
                     setQuery((e.target as HTMLTextAreaElement).value);
                   }}
-                  // Enter progresses through the intro stages. On first
-                  // submit from `blank`, we kick off an AI triage call that
-                  // decides whether the input is rich enough to search
-                  // directly or should go through Explore Angles first. The
-                  // verdict picks the stage; the message renders in the
-                  // action bar's middle slot. Subsequent Enter presses in
-                  // "full" stage trigger the normal handleSearch.
-                  //
-                  // Shift+Enter still inserts a newline; IME composition
-                  // Enter is ignored so CJK candidate confirms don't submit.
+                  // Enter progresses through the intro stages. In `blank`,
+                  // Enter consumes the AI's current verdict (the debounced
+                  // real-time assessment has usually already populated it).
+                  // If the verdict hasn't arrived yet the flag ref queues up
+                  // an advance for when it lands. Shift+Enter still inserts
+                  // a newline; IME composition Enter is ignored so CJK
+                  // candidate confirmations don't submit.
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
                       e.preventDefault();
                       const trimmed = query.trim();
                       if (!trimmed || isSubmitting) return;
                       if (introStage === "blank") {
-                        void runAssessment(trimmed);
+                        if (assessmentVerdict) {
+                          setIntroStage(assessmentVerdict === "brief" ? "explore" : "full");
+                        } else {
+                          // No verdict yet — trigger an assessment immediately
+                          // (skipping the 900ms debounce wait) and mark the
+                          // Enter intent so the result handler auto-advances.
+                          pendingEnterRef.current = true;
+                          void runAssessment(trimmed);
+                        }
                         return;
                       }
                       // "explore" leaves Enter a no-op for search (user clicks
@@ -4175,11 +4219,13 @@ ${html}
                   // carries `bg-[var(--ats-bg-input)]` for the filled look.
                   // resize-none: no user drag handle; long content scrolls via the
                   // hair-thin scrollbar (thinner than the panel's own scrollbar).
-                  // Font-size + top/bottom padding are written imperatively in the
-                  // useLayoutEffect above so the text sits in the vertical centre
-                  // while the box is large and collapses to a normal editing mode
-                  // once a search has run. `transition-all` smooths both axes.
-                  className="relative z-10 block w-full resize-none bg-transparent px-5 text-center leading-tight text-slate-100 outline-none hairline-scrollbar transition-all duration-300 ease-out"
+                  // `leading-[1.2]` matches the placeholder overlay's line-height
+                  // exactly, so typed text sits on the same baseline rhythm as
+                  // the slogan. fontSize + fontWeight are written imperatively
+                  // in the useLayoutEffect above — pre-search we push toward the
+                  // same clamp(1.25rem, 11cqw, 4.25rem) + bold the overlay uses;
+                  // post-search we shrink back to a normal editing body size.
+                  className="relative z-10 block w-full resize-none bg-transparent px-5 text-center leading-[1.2] text-slate-100 outline-none hairline-scrollbar transition-all duration-300 ease-out"
                 />
                 {/* Rotating greeting — shown only when textarea is empty AND not focused.
                     On click, focus fires → overlay hides → native caret takes over.
@@ -4225,41 +4271,10 @@ ${html}
                   <ChevronDown size={12} className={`shrink-0 ${settingsOpen ? "rotate-180 transition-transform duration-200" : "transition-transform duration-200"}`} />
                 </button>
 
-                {/* AI assessment message — sits in the middle of the action
-                    bar, between Search Controls (left) and the action
-                    buttons (right). While the nano model is deliberating
-                    we show a humanised "let me read that…" placeholder so
-                    the wait reads as thinking rather than latency. Once
-                    the verdict lands, the short message explaining WHY we
-                    picked this action set appears and stays until the
-                    user presses Enter again with a different query.
-                    `flex-1 min-w-0` absorbs the gap and naturally replaces
-                    the earlier `ml-auto` push on the right group. */}
-                {(assessing || assessmentMessage) && (
-                  <div className="flex-1 min-w-0 flex items-center justify-center px-3 text-center">
-                    {assessing ? (
-                      <span
-                        className="inline-flex items-center gap-1.5 text-[11px] italic animate-pulse"
-                        style={{ color: "var(--ats-fg-muted)" }}
-                      >
-                        <span
-                          className="inline-block h-1.5 w-1.5 rounded-full"
-                          style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                        />
-                        Let me read that…
-                      </span>
-                    ) : (
-                      <span
-                        className="stage-reveal inline-flex items-center gap-1.5 text-[11px] italic leading-snug truncate"
-                        style={{ color: "var(--ats-fg-secondary)" }}
-                        title={assessmentMessage}
-                      >
-                        <Sparkles size={10} style={{ color: "var(--ats-fg-accent)" }} />
-                        <span className="truncate">{assessmentMessage}</span>
-                      </span>
-                    )}
-                  </div>
-                )}
+                {/* AI sprite lives BELOW the textarea card now (see the
+                    "Sprite commentary" block after the workspace card).
+                    That single location works in every stage, so we keep
+                    the action bar free of duplicate commentary. */}
 
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
                   <button
@@ -4327,33 +4342,89 @@ ${html}
               )}
             </div>
 
-            {/* ── Centered intro hint for the "blank" landing stage ─────────
-                Replaces the inline in-card hint. Sits BELOW the textarea,
-                centred, and includes a visual cue that Enter submits. Once
-                the user has chosen a direction (explore or full), this is
-                replaced by the usual mode description below. `stage-reveal`
-                smooths the initial landing entrance. */}
-            {introStage === "blank" && (
-              <div className="stage-reveal mt-3 flex justify-center">
-                <p
-                  className="inline-flex items-center gap-2 text-xs leading-snug"
-                  style={{ color: "var(--ats-fg-muted)" }}
-                >
-                  <span>Type any key words, topic or theme you want to explore</span>
-                  <span
-                    aria-hidden
-                    className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide animate-pulse"
-                    style={{
-                      borderColor:     "var(--ats-border-accent)",
-                      backgroundColor: "var(--ats-bg-accent-soft)",
-                      color:           "var(--ats-fg-accent)",
-                    }}
-                  >
-                    Press <kbd className="font-mono">⏎ Enter</kbd>
-                  </span>
-                </p>
-              </div>
-            )}
+            {/* ── Sprite commentary — lives below the textarea card at every
+                stage so the user always has one consistent spot to glance at.
+                Priority order of what gets displayed:
+                  1. Thinking pulse — while the AI is deliberating on a fresh
+                     edit. Reads as "the sprite is reading what you wrote".
+                  2. AI message — whatever short reaction the last assessment
+                     produced. Lives as long as the user hasn't started typing
+                     something new.
+                  3. Default hint — when the textarea is empty. Invites the
+                     user in and shows the Enter key cue. Hidden once they've
+                     typed anything, so the sprite's voice takes over.
+                The Enter badge is only shown with the default hint AND at
+                blank stage, since Enter-to-advance is only meaningful then.
+                The whole row uses `stage-reveal` on first mount so it fades
+                in with the rest of the landing rather than popping. */}
+            {(() => {
+              const showThinking = assessing && !assessmentMessage;
+              const showMessage  = !!assessmentMessage;
+              const showDefault  = !showThinking && !showMessage && query.trim().length === 0;
+              if (!showThinking && !showMessage && !showDefault) return null;
+              return (
+                <div className="stage-reveal mt-3 flex justify-center">
+                  {showThinking && (
+                    <p
+                      className="inline-flex items-center gap-2 text-xs italic animate-pulse"
+                      style={{ color: "var(--ats-fg-muted)" }}
+                    >
+                      <span
+                        className="inline-block h-1.5 w-1.5 rounded-full"
+                        style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                      />
+                      thinking…
+                    </p>
+                  )}
+                  {showMessage && (
+                    // key on the message text so a fresh message re-fires
+                    // the stage-reveal fade — otherwise the sprite's new
+                    // words would silently swap in. Fun side-effect: looks
+                    // like the sprite is "saying" a new line each time.
+                    <p
+                      key={assessmentMessage}
+                      className="stage-reveal inline-flex items-center gap-2 text-xs italic leading-snug"
+                      style={{ color: "var(--ats-fg-secondary)" }}
+                    >
+                      <Sparkles size={11} style={{ color: "var(--ats-fg-accent)" }} />
+                      <span>{assessmentMessage}</span>
+                      {introStage === "blank" && (
+                        <span
+                          aria-hidden
+                          className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold not-italic tracking-wide"
+                          style={{
+                            borderColor:     "var(--ats-border-accent)",
+                            backgroundColor: "var(--ats-bg-accent-soft)",
+                            color:           "var(--ats-fg-accent)",
+                          }}
+                        >
+                          Press <kbd className="font-mono">⏎ Enter</kbd>
+                        </span>
+                      )}
+                    </p>
+                  )}
+                  {showDefault && (
+                    <p
+                      className="inline-flex items-center gap-2 text-xs leading-snug"
+                      style={{ color: "var(--ats-fg-muted)" }}
+                    >
+                      <span>Type any key words, topic or theme you want to explore</span>
+                      <span
+                        aria-hidden
+                        className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide animate-pulse"
+                        style={{
+                          borderColor:     "var(--ats-border-accent)",
+                          backgroundColor: "var(--ats-bg-accent-soft)",
+                          color:           "var(--ats-fg-accent)",
+                        }}
+                      >
+                        Press <kbd className="font-mono">⏎ Enter</kbd>
+                      </span>
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Mode description — only relevant once the Quick / Curated
                 toggle is visible (full stage). */}
