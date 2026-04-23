@@ -117,12 +117,45 @@ const SEVERITY_STYLES: Record<Severity, { fg: string; bg: string; border: string
   high:   { fg: "#ef4444",              bg: "rgba(239,68,68,0.10)",      border: "rgba(239,68,68,0.40)",      label: "high" },
 };
 
-const VERDICT_STYLES: Record<string, { fg: string; bg: string; border: string }> = {
-  "Accept":          { fg: "#10b981", bg: "rgba(16,185,129,0.10)", border: "rgba(16,185,129,0.40)" },
-  "Minor Revision":  { fg: "var(--ats-fg-accent)", bg: "var(--ats-bg-accent-soft)", border: "var(--ats-border-accent)" },
-  "Major Revision":  { fg: "#d97706", bg: "rgba(217,119,6,0.10)",  border: "rgba(217,119,6,0.40)" },
-  "Reject":          { fg: "#ef4444", bg: "rgba(239,68,68,0.10)",  border: "rgba(239,68,68,0.40)" },
-};
+// Verdict colour is SCORE-DRIVEN, not verdict-string-driven. The backend
+// still emits "Accept" / "Minor Revision" / "Major Revision" / "Reject" as
+// verdict labels, but a user-facing insight the label alone doesn't give
+// is HOW BAD inside a band. Score breakpoints at 4 / 6 / 8 map to four
+// traffic-light tiers:
+//
+//   score <  4        → red      (serious rework needed)
+//   4 ≤ score <  6    → orange   (material revision required)
+//   6 ≤ score <  8    → blue     (a few targeted fixes)
+//   score ≥ 8         → green    (strong, minor polish)
+//
+// Hexes are chosen in the 500-600 luminance band so they keep ≥ AA contrast
+// against BOTH the day themes' near-white backgrounds and the night themes'
+// deep navy. This mirrors how we handle notification badges — theme-
+// invariant semantic colours sitting on top of theme-tinted surfaces. The
+// 10% / 40% alpha tiers for bg / border follow the same pattern used by
+// every other status chip in the product.
+
+type ScoreStyle = { fg: string; bg: string; border: string };
+
+function scoreStyle(score: number): ScoreStyle {
+  if (!Number.isFinite(score)) {
+    return { fg: "var(--ats-fg-muted)", bg: "var(--ats-bg-panel)", border: "var(--ats-border-subtle)" };
+  }
+  if (score < 4) {
+    // red-600 — serious, can't ship
+    return { fg: "#dc2626", bg: "rgba(220,38,38,0.10)", border: "rgba(220,38,38,0.40)" };
+  }
+  if (score < 6) {
+    // orange-600 — material rework
+    return { fg: "#ea580c", bg: "rgba(234,88,12,0.10)", border: "rgba(234,88,12,0.40)" };
+  }
+  if (score < 8) {
+    // blue-600 — targeted fixes
+    return { fg: "#2563eb", bg: "rgba(37,99,235,0.10)", border: "rgba(37,99,235,0.40)" };
+  }
+  // green-600 — strong
+  return { fg: "#16a34a", bg: "rgba(22,163,74,0.10)", border: "rgba(22,163,74,0.40)" };
+}
 
 // Shared input classes — match the Synthesis Lab form fields so the two
 // modules feel like siblings (same corners, padding, border, focus ring).
@@ -692,7 +725,11 @@ export function PaperReviewPanel() {
 
 // ── Scorecard visual block ────────────────────────────────────────────────────
 function ScorecardBlock({ scorecard }: { scorecard: Scorecard }) {
-  const vs = VERDICT_STYLES[scorecard.verdict] ?? VERDICT_STYLES["Major Revision"];
+  // Verdict tint is derived from the OVERALL SCORE (see scoreStyle above),
+  // not from the verdict string — so a "Major Revision" at 5.8 reads
+  // orange while a "Major Revision" at 4.2 reads red. The verdict label
+  // itself stays unchanged; colour is the second information channel.
+  const vs = scoreStyle(scorecard.overall_score);
   const dims = Object.entries(scorecard.dimensions);
   return (
     <div
@@ -707,7 +744,7 @@ function ScorecardBlock({ scorecard }: { scorecard: Scorecard }) {
         <span className="text-sm font-bold" style={{ color: vs.fg }}>{scorecard.verdict}</span>
         <span className="ml-auto inline-flex items-center gap-1 text-xs" style={{ color: "var(--ats-fg-muted)" }}>
           <Gauge size={11} />
-          <span className="font-bold" style={{ color: "var(--ats-fg-primary)" }}>{scorecard.overall_score.toFixed(1)}</span>
+          <span className="font-bold" style={{ color: vs.fg }}>{scorecard.overall_score.toFixed(1)}</span>
           <span>/10</span>
         </span>
       </div>
@@ -716,7 +753,10 @@ function ScorecardBlock({ scorecard }: { scorecard: Scorecard }) {
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
         {dims.map(([key, d]) => {
-          const sev = SEVERITY_STYLES[d.severity] ?? SEVERITY_STYLES.medium;
+          // Each dimension also gets a score-derived tint — same bands as
+          // the overall, so the user can scan four dimension cards and
+          // immediately see which ones are pulling the average down.
+          const ds = scoreStyle(d.score);
           const pct = Math.max(0, Math.min(100, d.score * 10));
           return (
             <div
@@ -729,16 +769,10 @@ function ScorecardBlock({ scorecard }: { scorecard: Scorecard }) {
             >
               <div className="flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
                 <span className="truncate flex-1">{d.name}</span>
-                <span
-                  className="shrink-0 inline-flex items-center rounded border px-1 text-[9px] uppercase tracking-wider"
-                  style={{ borderColor: sev.border, backgroundColor: sev.bg, color: sev.fg }}
-                >
-                  {sev.label}
-                </span>
-                <span className="shrink-0 text-xs font-bold tabular-nums" style={{ color: "var(--ats-fg-primary)" }}>{d.score}</span>
+                <span className="shrink-0 text-xs font-bold tabular-nums" style={{ color: ds.fg }}>{d.score}</span>
               </div>
               <div className="mt-1 h-1 w-full rounded-full overflow-hidden" style={{ backgroundColor: "var(--ats-border-subtle)" }}>
-                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: "var(--ats-fg-accent)" }} />
+                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: ds.fg }} />
               </div>
             </div>
           );
