@@ -1485,6 +1485,23 @@ export default function AdminPage() {
           )}
         </section>
 
+        {/* ── Runtime client config — knobs the frontend fetches on load.
+             Today: workspace question-length cap. Dev sets it here, every
+             connected client picks up the new value on its next GET
+             /api/config/client (fires on page mount). */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <ClientConfigEditor />
+        </section>
+
+        {/* ── Broadcast to all users — fan out ONE popup to every profile.
+             Active users see it within ~20s (next poll); offline users see
+             it on their next sign-in. Prefer this over the ticker-banner
+             for release notes / breaking-change announcements that every
+             user needs to acknowledge. */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <BroadcastComposer />
+        </section>
+
         {/* ── Feedback inbox — full width so long messages are readable ── */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
           <div className="flex items-center justify-between mb-3">
@@ -4197,6 +4214,294 @@ function ErrorLogPanel({ rows }: { rows: AdminError[] }) {
 //   ""   → resets to code default (PATCH with limit_value=null deletes the override)
 //   "0+" → explicit numeric cap
 //   "-1" → reserved magic value meaning "unlimited" (stored as NULL override)
+// ── ClientConfigEditor ───────────────────────────────────────────────────────
+// Tiny panel for the runtime client-config knobs surfaced at
+// /api/config/client + PATCH /api/admin/config/client. Currently the only
+// knob is `workspace_char_limit` — a firm ceiling on the Workspace textarea
+// length. Lower values protect the retrieval pipeline from prompt dilution;
+// higher values let power users paste longer drafts.
+//
+// Self-fetches on mount and after every save so the panel always reflects
+// what a new client session would receive. No tier-scoping today — this is
+// a single global value.
+function ClientConfigEditor() {
+  const [limit, setLimit] = useState<number | "">("");
+  const [saved, setSaved] = useState(0);          // increments on save → resets the value label flash
+  const [busy,  setBusy]  = useState(false);
+  const [err,   setErr]   = useState("");
+
+  const load = useCallback(async () => {
+    setErr("");
+    try {
+      const res = await fetch(buildApiUrl("/api/config/client"));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { workspace_char_limit?: number };
+      if (typeof data.workspace_char_limit === "number") setLimit(data.workspace_char_limit);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  const save = useCallback(async () => {
+    if (typeof limit !== "number" || !Number.isFinite(limit)) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/config/client"), {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ workspace_char_limit: Math.round(limit) }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const data = await res.json() as { workspace_char_limit?: number };
+      if (typeof data.workspace_char_limit === "number") setLimit(data.workspace_char_limit);
+      setSaved(s => s + 1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [limit]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>Client config</h3>
+          <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+            Runtime knobs every frontend fetches on page load.
+          </p>
+        </div>
+        {saved > 0 && (
+          <span key={saved} className="text-[10px] text-emerald-500 font-semibold animate-pulse">Saved ✓</span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <label className="text-xs font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+          Workspace question length limit
+        </label>
+        <input
+          type="number"
+          min={100}
+          max={10000}
+          step={100}
+          value={limit}
+          onChange={e => {
+            const v = e.target.value;
+            setLimit(v === "" ? "" : Number(v));
+          }}
+          className="w-28 rounded border px-2 py-1 text-xs"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+        <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>characters (100–10,000)</span>
+        <button
+          onClick={() => void save()}
+          disabled={busy || typeof limit !== "number"}
+          className="rounded border px-2 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
+          style={{
+            borderColor:     "var(--ats-border-accent)",
+            backgroundColor: "var(--ats-bg-accent-soft)",
+            color:           "var(--ats-fg-accent)",
+          }}
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+        {err && <span className="text-[10px] text-rose-500">{err}</span>}
+      </div>
+      <p className="mt-1.5 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+        Lowering this protects the retrieval pipeline from prompt dilution when users paste long drafts.
+        Already-open sessions pick up the new cap on their next reload.
+      </p>
+    </div>
+  );
+}
+
+
+// ── BroadcastComposer ────────────────────────────────────────────────────────
+// Admin control for fanning ONE popup notification out to every user at once.
+// Uses POST /api/admin/notifications/broadcast which writes one
+// user_notifications row per profile — active users see the modal within
+// ~20s via polling, offline users see it on their next sign-in.
+//
+// Safety-conscious: there's a visible "N users will receive this" preview,
+// plus a confirm step, so no one broadcasts by accident. "Sent N / N"
+// feedback stays visible for 6 s then resets.
+function BroadcastComposer() {
+  const [title, setTitle] = useState("");
+  const [body,  setBody]  = useState("");
+  const [emoji, setEmoji] = useState("📣");
+  const [kind,  setKind]  = useState<"system" | "general">("system");
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ sent: number; failed: number; total: number } | null>(null);
+  const [err,    setErr]    = useState("");
+
+  const canSend = (title.trim().length > 0 || body.trim().length > 0) && !busy;
+
+  const send = async () => {
+    setBusy(true);
+    setErr("");
+    setResult(null);
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/notifications/broadcast"), {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          title: title.trim(),
+          body:  body.trim(),
+          emoji: emoji.trim(),
+          kind,
+        }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await res.json() as { sent: number; failed: number; total: number };
+      setResult(data);
+      // Clear compose fields so it's obvious the send happened — easy to
+      // accidentally broadcast the same message twice if the form is left filled.
+      setTitle("");
+      setBody("");
+      setConfirming(false);
+      window.setTimeout(() => setResult(null), 6000);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>Broadcast to all users</h3>
+          <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+            Sends a popup to every account. Online users see it within ~20s; offline users on next sign-in.
+          </p>
+        </div>
+        {result && (
+          <span className="text-[11px] font-semibold text-emerald-500">
+            Sent {result.sent}/{result.total}{result.failed ? ` (${result.failed} failed)` : ""}
+          </span>
+        )}
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={emoji}
+            onChange={e => setEmoji(e.target.value.slice(0, 4))}
+            placeholder="📣"
+            maxLength={4}
+            className="w-14 rounded border px-2 py-1 text-sm text-center"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-panel)",
+              color:           "var(--ats-fg-primary)",
+            }}
+          />
+          <input
+            type="text"
+            value={title}
+            onChange={e => setTitle(e.target.value.slice(0, 120))}
+            placeholder="Title — e.g. We just shipped Paper Review!"
+            maxLength={120}
+            className="flex-1 rounded border px-2 py-1 text-sm"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-panel)",
+              color:           "var(--ats-fg-primary)",
+            }}
+          />
+          <select
+            value={kind}
+            onChange={e => setKind(e.target.value as "system" | "general")}
+            className="rounded border px-2 py-1 text-xs"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-panel)",
+              color:           "var(--ats-fg-primary)",
+            }}
+          >
+            <option value="system">system</option>
+            <option value="general">general</option>
+          </select>
+        </div>
+        <textarea
+          value={body}
+          onChange={e => setBody(e.target.value.slice(0, 1200))}
+          placeholder="Body — the announcement itself. Users see this as a modal they must click through."
+          rows={3}
+          className="w-full resize-y rounded border px-2 py-1 text-sm"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+            {body.length}/1200 chars · {title.length}/120 title
+          </span>
+          {!confirming ? (
+            <button
+              onClick={() => setConfirming(true)}
+              disabled={!canSend}
+              className="ml-auto rounded border px-3 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
+              style={{
+                borderColor:     "var(--ats-border-accent)",
+                backgroundColor: "var(--ats-bg-accent-soft)",
+                color:           "var(--ats-fg-accent)",
+              }}
+            >
+              Broadcast…
+            </button>
+          ) : (
+            <div className="ml-auto inline-flex items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-amber-500">Send to everyone?</span>
+              <button
+                onClick={() => setConfirming(false)}
+                disabled={busy}
+                className="rounded border px-2 py-1 text-xs font-semibold"
+                style={{
+                  borderColor: "var(--ats-border-subtle)",
+                  color:       "var(--ats-fg-muted)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void send()}
+                disabled={busy}
+                className="rounded border px-3 py-1 text-xs font-semibold"
+                style={{
+                  borderColor:     "rgba(239, 68, 68, 0.5)",
+                  backgroundColor: "rgba(239, 68, 68, 0.12)",
+                  color:           "#ef4444",
+                }}
+              >
+                {busy ? "Sending…" : "Yes, send to everyone"}
+              </button>
+            </div>
+          )}
+        </div>
+        {err && <div className="text-[11px] text-rose-500">{err}</div>}
+      </div>
+    </div>
+  );
+}
+
+
 // Empty input box is shown as the placeholder "∞" — matches the display
 // convention: no cap = unlimited.
 

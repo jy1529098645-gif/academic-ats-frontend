@@ -17,7 +17,17 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Font stack ordered: Geist (branded Latin) → platform UI fonts → CJK
+     fallbacks → emoji fallbacks. Without the CJK + emoji fonts, browsers on
+     Windows (Chinese locale) render emoji and Greek letters as tofu boxes
+     (□□) which users report as "乱码". Adding the explicit fallbacks keeps
+     every character legible across platforms without having to bundle
+     heavy web fonts. */
+  font-family:
+    var(--font-geist-sans),
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif,
+    "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC",
+    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", "Twemoji Mozilla";
 }
 
 /* Hide native scrollbar while keeping scroll functionality */
