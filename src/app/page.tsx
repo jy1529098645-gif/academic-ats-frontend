@@ -1090,6 +1090,13 @@ export default function HomePage() {
     }
   }, [assessmentVerdict]);
 
+  // ── Sprite-driven Explore Angles flow ─────────────────────────────────────
+  // The sprite-choice flag is declared here; the three handler functions +
+  // the choice-reset effect are defined later in the component (just after
+  // `directionData` / `selectedDirIndex` are declared) so their bodies can
+  // close over those states without tripping a TDZ on first render.
+  const [spriteChoiceMade, setSpriteChoiceMade] = useState(false);
+
   // Debounced real-time assessment. Every substantive change to `query` kicks
   // off a fresh AI call after 900 ms of typing quiet. Too-short / empty text
   // clears the message so the sprite goes silent rather than jumping on an
@@ -1126,6 +1133,45 @@ export default function HomePage() {
   const [understandOpen, setUnderstandOpen] = useState(true);
   const [selectedDirIndex, setSelectedDirIndex] = useState<number | null>(null);
   const [selectedSubIndex, setSelectedSubIndex] = useState<number | null>(null);
+
+  // ── Sprite handler functions (see the `spriteChoiceMade` declaration above
+  // for the conceptual overview). Kept here, AFTER `directionData` etc., so
+  // React 19 + Turbopack doesn't TDZ-reject the closure when the component
+  // first mounts. Plain functions (not useCallback) so each render closes
+  // over the latest `handleUnderstand` + the fresh `directionData` snapshot.
+  function handleFindAnglesFromSprite() {
+    setSpriteChoiceMade(true);
+    setAssessmentMessage("looking for angles…");
+    // handleUnderstand (defined much further down) fetches directions, sets
+    // directionData, and advances introStage to "full" on success — which
+    // makes the direction chat bubbles appear here.
+    void handleUnderstand();
+  }
+
+  function handleSearchAsIsFromSprite() {
+    setSpriteChoiceMade(true);
+    setAssessmentMessage("got it — going broad");
+    setIntroStage("full");
+  }
+
+  // Clicking a direction bubble from the sprite area. Selecting the direction
+  // drives `selectedSearchQuery` via the existing useMemo (see line ~2358),
+  // and we advance to "full" so the search buttons show up.
+  function handleDirectionPickFromSprite(di: number) {
+    setSelectedDirIndex(di);
+    setSelectedSubIndex(null);
+    setCustomQueryEnabled(false);
+    setIntroStage("full");
+    const dir = directionData?.directions?.[di];
+    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()}`);
+  }
+
+  // Reset sprite-choice state whenever the user starts editing their query
+  // again — they're having a new conversation with the sprite, so the old
+  // "going broad" confirmation shouldn't linger.
+  useEffect(() => {
+    if (introStage === "blank") setSpriteChoiceMade(false);
+  }, [query, introStage]);
 
   const [fastMode, setFastMode] = useState(true);
   const [paperCount, setPaperCount] = useState(10);
@@ -4277,20 +4323,22 @@ ${html}
                     the action bar free of duplicate commentary. */}
 
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
-                  <button
-                    onClick={() => {
-                      if (isUnderstanding) { cancelUnderstand(); return; }
-                      void handleUnderstand();
-                      setUnderstandOpen(true);
-                    }}
-                    disabled={!query.trim()}
-                    title={isUnderstanding ? "Click to cancel" : "Break your question into research angles before searching"}
-                    className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-semibold transition-colors disabled:opacity-60 ${isUnderstanding ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-slate-700 bg-slate-900/50 text-slate-200 hover:border-blue-500/40"}`}
-                  >
-                    {isUnderstanding
-                      ? <><Square size={12} fill="currentColor" className="shrink-0" /><span className="truncate">Cancel</span></>
-                      : <><Search size={14} className="shrink-0" /><span className="truncate">Explore Angles</span><ChevronRight size={12} className="shrink-0 hidden sm:inline-block" /></>}
-                  </button>
+                  {/* Explore Angles was previously a standalone button here.
+                      It's now absorbed into the sprite conversation — the
+                      sprite offers it as a bubble choice whenever it judges
+                      the input too brief. We keep a small Cancel affordance
+                      while a sprite-triggered angle search is in flight so
+                      the user can back out. */}
+                  {isUnderstanding && (
+                    <button
+                      onClick={() => cancelUnderstand()}
+                      title="Cancel angle search"
+                      className="flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-semibold transition-colors border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                    >
+                      <Square size={12} fill="currentColor" className="shrink-0" />
+                      <span className="truncate">Cancel angles</span>
+                    </button>
+                  )}
 
                   {introStage === "full" && (
                     <>
@@ -4358,12 +4406,32 @@ ${html}
                 The whole row uses `stage-reveal` on first mount so it fades
                 in with the rest of the landing rather than popping. */}
             {(() => {
-              const showThinking = assessing && !assessmentMessage;
-              const showMessage  = !!assessmentMessage;
-              const showDefault  = !showThinking && !showMessage && query.trim().length === 0;
-              if (!showThinking && !showMessage && !showDefault) return null;
+              const showThinking    = assessing && !assessmentMessage;
+              const showMessage     = !!assessmentMessage;
+              const showDefault     = !showThinking && !showMessage && query.trim().length === 0;
+              const needsAngles     = (assessmentVerdict === "brief" || assessmentVerdict === "balanced");
+              // Show the two conversational bubbles only on the landing
+              // (blank stage), after the sprite has spoken, when the user
+              // hasn't already chosen a path, AND while directions haven't
+              // arrived yet (if they have, the direction bubbles take over
+              // the same slot).
+              const showChoiceBubbles =
+                introStage === "blank" &&
+                needsAngles &&
+                showMessage &&
+                !spriteChoiceMade &&
+                !isUnderstanding &&
+                !directionData;
+              // Direction bubbles: once Explore Angles has returned directions,
+              // surface them as clickable chat bubbles right under the sprite's
+              // voice so picking one feels like answering the sprite.
+              const directions = directionData?.directions || [];
+              const showDirectionBubbles = directions.length > 0 && introStage !== "full";
+              const showFindingAngles    = isUnderstanding;
+              if (!showThinking && !showMessage && !showDefault && !showChoiceBubbles && !showDirectionBubbles && !showFindingAngles) return null;
               return (
-                <div className="stage-reveal mt-3 flex justify-center">
+                <div className="stage-reveal mt-3 flex flex-col items-center gap-2">
+                  {/* Sprite voice line */}
                   {showThinking && (
                     <p
                       className="inline-flex items-center gap-2 text-xs italic animate-pulse"
@@ -4376,7 +4444,19 @@ ${html}
                       thinking…
                     </p>
                   )}
-                  {showMessage && (
+                  {showFindingAngles && !showMessage && (
+                    <p
+                      className="inline-flex items-center gap-2 text-xs italic animate-pulse"
+                      style={{ color: "var(--ats-fg-muted)" }}
+                    >
+                      <span
+                        className="inline-block h-1.5 w-1.5 rounded-full"
+                        style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                      />
+                      looking for angles…
+                    </p>
+                  )}
+                  {showMessage && !showFindingAngles && (
                     // key on the message text so a fresh message re-fires
                     // the stage-reveal fade — otherwise the sprite's new
                     // words would silently swap in. Fun side-effect: looks
@@ -4388,7 +4468,7 @@ ${html}
                     >
                       <Sparkles size={11} style={{ color: "var(--ats-fg-accent)" }} />
                       <span>{assessmentMessage}</span>
-                      {introStage === "blank" && (
+                      {introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
                         <span
                           aria-hidden
                           className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold not-italic tracking-wide"
@@ -4421,6 +4501,66 @@ ${html}
                         Press <kbd className="font-mono">⏎ Enter</kbd>
                       </span>
                     </p>
+                  )}
+
+                  {/* Choice bubbles — two conversational chips under the
+                      sprite's voice, shown when the query is brief or
+                      balanced and the user hasn't committed yet. */}
+                  {showChoiceBubbles && (
+                    <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
+                      <button
+                        onClick={handleFindAnglesFromSprite}
+                        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition-all hover:brightness-105"
+                        style={{
+                          borderColor:     "var(--ats-border-accent)",
+                          backgroundColor: "var(--ats-bg-accent-soft)",
+                          color:           "var(--ats-fg-accent)",
+                        }}
+                      >
+                        <Search size={11} />
+                        <span>Let me find angles for this</span>
+                      </button>
+                      <button
+                        onClick={handleSearchAsIsFromSprite}
+                        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition-all hover:brightness-105"
+                        style={{
+                          borderColor:     "var(--ats-border-subtle)",
+                          backgroundColor: "var(--ats-bg-panel)",
+                          color:           "var(--ats-fg-secondary)",
+                        }}
+                      >
+                        <ArrowRight size={11} />
+                        <span>Search as-is anyway</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Direction chat bubbles — once handleUnderstand has
+                      returned, the sprite serves up the angles as clickable
+                      options. Picking one advances to the full action bar
+                      with the refined query already selected. */}
+                  {showDirectionBubbles && !showFindingAngles && (
+                    <div className="stage-reveal flex flex-wrap items-center justify-center gap-1.5 max-w-2xl">
+                      {directions.slice(0, 6).map((dir, di) => {
+                        const isRecommended = di === (directionData?.recommended_direction ?? -1);
+                        return (
+                          <button
+                            key={di}
+                            onClick={() => handleDirectionPickFromSprite(di)}
+                            title={dir.description || dir.label}
+                            className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-medium transition-all hover:brightness-105 max-w-[18rem]"
+                            style={{
+                              borderColor:     isRecommended ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                              backgroundColor: isRecommended ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                              color:           isRecommended ? "var(--ats-fg-accent)"    : "var(--ats-fg-primary)",
+                            }}
+                          >
+                            {isRecommended && <Star size={10} className="shrink-0" />}
+                            <span className="truncate">{dir.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
               );
