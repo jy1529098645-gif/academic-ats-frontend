@@ -1029,6 +1029,11 @@ export default function HomePage() {
   //             Angles; either route can be taken. Also the state after
   //             Explore Angles returns directions.
   const [introStage, setIntroStage] = useState<"blank" | "explore" | "full">("blank");
+  // `committedQuery` snapshots the textarea value at the moment the user
+  // advanced past blank. Used downstream to detect "user is typing something
+  // totally new now" and prompt a confirm before collapsing everything back
+  // to the blank stage.
+  const [committedQuery, setCommittedQuery] = useState<string>("");
 
   // AI-driven triage state. A debounced effect below runs the AI as the user
   // types — the sprite "watches" the textarea and whispers short reactions.
@@ -1072,6 +1077,14 @@ export default function HomePage() {
       if (pendingEnterRef.current) {
         pendingEnterRef.current = false;
         setIntroStage(data.verdict === "brief" ? "explore" : "full");
+        setCommittedQuery(text);
+        // Detailed / balanced Enter-advance → follow up with a mode +
+        // paper-count recommendation so the sprite can guide the search
+        // settings. "brief" skips this since the user still needs to
+        // pick an angle first.
+        if (data.verdict !== "brief") {
+          setTimeout(() => { void requestModeRecommendation(text, ""); }, 350);
+        }
       }
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
@@ -1151,8 +1164,54 @@ export default function HomePage() {
 
   function handleSearchAsIsFromSprite() {
     setSpriteChoiceMade(true);
-    setAssessmentMessage("got it — going broad");
+    setAssessmentMessage("got it, going broad (◡‿◡)");
     setIntroStage("full");
+    setCommittedQuery(query.trim());
+    // Recommend Quick Search for a broad query — user explicitly
+    // opted out of refining. Still ask the AI in case the query is
+    // broad-but-specific enough that curated makes sense.
+    setTimeout(() => { void requestModeRecommendation(query.trim(), ""); }, 350);
+  }
+
+  // Word-overlap heuristic for "is this a fresh question or just a tweak".
+  // Fires only when ≥ 50 % of the committed query's meaningful words have
+  // disappeared. A typo fix ("mental helath" → "mental health") keeps
+  // everything so no prompt; a total rewrite ("mental health" → "crypto
+  // markets") trips it.
+  function looksLikeNewContent(committed: string, current: string): boolean {
+    if (!committed) return false;
+    const tok = (s: string) =>
+      new Set(s.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+    const a = tok(committed);
+    const b = tok(current);
+    if (a.size === 0) return false;
+    let overlap = 0;
+    for (const w of a) if (b.has(w)) overlap++;
+    return overlap / a.size < 0.5;
+  }
+
+  function handleResetToBlankFromSprite() {
+    // User confirmed they're searching something new — collapse back to
+    // the blank landing stage. Keeps the textarea contents so they don't
+    // lose what they just typed, but wipes every derivative bit of state
+    // that referred to the previous question.
+    setIntroStage("blank");
+    setCommittedQuery("");
+    setDirectionData(null);
+    setSelectedDirIndex(null);
+    setSelectedSubIndex(null);
+    setCustomQueryEnabled(false);
+    setSpriteChoiceMade(false);
+    setAssessmentMessage("");
+    setAssessmentVerdict(null);
+    lastAssessedTextRef.current = "";
+  }
+
+  function handleKeepCurrentFromSprite() {
+    // User confirmed they're still working on the same question. Lock in
+    // the CURRENT textarea value as the committed one so the confirm
+    // doesn't keep firing on further edits.
+    setCommittedQuery(query.trim());
   }
 
   // Clicking a direction bubble from the sprite area. Selecting the direction
@@ -1163,8 +1222,36 @@ export default function HomePage() {
     setSelectedSubIndex(null);
     setCustomQueryEnabled(false);
     setIntroStage("full");
+    setCommittedQuery(query.trim());
     const dir = directionData?.directions?.[di];
-    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()}`);
+    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()} ✨`);
+    // Sprite follows up with a mode + paper-count recommendation. Small
+    // delay lets the "nice pick" line breathe for ~0.7 s before the
+    // recommendation replaces it; feels like two sentences in a
+    // conversation rather than one swap.
+    setTimeout(() => { void requestModeRecommendation(query.trim(), dir?.label || ""); }, 700);
+  }
+
+  // Ask the nano model to recommend Quick vs Curated + a paper count for
+  // the current question. Called after the user picks a direction or
+  // after the sprite's "detailed" verdict advances them to the full bar.
+  // The frontend both RENDERS the sprite's explanation and APPLIES the
+  // settings (fastMode + paperCount), so the user can just hit Start.
+  async function requestModeRecommendation(questionText: string, directionLabel: string) {
+    try {
+      const res = await fetchWithApiFallback("/api/workspace/recommend-mode", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text: questionText, direction: directionLabel || undefined }),
+      });
+      if (!res.ok) return;
+      const data = await res.json() as { mode: "quick" | "curated"; paper_count: number; message: string };
+      setFastMode(data.mode === "quick");
+      if (typeof data.paper_count === "number" && data.paper_count > 0) {
+        setPaperCount(data.paper_count);
+      }
+      if (data.message) setAssessmentMessage(data.message);
+    } catch { /* best-effort — the user can still pick mode manually */ }
   }
 
   // Reset sprite-choice state whenever the user starts editing their query
@@ -3691,8 +3778,13 @@ ${html}
           banner container's `relative` wrapper. */}
 
       <div className="flex flex-col flex-1 min-h-0 px-5 pt-5 pb-4 gap-4">
-        {/* ── Top bar: title + mascot + announcement side-by-side ── */}
-        <div className="flex-none flex items-stretch gap-4">
+        {/* ── Top bar: title + mascot + announcement side-by-side ──
+            `min-h-[76px]` reserves space equal to the announcement
+            banner's natural height (68 px card + breathing room) so
+            toggling the banner in/out via the megaphone doesn't
+            shake every element below. Empty space just sits there
+            when the banner is off, which costs nothing visually. */}
+        <div className="flex-none flex items-start gap-4 min-h-[76px]">
           {/* Title block — the mascot sits in the SAME row as the AcademiCats
               wordmark (right after "Cats"), NOT spanning down to the subtitle.
               That keeps the subtitle on its own line directly below the brand. */}
@@ -3712,24 +3804,30 @@ ${html}
                 className="h-12 w-12 object-contain select-none pointer-events-none shrink-0"
                 draggable={false}
               />
-              {/* Megaphone toggle — sits to the RIGHT of the mascot. Click
-                  to fade the announcement banner in; click again to fade
-                  it back out. Active state tinted with the accent token
-                  so users know where the current toggle is. Replaces the
-                  old "always-on" banner + in-banner theme toggle layout. */}
+              {/* Megaphone toggle — shrunk from 36 px → 26 px and
+                  aligned to the TOP of the mascot column (roughly at
+                  the cat's face) via `self-start mt-0.5`, per the
+                  "next to the cat's head" spec. The in-banner
+                  megaphone's breathing animation has been moved here
+                  — when the banner is open this button gently breathes
+                  via `.megaphone-breath`, giving the UI ONE focal
+                  point for "ticker is live". Active state (banner
+                  open) also tints the button with the accent token. */}
               <button
                 onClick={() => setAnnouncementsVisible(v => !v)}
                 title={announcementsVisible ? "Hide announcements" : "Show announcements"}
                 aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
                 aria-pressed={announcementsVisible}
-                className="shrink-0 flex h-9 w-9 items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
+                className={`shrink-0 self-start mt-0.5 flex h-6.5 w-6.5 items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
                 style={{
+                  height: "26px",
+                  width: "26px",
                   borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                   backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
                   color:           announcementsVisible ? "var(--ats-fg-accent)"     : "var(--ats-fg-muted)",
                 }}
               >
-                <Megaphone size={16} />
+                <Megaphone size={13} />
               </button>
             </div>
             {/* Tagline is sized so the whole line (descriptor + version)
@@ -4257,6 +4355,7 @@ ${html}
                       if (introStage === "blank") {
                         if (assessmentVerdict) {
                           setIntroStage(assessmentVerdict === "brief" ? "explore" : "full");
+                          setCommittedQuery(trimmed);
                         } else {
                           // No verdict yet — trigger an assessment immediately
                           // (skipping the 900ms debounce wait) and mark the
@@ -4448,6 +4547,16 @@ ${html}
               const showMessage     = !!assessmentMessage;
               const showDefault     = !showThinking && !showMessage && query.trim().length === 0;
               const needsAngles     = (assessmentVerdict === "brief" || assessmentVerdict === "balanced");
+              // New-content confirmation: if the user has already advanced past
+              // blank and is now typing something materially different from the
+              // committed question, the sprite interrupts normal processing to
+              // ask if they want to start over. Non-destructive — nothing
+              // changes until they click Yes.
+              const askNewContentConfirm =
+                introStage !== "blank" &&
+                committedQuery.length > 0 &&
+                query.trim().length > 0 &&
+                looksLikeNewContent(committedQuery, query.trim());
               // Show the two conversational bubbles only on the landing
               // (blank stage), after the sprite has spoken, when the user
               // hasn't already chosen a path, AND while directions haven't
@@ -4466,9 +4575,50 @@ ${html}
               const directions = directionData?.directions || [];
               const showDirectionBubbles = directions.length > 0 && introStage !== "full";
               const showFindingAngles    = isUnderstanding;
-              if (!showThinking && !showMessage && !showDefault && !showChoiceBubbles && !showDirectionBubbles && !showFindingAngles) return null;
+              if (!showThinking && !showMessage && !showDefault && !showChoiceBubbles && !showDirectionBubbles && !showFindingAngles && !askNewContentConfirm) return null;
               return (
                 <div className="stage-reveal mt-3 flex flex-col items-center gap-2.5">
+                  {/* New-content confirmation takes priority over every
+                      other sprite output. When the user drifts from the
+                      committed question we pause normal sprite chatter
+                      and ask explicitly before blowing the session away. */}
+                  {askNewContentConfirm ? (
+                    <>
+                      <p
+                        key="ask-new-content"
+                        className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
+                        style={{ color: "var(--ats-fg-secondary)" }}
+                      >
+                        <Sparkles size={14} style={{ color: "var(--ats-fg-accent)" }} />
+                        <span>looks different — starting fresh? (｡•́ᴗ•̀｡)</span>
+                      </p>
+                      <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
+                        <button
+                          onClick={handleResetToBlankFromSprite}
+                          className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
+                          style={{
+                            borderColor:     "var(--ats-border-accent)",
+                            backgroundColor: "var(--ats-bg-accent-soft)",
+                            color:           "var(--ats-fg-accent)",
+                          }}
+                        >
+                          <span>Yes, start over</span>
+                        </button>
+                        <button
+                          onClick={handleKeepCurrentFromSprite}
+                          className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
+                          style={{
+                            borderColor:     "var(--ats-border-subtle)",
+                            backgroundColor: "var(--ats-bg-panel)",
+                            color:           "var(--ats-fg-secondary)",
+                          }}
+                        >
+                          <span>Nope, just tweaking</span>
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                  <>
                   {/* Sprite voice line. Bumped from text-xs (12 px) to text-sm
                       (14 px) — the old size was too small to read at a glance.
                       Sparkles icon + thinking dot scaled to match. */}
@@ -4607,21 +4757,17 @@ ${html}
                       })}
                     </div>
                   )}
+                  </>
+                  )}
                 </div>
               );
             })()}
 
-            {/* Mode description — only relevant once the Quick / Curated
-                toggle is visible (full stage). */}
-            {introStage === "full" && (
-              <div className="stage-reveal mt-2 flex justify-end pr-1">
-                <p className="max-w-[22rem] text-center text-[11px] leading-snug text-slate-500">
-                  {fastMode
-                    ? "Seconds-fast results with smart ranking. Great for rapid literature scanning."
-                    : "Deep AI curation with adversarial screening and 6-agent analysis. Best for thorough research."}
-                </p>
-              </div>
-            )}
+            {/* Previously this slot held a two-line blurb explaining what
+                Quick / Curated does. Removed — the sprite now volunteers a
+                mode recommendation after the user picks a direction, so
+                two sources of guidance competed for the same slot. The
+                sprite line is the single source of truth. */}
 
             {/* The "QUERY: <selectedSearchQuery>" echo pill was removed —
                 it duplicated the text already visible in the workspace

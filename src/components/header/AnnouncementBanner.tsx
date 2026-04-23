@@ -462,19 +462,12 @@ export function AnnouncementBanner({
         >
           {/* Row 1 — rotator (marquees when text overflows). Right
               padding reserves space for the theme toggle so long
-              messages don't slide under it. Hover-pause is signalled
-              two ways: (1) the megaphone swaps to a pause glyph, and
-              (2) a subtle "Paused" pill fades in on the left so the
-              user can't miss that the rotator is actually frozen. */}
+              messages don't slide under it. The in-banner megaphone
+              icon used to breathe / swap to a pause glyph here; those
+              cues now live on the external megaphone toggle sitting
+              next to the mascot (see page.tsx), so this row is just
+              the rotator text now. */}
           <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
-            <span
-              className={`shrink-0 flex items-center justify-center transition-all duration-200 ${hoverPaused ? "" : "megaphone-breath"}`}
-              title={hoverPaused ? "Paused — move mouse away to resume rotation" : undefined}
-            >
-              {hoverPaused
-                ? <PauseGlyph color="var(--ats-fg-accent)" />
-                : <Megaphone size={13} style={{ color: "var(--ats-fg-accent)", opacity: 0.85 }} />}
-            </span>
             <div className="min-w-0 flex-1 overflow-hidden">
               <AnnouncementRotatorCard items={announcements} paused={hoverPaused} idx={idx} />
             </div>
