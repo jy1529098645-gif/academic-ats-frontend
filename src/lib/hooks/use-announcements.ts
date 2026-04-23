@@ -26,12 +26,6 @@ export type Announcement = {
   author_email:   string;
   text:           string;
   created_at:     string;
-  // Vote columns — populated by GET /api/announcements. `my_vote` is
-  // null for unauthenticated viewers and for authed viewers who
-  // haven't voted on this particular row.
-  like_count?:    number;
-  dislike_count?: number;
-  my_vote?:       "up" | "down" | null;
 };
 
 const FEED_LIMIT = 50;
@@ -42,9 +36,6 @@ export function useAnnouncements() {
 
   const refresh = useCallback(async () => {
     try {
-      // Include Bearer token when available so the backend can populate
-      // each row's `my_vote` field. fetchWithAuth gracefully drops the
-      // header when the user isn't signed in.
       const res = await fetchWithAuth(buildApiUrl("/api/announcements"));
       if (!res.ok) throw new Error(`announcements: HTTP ${res.status}`);
       const data = (await res.json()) as Announcement[];
@@ -123,65 +114,5 @@ export function useAnnouncements() {
     }
   }, []);
 
-  /** Cast / toggle a vote on one announcement. Caller decides toggle
-   *  semantics (pass `null` to clear an existing vote); backend just
-   *  writes whatever is asked. Optimistically updates local state so
-   *  the user sees the count change immediately — the response echoes
-   *  the authoritative counts in case of skew. */
-  const vote = useCallback(async (
-    announcementId: string,
-    voteType: "up" | "down" | null,
-  ): Promise<{ ok: boolean; error?: string }> => {
-    if (!announcementId) return { ok: false, error: "missing id" };
-
-    // Optimistic update. We compute the expected new counts based on
-    // the previous `my_vote` for this row and the new one, so the
-    // numbers shift correctly even when the user switches vote type.
-    setItems(prev => prev.map(row => {
-      if (row.id !== announcementId) return row;
-      const prevVote = row.my_vote ?? null;
-      let likeDelta    = 0;
-      let dislikeDelta = 0;
-      if (prevVote === "up")    likeDelta    -= 1;
-      if (prevVote === "down")  dislikeDelta -= 1;
-      if (voteType === "up")    likeDelta    += 1;
-      if (voteType === "down")  dislikeDelta += 1;
-      return {
-        ...row,
-        like_count:    Math.max(0, (row.like_count    ?? 0) + likeDelta),
-        dislike_count: Math.max(0, (row.dislike_count ?? 0) + dislikeDelta),
-        my_vote:       voteType,
-      };
-    }));
-
-    try {
-      const res = await fetchWithAuth(buildApiUrl(`/api/announcements/${announcementId}/vote`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vote: voteType }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        // Refresh to undo the optimistic update.
-        void refresh();
-        return { ok: false, error: `HTTP ${res.status}: ${body.slice(0, 200)}` };
-      }
-      // Reconcile with the authoritative counts from the server.
-      try {
-        const data = await res.json() as { like_count: number; dislike_count: number; my_vote: "up" | "down" | null };
-        setItems(prev => prev.map(row => row.id === announcementId ? {
-          ...row,
-          like_count:    data.like_count    ?? 0,
-          dislike_count: data.dislike_count ?? 0,
-          my_vote:       data.my_vote       ?? null,
-        } : row));
-      } catch { /* ignore — optimistic state already matches typical case */ }
-      return { ok: true };
-    } catch (e) {
-      void refresh();
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-  }, [refresh]);
-
-  return { items, error, refresh, post, vote };
+  return { items, error, refresh, post };
 }

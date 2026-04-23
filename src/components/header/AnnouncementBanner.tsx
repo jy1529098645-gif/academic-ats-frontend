@@ -37,7 +37,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Megaphone, MessageSquare, Check, ChevronLeft, ChevronRight, Sparkles, ThumbsUp, ThumbsDown } from "lucide-react";
+import { Megaphone, MessageSquare, Check, ChevronLeft, ChevronRight, Sparkles } from "lucide-react";
 import type { Announcement } from "@/lib/hooks/use-announcements";
 import { usePrefsStore } from "@/lib/stores/prefs-store";
 
@@ -69,15 +69,10 @@ function AnnouncementRotatorCard({
   items,
   paused,
   idx,
-  onVote,
 }: {
   items: Announcement[];
   paused: boolean;
   idx: number;
-  /** Click handler for the like / dislike buttons. Caller owns toggle
-   *  semantics: second click with the same vote should pass null to
-   *  clear. */
-  onVote: (id: string, vote: "up" | "down" | null) => void;
 }) {
   const count = items.length;
   const safeIdx = count > 0 ? idx % count : 0;
@@ -114,74 +109,6 @@ function AnnouncementRotatorCard({
         </span>
       )}
       <AnnouncementText text={current.text} paused={paused} />
-      <VoteButtons
-        likeCount={current.like_count ?? 0}
-        dislikeCount={current.dislike_count ?? 0}
-        myVote={current.my_vote ?? null}
-        onClick={(next) => onVote(current.id, next)}
-      />
-    </div>
-  );
-}
-
-// Thumbs-up / thumbs-down pair shown at the right end of each rotator
-// row. `shrink-0` so long text marquees next to them without pushing
-// them off screen. Active state uses --ats-fg-accent for "up" (positive)
-// and a neutral red for "down" so the distinction is colour-coded.
-function VoteButtons({
-  likeCount, dislikeCount, myVote, onClick,
-}: {
-  likeCount:    number;
-  dislikeCount: number;
-  myVote:       "up" | "down" | null;
-  onClick:      (next: "up" | "down" | null) => void;
-}) {
-  // Explicit h-[20px] + w-[26px] min locks BOTH dimensions of each button so
-  // nothing inside (icon swap, count change, active-background fade-in) can
-  // ever reshape the button — and the container row around it stays rigid.
-  // The first version of this fix only reserved inline width for the count;
-  // the user reported continued jitter because an EMPTY span contributes no
-  // text-baseline to its parent while a FILLED span does, so the button's
-  // vertical baseline shifted by ~1px on vote. Locking the button height
-  // eliminates that entire class of bug.
-  const base = "inline-flex items-center justify-center gap-0.5 rounded px-1 h-[20px] min-w-[26px] text-[10px] font-semibold transition-colors select-none";
-  // Counter slot: ALWAYS renders the number; uses `visibility: hidden` when
-  // zero so the span still contributes the same width + baseline as when
-  // filled. tabular-nums keeps single and double digit counts visually
-  // anchored to the same right edge.
-  const counterSlot = (count: number): React.CSSProperties => ({
-    display: "inline-block",
-    minWidth: "1.1ch",
-    textAlign: "right",
-    fontVariantNumeric: "tabular-nums",
-    visibility: count > 0 ? "visible" : "hidden",
-  });
-  return (
-    <div className="shrink-0 flex items-center gap-0.5 ml-1">
-      <button
-        onClick={(e) => { e.stopPropagation(); onClick(myVote === "up" ? null : "up"); }}
-        title={myVote === "up" ? "Remove your like" : "Like this announcement"}
-        className={base}
-        style={{
-          color:           myVote === "up" ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
-          backgroundColor: myVote === "up" ? "var(--ats-bg-accent-soft)" : "transparent",
-        }}
-      >
-        <ThumbsUp size={11} />
-        <span style={counterSlot(likeCount)}>{likeCount > 0 ? likeCount : 0}</span>
-      </button>
-      <button
-        onClick={(e) => { e.stopPropagation(); onClick(myVote === "down" ? null : "down"); }}
-        title={myVote === "down" ? "Remove your dislike" : "Dislike this announcement"}
-        className={base}
-        style={{
-          color:           myVote === "down" ? "#f87171" : "var(--ats-fg-muted)",
-          backgroundColor: myVote === "down" ? "rgba(248, 113, 113, 0.12)" : "transparent",
-        }}
-      >
-        <ThumbsDown size={11} />
-        <span style={counterSlot(dislikeCount)}>{dislikeCount > 0 ? dislikeCount : 0}</span>
-      </button>
     </div>
   );
 }
@@ -404,10 +331,6 @@ export type AnnouncementBannerProps = {
    *  "part of the banner chrome" instead of a floating control. */
   themeMode:    "day" | "night";
   onToggleTheme:() => void;
-  /** Like / dislike vote for the current rotator announcement. Caller
-   *  owns toggle semantics (pass null to clear). Forwards the click to
-   *  useAnnouncements().vote which handles the optimistic update + API. */
-  onVote:       (id: string, vote: "up" | "down" | null) => void;
 };
 
 // Email of the seeded dev author — rows with this author_email are the
@@ -423,7 +346,6 @@ export function AnnouncementBanner({
   msgAnonymous, setMsgAnonymous,
   msgSending, msgSentOk, onSend,
   themeMode, onToggleTheme,
-  onVote,
 }: AnnouncementBannerProps) {
   const [hoverPaused, setHoverPaused] = useState(false);
   const [idx, setIdx] = useState(0);
@@ -554,7 +476,7 @@ export function AnnouncementBanner({
                 : <Megaphone size={13} style={{ color: "var(--ats-fg-accent)", opacity: 0.85 }} />}
             </span>
             <div className="min-w-0 flex-1 overflow-hidden">
-              <AnnouncementRotatorCard items={announcements} paused={hoverPaused} idx={idx} onVote={onVote} />
+              <AnnouncementRotatorCard items={announcements} paused={hoverPaused} idx={idx} />
             </div>
           </div>
           {/* Row 2 — composer */}

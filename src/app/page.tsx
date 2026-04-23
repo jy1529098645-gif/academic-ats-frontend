@@ -10,7 +10,7 @@ import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
 import {
-  usePrefsStore, hydratePrefsStore,
+  usePrefsStore, hydratePrefsStore, applyServerWorkspaceCharLimit,
   ROTATOR_INTERVAL_MIN, ROTATOR_INTERVAL_MAX,
   THEME_TRANSITION_MIN, THEME_TRANSITION_MAX,
 } from "@/lib/stores/prefs-store";
@@ -39,6 +39,8 @@ import {
   AnnouncementBanner,
 } from "@/components/header/AnnouncementBanner";
 import { useAnnouncements } from "@/lib/hooks/use-announcements";
+import { PaperReviewPanel } from "@/components/lab/PaperReviewPanel";
+import { TOS_SECTIONS, TOS_VERSION, APP_VERSION } from "@/lib/tos-content";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
   Zap, FlaskConical, SlidersHorizontal, BookOpen, Upload, FolderOpen,
@@ -900,11 +902,28 @@ export default function HomePage() {
     hydrateThemeStore();
     hydratePrefsStore();
     hydrateUsagePromptStore();
+    // Fetch the admin-controlled client config (currently: workspace char limit).
+    // The server value wins over the local one when it's tighter — see
+    // applyServerWorkspaceCharLimit for rationale.
+    void (async () => {
+      try {
+        const res = await fetchWithApiFallback("/api/config/client");
+        if (!res.ok) return;
+        const data = await res.json() as { workspace_char_limit?: number };
+        if (typeof data.workspace_char_limit === "number") {
+          applyServerWorkspaceCharLimit(data.workspace_char_limit);
+        }
+      } catch { /* best-effort — local default is fine if backend offline */ }
+    })();
   }, []);
 
   // User-tunable behaviour preferences (Settings → Behaviour).
   const rotatorIntervalMs    = usePrefsStore(s => s.rotatorIntervalMs);
   const themeTransitionMs    = usePrefsStore(s => s.themeTransitionMs);
+  // `workspaceCharLimit` is ADMIN-controlled via /admin's ClientConfigEditor;
+  // we only READ the effective cap here and apply it as the textarea
+  // maxLength. There's no user-facing slider for it — see prefs-store.ts.
+  const workspaceCharLimit   = usePrefsStore(s => s.workspaceCharLimit);
   const setRotatorIntervalMs = usePrefsStore(s => s.setRotatorIntervalMs);
   const setThemeTransitionMs = usePrefsStore(s => s.setThemeTransitionMs);
 
@@ -971,45 +990,34 @@ export default function HomePage() {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const placeholderWrapperRef = useRef<HTMLDivElement>(null);
   const [placeholderFontSize, setPlaceholderFontSize] = useState(48);
-  const _prevEmptyRef = useRef(true);
+  // IME composition guard. Without this, Chinese / Japanese / Korean input
+  // loses half-typed characters when React re-renders mid-composition — the
+  // user types a pinyin like "ni" but React's controlled-value update resets
+  // the composition buffer before they pick "你". Solution: track composing
+  // state, and when composition ends write the final value via onChange.
+  // (The browser fires onChange AFTER compositionend with the committed text,
+  // so this is mostly a safety net + prevents layout reflows during composition.)
+  const _composingRef = useRef(false);
   useEffect(() => {
     // Randomise on first mount (client-only, avoids hydration mismatch).
     setPlaceholderIdx(Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length));
   }, []);
-  useEffect(() => {
-    const isEmpty = query.length === 0;
-    // Only re-shuffle on the non-empty → empty transition, not on initial mount.
-    if (isEmpty && !_prevEmptyRef.current) {
-      setPlaceholderIdx(i => {
-        if (WORKSPACE_PLACEHOLDERS.length < 2) return i;
-        let next = i;
-        while (next === i) next = Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length);
-        return next;
-      });
-    }
-    _prevEmptyRef.current = isEmpty;
-  }, [query]);
+  // NOTE: previously this effect ran on every `[query]` change (every
+  // keystroke) which added one extra render cycle per character. We now
+  // re-shuffle the placeholder only on the non-empty → empty transition
+  // inline inside the onChange handler, which keeps the per-keystroke
+  // path lean and avoids any effect-driven work during rapid typing.
 
-  // Smoothly expand the textarea to ~half-screen while the decorative placeholder
-  // is showing, and compress to a compact 2-line box once the user focuses or types.
-  // We write height imperatively via useLayoutEffect (not through JSX `style.height`)
-  // so the user's manual drag-resize is not clobbered on every React render —
-  // only when placeholder visibility actually flips does the height snap back.
+  // The placeholder overlay is hidden the moment the user focuses or starts
+  // typing (it's purely decorative).
   const _showPlaceholder = query.length === 0 && !taFocused;
-  useLayoutEffect(() => {
-    const ta = taRef.current;
-    if (!ta) return;
-    // Placeholder state: expanded so the greeting has room with bottom edge at
-    // roughly two-thirds of the viewport. Measured from the textarea's own
-    // top so the computation is layout-independent.
-    if (_showPlaceholder) {
-      const top = ta.getBoundingClientRect().top;
-      const target = Math.max(window.innerHeight * (2 / 3) - top, 180);
-      ta.style.height = `${target}px`;
-    } else {
-      ta.style.height = "4.5rem";
-    }
-  }, [_showPlaceholder]);
+  // `hasRunSearch` flips true on the first submit and stays true for the
+  // rest of the session. The textarea HEIGHT effect below depends on it +
+  // `isSubmitting` — but `isSubmitting` is declared further down the
+  // component body. Both state declarations live here; the useLayoutEffect
+  // that writes ta.style.height is deferred to just after isSubmitting so
+  // the effect's dep array doesn't hit a TDZ error.
+  const [hasRunSearch, setHasRunSearch] = useState(false);
 
   // Adaptive placeholder font size is handled via CSS container-query units
   // (`cqh` / `cqw`) on the wrapper below — no JS observer needed. The wrapper
@@ -1074,6 +1082,50 @@ export default function HomePage() {
   const [isUnderstanding, setIsUnderstanding] = useState(false);
   const [understandStatus, setUnderstandStatus] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Textarea geometry + type scale. Before a search has run the textarea
+  // is a tall "greeting" box; once a search runs (hasRunSearch) or a
+  // search is in-flight (isSubmitting) it snaps down to a compact 2-line
+  // box to give the results area room.
+  //
+  // Centering: a native <textarea> always anchors content to the top of
+  // the content box — there's no `align-content: center` equivalent. We
+  // fake vertical centering by writing a large `padding-top` when the
+  // box is tall (empty + pre-search), so a short 1-2 line question sits
+  // in the middle of the frame. Users typing multiple lines push the
+  // padding proportion down naturally as the text grows. Once the box
+  // goes compact the padding-top shrinks to a normal 1.25rem.
+  //
+  // Font scale: tied to the computed height. The big greeting box uses
+  // ~3rem font so a short question feels spacious; the compact box
+  // shrinks back to 1.125rem (text-lg) for a normal editing feel. Steps
+  // interpolate so the transition is smooth if the box is ever something
+  // between those two states.
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    if (hasRunSearch || isSubmitting) {
+      // Compact box — normal editing mode, no centering dance.
+      ta.style.height       = "4.5rem";
+      ta.style.paddingTop   = "1.25rem";
+      ta.style.paddingBottom = "1.25rem";
+      ta.style.fontSize     = "1.125rem";
+    } else {
+      // Expanded greeting box — compute height, then derive a padding
+      // that pushes the caret + typed text into the vertical centre.
+      const top = ta.getBoundingClientRect().top;
+      const target = Math.max(window.innerHeight * (2 / 3) - top, 180);
+      ta.style.height = `${target}px`;
+      // 38% top padding visually centres a 1-3 line question. Minimum
+      // 28px so a short viewport (rare) never collapses it entirely.
+      ta.style.paddingTop    = `${Math.max(28, Math.round(target * 0.38))}px`;
+      ta.style.paddingBottom = "28px";
+      // Font scales with height: 240px height → 1.125rem floor,
+      // every extra 240px adds ~1rem, capped at 3rem so we don't
+      // overwhelm the card at very tall viewports.
+      const fontRem = Math.min(3, Math.max(1.5, target / 220));
+      ta.style.fontSize = `${fontRem.toFixed(2)}rem`;
+    }
+  }, [hasRunSearch, isSubmitting]);
   const [retrievalCount, setRetrievalCount] = useState<number | null>(null);
   const [candidateLimit, setCandidateLimit] = useState<number | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
@@ -1147,6 +1199,13 @@ export default function HomePage() {
   const [labTargetPages,    setLabTargetPages]    = useState(2);
   const [labGenerating, setLabGenerating] = useState(false);
   const [labResult,     setLabResult]     = useState("");
+  // Which module is active inside the right-panel Lab. The original
+  // Synthesis Lab (paper-writer) and the newer Paper Review (multi-agent
+  // peer review of a user-submitted draft) both live in the same panel
+  // and swap via the header tab bar.
+  // Default to Paper Review — it's the more common starting point and sits
+  // first in the tab bar now.
+  const [labModule, setLabModule] = useState<"synthesis" | "review">("review");
 
   // ── Lab multi-generation: tabbed result history ──────────────────────────
   // Each completed Generate run is archived in `labRuns` (newest first
@@ -2815,6 +2874,11 @@ ${html}
     const _usedUnderstand = directionData !== null;
     abortRef.current = new AbortController();
     setIsSubmitting(true);
+    // First search of this session flips the textarea into its compact
+    // layout. Before this point, focusing / typing leaves the textarea at
+    // its tall "greeting" height so users have room to draft a long
+    // question. See useLayoutEffect on [hasRunSearch, isSubmitting] above.
+    setHasRunSearch(true);
     setUiError("");
     setJob(null);
     briefVersionRef.current = 0;       // reset: no SSE version received yet for this search
@@ -3532,7 +3596,6 @@ ${html}
               onSend={handleSendMessage}
               themeMode={themeMode}
               onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
-              onVote={(id, v) => { void announcementsFeed.vote(id, v); }}
             />
           </div>
         </div>
@@ -3666,7 +3729,7 @@ ${html}
                       ? "bg-slate-900/70 text-slate-100"
                       : "text-slate-500 hover:text-slate-300"
                   }`}
-                ><ClipboardList size={14} /><span>Synthesis</span></button>
+                ><ClipboardList size={14} /><span>Research Brief</span></button>
                 <button
                   onClick={() => setLeftTab("analytics")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
@@ -3674,7 +3737,7 @@ ${html}
                       ? "bg-slate-900/70 text-slate-100"
                       : "text-slate-500 hover:text-slate-300"
                   }`}
-                ><BarChart2 size={14} /><span>Analytics</span></button>
+                ><BarChart2 size={14} /><span>Charts</span></button>
                 {/* Collapse action moved to the fold-side edge — see absolute button above. */}
               </div>
 
@@ -3899,8 +3962,8 @@ ${html}
                   // idle panels centre their copy identically inside their region.
                   <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
                     <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
-                      Run Search &amp; Analysis first —<br />
-                      your final Research Brief will appear here once the pipeline completes.
+                      Run a search first —<br />
+                      your Research Brief will show up here when the analysis finishes.
                     </div>
                   </div>
                 ) : null}
@@ -3911,8 +3974,8 @@ ${html}
                     to show, nothing renders. */}
                 {hasAgentOutput && (
                   <div className="mt-6 ats-card rounded-3xl bg-slate-950/40 p-4">
-                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>Analytical Trace</span></div>
-                    <p className="mb-4 text-sm text-slate-400">The full multi-agent reasoning breakdown.</p>
+                    <div className="mb-2 flex items-center gap-2 text-base font-bold"><Brain size={16} /><span>How the Answer Was Built</span></div>
+                    <p className="mb-4 text-sm text-slate-400">A step-by-step look at what each analysis agent found.</p>
                     <div className="space-y-3">
                       <AgentSection title="Evidence Mapper" payload={agentData.evidence_mapper} running={isSubmitting && !fastMode && startedAgents.has("evidence_mapper")} />
                       <AgentSection title="Scholar"         payload={agentData.scholar}        running={isSubmitting && !fastMode && startedAgents.has("scholar")} />
@@ -3933,10 +3996,10 @@ ${html}
                   >
                     <div className="mb-2 flex items-center gap-2 text-base font-bold text-[var(--ats-fg-accent)]">
                       <Compass size={16} />
-                      <span>Retrieval Strategy Summary</span>
-                      <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.18em] text-[var(--ats-fg-muted)]">meta</span>
+                      <span>How We Found These Papers</span>
+                      <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.18em] text-[var(--ats-fg-muted)]">behind the scenes</span>
                     </div>
-                    <p className="mb-4 text-sm text-[var(--ats-fg-secondary)]">How the search was run, screened, and selected.</p>
+                    <p className="mb-4 text-sm text-[var(--ats-fg-secondary)]">How the search was run, filtered, and ranked.</p>
                     <div className="space-y-2 text-xs text-[var(--ats-fg-secondary)]">
                       {Array.isArray(result?.strategy_summary?.strategy_points) &&
                         result.strategy_summary.strategy_points.map((item: any, idx: number) => (
@@ -3954,7 +4017,7 @@ ${html}
                   <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
                     <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
                       Run a search first —<br />
-                      charts populate once retrieved papers are available.
+                      charts will fill in once papers are found.
                     </div>
                   </div>
                 ) : (
@@ -3991,7 +4054,34 @@ ${html}
                 <textarea
                   ref={taRef}
                   value={query}
+                  maxLength={workspaceCharLimit}
+                  // onChange is the ONLY setter. During IME composition the
+                  // browser still fires onChange with each intermediate value —
+                  // if we skipped those, the textarea visual + controlled value
+                  // would drift apart. We accept the intermediate values; the
+                  // composingRef guards nothing here but is exposed to other
+                  // effects (e.g. the imperative height write) so they can
+                  // avoid touching the DOM mid-composition.
                   onChange={(e) => setQuery(e.target.value)}
+                  onCompositionStart={() => { _composingRef.current = true; }}
+                  onCompositionEnd={(e) => {
+                    _composingRef.current = false;
+                    // The compositionend event carries the final committed text.
+                    // Commit it again to guarantee the controlled value matches
+                    // what the user sees — a safety net against the rare browser
+                    // that withholds the trailing onChange.
+                    setQuery((e.target as HTMLTextAreaElement).value);
+                  }}
+                  // Enter submits the search (same as clicking Send). Shift+Enter
+                  // still inserts a newline so multi-line queries remain possible.
+                  // Guard against IME composition: pressing Enter to confirm a
+                  // Chinese/Japanese candidate must NOT trigger submit.
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
+                      e.preventDefault();
+                      if (query.trim() && !isSubmitting) void handleSearch();
+                    }
+                  }}
                   onFocus={() => setTaFocused(true)}
                   onBlur={(e) => {
                     setTaFocused(false);
@@ -4010,7 +4100,11 @@ ${html}
                   // carries `bg-[var(--ats-bg-input)]` for the filled look.
                   // resize-none: no user drag handle; long content scrolls via the
                   // hair-thin scrollbar (thinner than the panel's own scrollbar).
-                  className="relative z-10 block w-full resize-none bg-transparent px-5 py-6 text-center text-lg leading-relaxed text-slate-100 outline-none hairline-scrollbar transition-[height] duration-300 ease-out"
+                  // Font-size + top/bottom padding are written imperatively in the
+                  // useLayoutEffect above so the text sits in the vertical centre
+                  // while the box is large and collapses to a normal editing mode
+                  // once a search has run. `transition-all` smooths both axes.
+                  className="relative z-10 block w-full resize-none bg-transparent px-5 text-center leading-tight text-slate-100 outline-none hairline-scrollbar transition-all duration-300 ease-out"
                 />
                 {/* Rotating greeting — shown only when textarea is empty AND not focused.
                     On click, focus fires → overlay hides → native caret takes over.
@@ -4058,20 +4152,6 @@ ${html}
                 {/* Right-aligned group — no wrapping: each button collapses width /
                     truncates its label before the row breaks into multiple lines. */}
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
-                  {/* Step-1 badge — subtle numeral sitting before the Query
-                      Understanding button so the user reads the row as an
-                      ordered workflow ("1. understand, 2. search"). Same
-                      palette as the rest of the surface: muted foreground
-                      on the subtle panel bg, no accent colour. */}
-                  <span
-                    aria-hidden
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border text-sm font-bold shrink-0 select-none"
-                    style={{
-                      borderColor:     "var(--ats-border-subtle)",
-                      backgroundColor: "var(--ats-bg-panel)",
-                      color:           "var(--ats-fg-secondary)",
-                    }}
-                  >1</span>
                   {/* Query Understanding — click again during analysis to cancel.
                       min-w locks the width so the label toggle (Understand ↔ Cancel) doesn't resize the button. */}
                   <button
@@ -4081,12 +4161,12 @@ ${html}
                       setUnderstandOpen(true);
                     }}
                     disabled={!query.trim()}
-                    title={isUnderstanding ? "Click to cancel analysis" : "Analyse the query into 6 research directions"}
+                    title={isUnderstanding ? "Click to cancel" : "Break your question into research angles before searching"}
                     className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-semibold transition-colors disabled:opacity-60 ${isUnderstanding ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-slate-700 bg-slate-900/50 text-slate-200 hover:border-blue-500/40"}`}
                   >
                     {isUnderstanding
-                      ? <><Square size={12} fill="currentColor" className="shrink-0" /><span className="truncate">Cancel analysis</span></>
-                      : <><Search size={14} className="shrink-0" /><span className="truncate">Query Understanding</span><ChevronRight size={12} className="shrink-0 hidden sm:inline-block" /></>}
+                      ? <><Square size={12} fill="currentColor" className="shrink-0" /><span className="truncate">Cancel</span></>
+                      : <><Search size={14} className="shrink-0" /><span className="truncate">Explore Angles</span><ChevronRight size={12} className="shrink-0 hidden sm:inline-block" /></>}
                   </button>
 
                   {/* Fast / Curated mode toggle */}
@@ -4107,18 +4187,6 @@ ${html}
                     ><FlaskConical size={14} className="shrink-0" /><span className="truncate">Curated Analysis</span></button>
                   </div>
 
-                  {/* Step-2 badge — sibling of the step-1 badge above; same
-                      palette so the numerals read as a pair, not as two
-                      unrelated decorations. */}
-                  <span
-                    aria-hidden
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border text-sm font-bold shrink-0 select-none"
-                    style={{
-                      borderColor:     "var(--ats-border-subtle)",
-                      backgroundColor: "var(--ats-bg-panel)",
-                      color:           "var(--ats-fg-secondary)",
-                    }}
-                  >2</span>
                   {/* Start / Stop — compact circular action */}
                   {isSubmitting ? (
                     <button
@@ -4310,7 +4378,7 @@ ${html}
                 onClick={() => setUnderstandOpen(o => !o)}
                 title={understandOpen ? "Collapse the directions grid" : "Expand — your earlier results are preserved"}
               >
-                <Search size={14} /><span>Query Understanding</span>
+                <Search size={14} /><span>Research Angles</span>
                 {/* "Preserved results" hint — only when collapsed AND
                     directionData has content. Tiny accent dot + count.
                     Disappears when expanded (the content itself is
@@ -4481,7 +4549,7 @@ ${html}
                     </label>
                   </>
                 ) : (
-                  <div className="text-xs text-slate-500">Run Query Understanding to see the query here.</div>
+                  <div className="text-xs text-slate-500">Click &quot;Explore Angles&quot; to see research directions for your question.</div>
                 )}
               </div>
               )}
@@ -4642,7 +4710,7 @@ ${html}
                             return (
                               <button
                                 onClick={() => inLab ? removeFromLab(paperKey) : addToLab(paper, paperKey)}
-                                title={inLab ? "Remove from Synthesis Lab" : "Add to Synthesis Lab"}
+                                title={inLab ? "Remove from writing references" : "Use this paper as a reference in the writing tools"}
                                 className={`shrink-0 mt-1 flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all ${
                                   inLab
                                     ? "border-blue-500/50 bg-blue-500/10 text-blue-300 hover:border-rose-500/50 hover:text-rose-400 hover:bg-rose-500/10"
@@ -4650,7 +4718,7 @@ ${html}
                                 }`}
                               >
                                 {inLab ? <Check size={11} strokeWidth={3} /> : <Plus size={11} strokeWidth={3} />}
-                                <span>Lab</span>
+                                <span>{inLab ? "Reference" : "Add as reference"}</span>
                               </button>
                             );
                           })()}
@@ -4857,13 +4925,39 @@ ${html}
                             : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{translateErrors[paperKey]}</div>
                         )}
 
-                        {/* Abstract — collapsed by default */}
-                        {paper.summary && (
-                          <details className="mt-3 rounded-xl bg-slate-950/20">
-                            <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors">Abstract</summary>
-                            <p className="px-3 pb-3 pt-1 whitespace-pre-wrap break-words text-sm leading-7 text-slate-300">{paper.summary}</p>
-                          </details>
-                        )}
+                        {/* Abstract — collapsed by default.
+                            Some sources (Google Scholar, CORE) return only a
+                            SERP snippet rather than the full abstract — at
+                            which point the text trails off with "…" and the
+                            whole string is ≲ 250 chars. When we detect that
+                            shape, show a small notice + direct link to the
+                            source page, so the user doesn't think our
+                            rendering cut it off. "No abstract available." is
+                            the explicit backend fallback — surfaced clearly
+                            instead of hidden under the collapsed summary. */}
+                        {paper.summary && (() => {
+                          const s = String(paper.summary || "").trim();
+                          const isMissing = s === "No abstract available.";
+                          const looksTruncated =
+                            !isMissing && s.length < 260 && (s.endsWith("…") || s.endsWith("...") || /\b(snippet)\b/i.test(paper.source || ""));
+                          return (
+                            <details className="mt-3 rounded-xl bg-slate-950/20">
+                              <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-2">
+                                <span>Abstract</span>
+                                {isMissing && <span className="text-[10px] font-normal text-slate-500">not provided by source</span>}
+                                {looksTruncated && <span className="text-[10px] font-normal text-amber-400/80">only a preview snippet — see source for the full abstract</span>}
+                              </summary>
+                              <p className="px-3 pb-3 pt-1 whitespace-pre-wrap break-words text-sm leading-7 text-slate-300">{paper.summary}</p>
+                              {looksTruncated && paper.url && (
+                                <p className="px-3 pb-3 -mt-2 text-xs text-slate-500">
+                                  <a href={paper.url} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline inline-flex items-center gap-1">
+                                    <ExternalLink size={10} />Open source page for the full abstract
+                                  </a>
+                                </p>
+                              )}
+                            </details>
+                          );
+                        })()}
 
 
                         {/* Empty state: the endpoint returned but produced
@@ -5079,20 +5173,66 @@ ${html}
                 aria-label="Hide Synthesis Lab panel"
                 className="absolute top-[11px] right-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
               ><PanelRightClose size={15} /></button>
-              {/* Header bar — trailing padding reserves space for the absolute collapse button. */}
-              <div className="shrink-0 flex items-center gap-1 border-b border-slate-800/60 pl-4 pr-12 py-2.5">
-                <span className="flex items-center gap-2 text-base font-bold text-slate-100">
-                  <PenLine size={16} /><span>Synthesis Lab</span>
+              {/* Header bar — two-tab module switcher (Synthesis Lab | Paper
+                  Review). Styling MIRRORS the left panel's Research Brief /
+                  Charts tabs exactly: no border, same padding, same font
+                  weight, same active-tab treatment (slate-900/70 fill). The
+                  visual unit is the tab bar itself, not each pill — matches
+                  the rest of the product so users don't read this as a
+                  different control than the left panel's tabs. Trailing
+                  padding reserves space for the absolute collapse button. */}
+              <div className="shrink-0 flex items-center gap-1.5 pl-3 pr-12 py-2.5 border-b border-slate-800/60">
+                {/* Paper Review is the first tab — it's the more common
+                    starting point for a user arriving with a draft they
+                    want feedback on. Synthesis Lab still follows right
+                    after for users who came through the search → papers
+                    flow. */}
+                <button
+                  onClick={() => setLabModule("review")}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                    labModule === "review"
+                      ? "bg-slate-900/70 text-slate-100"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                  title="Paper Review — multi-agent peer review of your own draft"
+                >
+                  <ShieldCheck size={14} />
+                  <span>Paper Review</span>
+                </button>
+                <button
+                  onClick={() => setLabModule("synthesis")}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                    labModule === "synthesis"
+                      ? "bg-slate-900/70 text-slate-100"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                  title="Synthesis Lab — generate academic text from selected papers"
+                >
+                  <PenLine size={14} />
+                  <span>Synthesis Lab</span>
                   {labRefs.length > 0 && (
-                    <span className="ml-1 rounded-full bg-blue-500/20 px-2 py-0.5 text-xs text-blue-400 font-bold">{labRefs.length}</span>
+                    <span className={`ml-0.5 rounded-full px-1.5 text-[10px] font-bold ${
+                      labModule === "synthesis" ? "bg-slate-700/70 text-slate-200" : "bg-slate-800/60 text-slate-400"
+                    }`}>{labRefs.length}</span>
                   )}
-                </span>
+                </button>
               </div>
+
+              {/* ── Paper Review module ─────────────────────────────────
+                  Self-contained panel with its own state / streaming /
+                  agent log. Rendered in a scrollable flex child so long
+                  review letters stay inside the Lab column. */}
+              {labModule === "review" && (
+                <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
+                  <PaperReviewPanel />
+                </div>
+              )}
 
               {/* ── Synthesis Lab content — gated only when nothing has happened yet.
                   Once the user has added papers, typed core argument, added points,
                   uploaded files, or generated output, the Lab stays open even if
                   the current search has no results — their in-progress work is preserved. */}
+              {labModule === "synthesis" && (
               <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
                 {(() => {
                   const hasLabState =
@@ -5109,7 +5249,7 @@ ${html}
                   <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
                     <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
                       Run a search first —<br />
-                      the Synthesis Lab unlocks once retrieved papers are available.
+                      the writing tools unlock once papers are available.
                     </div>
                   </div>
                 ) : (
@@ -5118,12 +5258,12 @@ ${html}
                   {/* References — compact header + tighter empty state for a denser top of Lab. */}
                   <div>
                     <div className="flex items-center gap-2 mb-1.5">
-                      <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><BookOpen size={14} /><span>References</span></span>
-                      <span className="text-xs text-slate-500">{labRefs.length} added</span>
+                      <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><BookOpen size={14} /><span>Papers to use</span></span>
+                      <span className="text-xs text-slate-500">{labRefs.length} picked</span>
                     </div>
                     {labRefs.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-slate-700 py-2.5 text-center text-xs text-slate-600 leading-5">
-                        Click <span className="text-violet-400 font-semibold">+ Lab</span> on any paper to add it
+                        Click <span className="text-violet-400 font-semibold">Add as reference</span> on any paper to use it here
                       </div>
                     ) : (
                       <div className="space-y-1.5">
@@ -5141,8 +5281,8 @@ ${html}
 
                   {/* User file upload — compact dropzone so the top of the Lab stays dense. */}
                   <div>
-                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Upload size={14} /><span>Upload Your Files</span></label>
-                    <p className="mt-0.5 text-[11px] text-slate-500">PDF, TXT, MD — drag & drop or click</p>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Upload size={14} /><span>Add your own files</span></label>
+                    <p className="mt-0.5 text-[11px] text-slate-500">PDF, TXT, or Markdown. Drag and drop works too.</p>
                     <label
                       className="mt-1.5 flex cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 px-3 py-2.5 text-xs text-slate-500 transition hover:border-violet-500/50 hover:text-violet-400"
                       onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("border-violet-500/60", "bg-violet-500/5"); }}
@@ -5158,7 +5298,7 @@ ${html}
                       }}
                     >
                       <FolderOpen size={18} className="text-slate-400" />
-                      <span>Drop files here or click to choose</span>
+                      <span>Drop a file or click to choose</span>
                       <input
                         type="file"
                         accept=".pdf,.txt,.md,.docx"
@@ -5189,7 +5329,7 @@ ${html}
                   {/* Output Type — placed right after Upload so the spec-specific fields
                       below already reflect the type the user just picked. */}
                   <div>
-                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><FileText size={14} /><span>Output Type</span></label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><FileText size={14} /><span>What do you want to write?</span></label>
                     <select
                       value={labOutputType}
                       onChange={e => setLabOutputType(e.target.value)}
@@ -5363,7 +5503,7 @@ ${html}
 
                   {/* Target pages */}
                   <div>
-                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Ruler size={14} /><span>Target Length</span></label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Ruler size={14} /><span>How long?</span></label>
                     <div className="mt-2 flex items-center gap-3">
                       <input
                         type="range" min={1} max={15} step={1}
@@ -5381,7 +5521,7 @@ ${html}
                   {/* Citation Format — sits directly above Output Language so the two
                       output-format controls live next to each other in one block. */}
                   <div>
-                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Quote size={14} /><span>Citation Format</span></label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Quote size={14} /><span>Citation style</span></label>
                     <select
                       value={labCitationFormat}
                       onChange={e => setLabCitationFormat(e.target.value)}
@@ -5400,7 +5540,7 @@ ${html}
 
                   {/* Output language */}
                   <div>
-                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Globe size={14} /><span>Output Language</span></label>
+                    <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Globe size={14} /><span>Writing language</span></label>
                     <select
                       value={labLanguage}
                       onChange={e => setLabLanguage(e.target.value)}
@@ -5435,7 +5575,7 @@ ${html}
                     >
                       <span className="flex items-center justify-center gap-1.5">
                         <Sparkles size={14} className={labGenerating ? "animate-spin" : ""} />
-                        {labGenerating ? "Composing…" : "Generate Academic Text"}
+                        {labGenerating ? "Writing…" : "Write it for me"}
                       </span>
                       <ProgressStrip active={labGenerating} />
                     </button>
@@ -5511,7 +5651,7 @@ ${html}
                       className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
                     >
                       <span>{labModelOpen ? "▾" : "▸"}</span>
-                      <span>Writing model: <span className="text-violet-400 font-semibold">{labModelLabel(labWritingModel)}</span></span>
+                      <span>Writer: <span className="text-violet-400 font-semibold">{labModelLabel(labWritingModel)}</span></span>
                     </button>
                     {labModelOpen && (
                       <div className="mt-2 flex flex-nowrap items-center gap-2 overflow-hidden">
@@ -5946,6 +6086,7 @@ ${html}
                 </div>
                 )}
               </div>
+              )}
             </aside>
           </div>
           </ErrorBoundary>
@@ -6481,9 +6622,16 @@ ${html}
         </div>
       )}
 
-      {/* ── User panel modals ─────────────────────────────────────────────────── */}
+      {/* ── User panel modals ───────────────────────────────────────────────────
+          z-[100] so this sits ABOVE the sign-in gate (z-[80]). Previously this
+          modal was z-[60], which meant a user clicking "Terms & Notices" from
+          the sign-in card opened the Terms modal BEHIND the card — completely
+          hidden. Signed-in users never noticed because the sign-in gate isn't
+          rendered for them, but anonymous visitors couldn't read the terms
+          before accepting. Placing user-panel modals above the sign-in gate
+          costs nothing while fixing the visibility bug. */}
       {userPanel && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm" onClick={() => setUserPanel(null)}>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/30 backdrop-blur-sm" onClick={() => setUserPanel(null)}>
           <div
             // translate="yes" explicitly opts the dialog copy in to Google
             // Translate so every label/paragraph inside profile/settings/
@@ -6725,6 +6873,12 @@ ${html}
                         <span>{(THEME_TRANSITION_MAX / 1000).toFixed(1)}s</span>
                       </div>
                     </div>
+
+                    {/* The Workspace question length cap is admin-controlled
+                        only — see the ClientConfigEditor in /admin. We do
+                        NOT expose it here because mis-sized user inputs
+                        degrade the retrieval pipeline for the whole
+                        product, not just the individual user. */}
                   </div>
                 </div>
               )}
@@ -7290,65 +7444,35 @@ ${html}
               )}
 
               {userPanel === "legal" && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {[
-                    {
-                      title: "Terms of Service",
-                      body: [
-                        "By using AcademiCats you agree to use the service for lawful academic research only.",
-                        "During Alpha, the service is provided AS-IS with no uptime, accuracy, or availability guarantees.",
-                        "We may throttle, pause, or discontinue features at any time while we iterate. Your account and data can be exported via Settings › Accounts at any point.",
-                      ],
-                    },
-                    {
-                      title: "AI Disclaimer",
-                      body: [
-                        "Results — including retrieved papers, ranking, Research Briefs, Evidence Chain reports, and Synthesis Lab outputs — are generated by large language models and may contain errors, omissions, or fabricated citations.",
-                        "Always verify any fact, citation, or statistic against the original source before relying on it in academic, clinical, legal, financial, or policy work.",
-                        "Nothing produced by AcademiCats is medical, legal, or professional advice.",
-                      ],
-                    },
-                    {
-                      title: "Privacy & Data Use",
-                      body: [
-                        "We store your email, saved conversations, search history, and generated outputs in our Supabase backend so your work persists across sessions.",
-                        "Search queries and the text of uploaded documents may be transmitted to third-party LLM providers (OpenAI, Anthropic) strictly to fulfil your requests.",
-                        "We do not sell your data. You can clear all cloud history at any time from the History panel.",
-                      ],
-                    },
-                    {
-                      title: "Acceptable Use",
-                      body: [
-                        "Do not use AcademiCats to generate plagiarised submissions, fabricate research data, or pass AI output off as your own unaided work where your institution prohibits it.",
-                        "Do not upload documents that you are not authorised to share, or content that violates applicable law (CSAM, hate speech, malware, etc.).",
-                        "Automated scraping or redistributing raw outputs at scale is not permitted during Alpha.",
-                      ],
-                    },
-                    {
-                      title: "Citation Integrity",
-                      body: [
-                        "AI may hallucinate references. Before citing any paper in your own work, open the source link and confirm the authors, year, and claim are accurate.",
-                        "Use the Citation Format control to match your institution's style, but still double-check every entry.",
-                      ],
-                    },
-                    {
-                      title: "Changes & Contact",
-                      body: [
-                        "These terms may change as the product evolves. Continued use after a change constitutes acceptance.",
-                        "Questions, complaints, or takedown requests: jy1529098645@gmail.com.",
-                      ],
-                    },
-                  ].map(section => (
-                    <div key={section.title} className="rounded-xl bg-slate-800/50 px-4 py-3">
-                      <p className="text-sm font-semibold text-slate-200 mb-1.5">{section.title}</p>
-                      <ul className="space-y-1.5">
-                        {section.body.map((line, i) => (
-                          <li key={i} className="text-[11px] leading-relaxed text-slate-400">{line}</li>
-                        ))}
-                      </ul>
-                    </div>
+                // Read-only view of the SAME 7-section doc shown at sign-in
+                // via TermsOfServiceGate. Single source of truth lives in
+                // `src/lib/tos-content.ts`; the only difference between
+                // here and the gate is that here there's no Accept button
+                // because the user has already accepted.
+                <div className="space-y-4">
+                  <p className="text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
+                    Version {TOS_VERSION} · {APP_VERSION}. You already accepted these terms to use the product;
+                    this page is here so you can re-read them at any time.
+                  </p>
+                  {TOS_SECTIONS.map(section => (
+                    <section key={section.title}>
+                      <h3
+                        className="text-sm font-bold mb-1"
+                        style={{ color: "var(--ats-fg-primary)" }}
+                      >
+                        {section.title}
+                      </h3>
+                      <p
+                        className="text-xs leading-relaxed"
+                        style={{ color: "var(--ats-fg-secondary)" }}
+                      >
+                        {section.body}
+                      </p>
+                    </section>
                   ))}
-                  <p className="md:col-span-2 text-[10px] text-slate-600 text-center">Last updated 2026-04-21 · Alpha build v1.7.0</p>
+                  <p className="text-[10px] text-center" style={{ color: "var(--ats-fg-muted)" }}>
+                    Contact: jy1529098645@gmail.com
+                  </p>
                 </div>
               )}
 
