@@ -20,7 +20,8 @@ import { useCallback, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   Upload, FolderOpen, FileText, Sparkles, Square, Bot,
-  ChevronDown, ChevronRight, ClipboardList, Check, Award, Gauge, AlertTriangle,
+  ChevronDown, ChevronRight, ClipboardList, Check, X as XIcon, Play,
+  Award, Gauge, AlertTriangle, Clock,
   ThumbsUp, Target, Globe, Lightbulb,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
@@ -448,6 +449,24 @@ export function PaperReviewPanel() {
             <Sparkles size={14} className={generating ? "animate-spin" : ""} />
             {generating ? "Reviewing…" : "Run peer review"}
           </span>
+          {/* Sliding indeterminate strip — same `progress-slide` keyframe
+              as ProgressStrip in page.tsx. Gives immediate "not frozen"
+              feedback the moment the button enters its generating state,
+              even before the first agent-log entry arrives. */}
+          {generating && (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute left-0 bottom-0 h-[2px] w-full overflow-hidden"
+            >
+              <span
+                className="block h-full w-1/3 rounded-full"
+                style={{
+                  backgroundColor: "var(--ats-fg-accent)",
+                  animation: "progress-slide 1.2s ease-in-out infinite",
+                }}
+              />
+            </span>
+          )}
         </button>
         {generating && (
           <button
@@ -463,17 +482,61 @@ export function PaperReviewPanel() {
         )}
       </div>
 
+      {/* ── Progress bar ─────────────────────────────────────────────────────
+          Two layers of reassurance while a review is in flight, matching the
+          pattern used in the Synthesis Lab so both tabs feel the same:
+
+          1. The sliding strip on the Run button gives instant "not frozen"
+             feedback the moment the user clicks — even before any agent
+             status arrives (the first LLM round trip can take 1-3 s).
+          2. This determinate bar fills as each agent completes. The total
+             is inferred from the running log rather than a hard-coded 10
+             because the pipeline emits a variable number of status lines
+             (five specialists + intake + cross-check + editor + scorecard +
+             final-review checkpoint). Counting DONE vs TOTAL-SO-FAR is the
+             same arithmetic Synthesis Lab uses and gives a smooth
+             left-to-right fill across the whole run. */}
+      {generating && agentLog.length > 0 && (() => {
+        const done = agentLog.filter(e => e.done || e.error).length;
+        const total = agentLog.length;
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        return (
+          <div className="space-y-0.5">
+            <div className="flex justify-between text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+              <span>{done}/{total} reviewers finished</span>
+              <span>{pct}%</span>
+            </div>
+            <div
+              className="h-1.5 w-full rounded-full overflow-hidden"
+              style={{ backgroundColor: "var(--ats-border-subtle)" }}
+            >
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${pct}%`, backgroundColor: "var(--ats-fg-accent)" }}
+              />
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Quota block ──────────────────────────────────────────────────── */}
       {quotaBlocked && (
         <div
           className="rounded-xl border px-3 py-3 text-xs"
           style={{
-            borderColor:     "rgba(245, 158, 11, 0.35)",
-            backgroundColor: "rgba(245, 158, 11, 0.08)",
-            color:           "#fbbf24",
+            borderColor:     "rgba(217, 119, 6, 0.35)",
+            backgroundColor: "rgba(217, 119, 6, 0.08)",
+            color:           "#d97706",
           }}
         >
-          <div className="font-semibold mb-1 flex items-center gap-1.5">⏳ Daily allowance reached</div>
+          {/* Lucide Clock instead of the hourglass emoji so the glyph
+              renders in a single tone + follows the banner's amber
+              colour instead of bringing its own emoji colour palette
+              (which clashed with every light theme). */}
+          <div className="font-semibold mb-1 flex items-center gap-1.5">
+            <Clock size={12} className="shrink-0" />
+            <span>Daily allowance reached</span>
+          </div>
           <p className="leading-relaxed opacity-90">{quotaBlocked.message}</p>
           <p className="mt-2 text-[11px] opacity-75">
             Paper Review shares a daily allowance with Synthesis Lab (both are heavy LLM flows).
@@ -516,17 +579,24 @@ export function PaperReviewPanel() {
                 <div className="text-xs animate-pulse" style={{ color: "var(--ats-fg-muted)" }}>Getting started…</div>
               )}
               {agentLog.map(entry => {
-                const icon =
-                  entry.done  ? "✓" :
-                  entry.error ? "✗" :
-                  <span className="inline-block animate-pulse">▶</span>;
+                // Lucide icons match the rest of the product's visual
+                // vocabulary — single-tone, sized to the text baseline,
+                // themed via `color`. The previous ✓ / ✗ / ▶ characters
+                // render in the system text font and looked inconsistent
+                // next to the lucide icons used everywhere else in the
+                // panel.
                 const iconColor =
                   entry.done  ? "#10b981" :
                   entry.error ? "#ef4444" :
                   "var(--ats-fg-accent)";
+                const iconNode = entry.done
+                  ? <Check size={12} strokeWidth={3} />
+                  : entry.error
+                    ? <XIcon size={12} strokeWidth={3} />
+                    : <Play size={10} fill="currentColor" className="animate-pulse" />;
                 return (
                   <div key={entry.name} className="flex items-start gap-2 py-0.5">
-                    <span className="shrink-0 text-xs mt-0.5" style={{ color: iconColor }}>{icon}</span>
+                    <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 mt-0.5" style={{ color: iconColor }}>{iconNode}</span>
                     <div className="min-w-0">
                       <span className="text-xs font-semibold" style={{ color: "var(--ats-fg-primary)" }}>{entry.name}</span>
                       <span className="text-xs ml-1.5 break-words" style={{ color: "var(--ats-fg-secondary)" }}>
@@ -581,11 +651,31 @@ export function PaperReviewPanel() {
             </button>
           </div>
           <div
-            className="rounded-xl border px-4 py-3 prose prose-invert prose-sm max-w-none prose-p:leading-7 prose-li:my-0.5 prose-ul:my-2 prose-h1:text-base prose-h2:text-sm prose-h3:text-sm break-words"
+            // `prose-invert` was forcing dark-mode (light) text everywhere
+            // inside the review letter — on any day theme the letter
+            // rendered as near-white on a light card, completely unreadable.
+            // Fix: drop `prose-invert` and override each Tailwind Typography
+            // CSS var with an --ats-* token, so the prose colours follow
+            // whichever theme is active. Uses `[x] as any` because these
+            // CSS custom properties aren't in the React style typings.
+            className="rounded-xl border px-4 py-3 prose prose-sm max-w-none prose-p:leading-7 prose-li:my-0.5 prose-ul:my-2 prose-h1:text-base prose-h2:text-sm prose-h3:text-sm break-words"
             style={{
               borderColor:     "var(--ats-border-subtle)",
               backgroundColor: "var(--ats-bg-input)",
               color:           "var(--ats-fg-secondary)",
+              ...({
+                "--tw-prose-body":       "var(--ats-fg-secondary)",
+                "--tw-prose-headings":   "var(--ats-fg-primary)",
+                "--tw-prose-lead":       "var(--ats-fg-secondary)",
+                "--tw-prose-bold":       "var(--ats-fg-primary)",
+                "--tw-prose-links":      "var(--ats-fg-accent)",
+                "--tw-prose-bullets":    "var(--ats-fg-muted)",
+                "--tw-prose-counters":   "var(--ats-fg-muted)",
+                "--tw-prose-quotes":     "var(--ats-fg-secondary)",
+                "--tw-prose-code":       "var(--ats-fg-primary)",
+                "--tw-prose-hr":         "var(--ats-border-subtle)",
+                "--tw-prose-captions":   "var(--ats-fg-muted)",
+              } as Record<string, string>),
             }}
           >
             <ReactMarkdown>{result}</ReactMarkdown>
