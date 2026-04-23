@@ -1021,28 +1021,64 @@ export default function HomePage() {
   // ── Staged entry ───────────────────────────────────────────────────────────
   // "blank"   — landing: only the textarea + placeholder + an Enter-to-continue
   //             hint are visible. No action buttons, no announcement banner.
-  // "explore" — user pressed Enter on a brief query (too thin to search
-  //             directly). Only the Explore Angles + Search Controls buttons
-  //             appear, steering them toward refining the question first.
-  // "full"    — user pressed Enter on a detailed query OR Explore Angles has
-  //             returned directions. The full action bar and announcement
-  //             banner become available.
+  // "explore" — AI judged the input too brief to search directly. Only Search
+  //             Controls + Explore Angles are shown.
+  // "full"    — AI judged the input detailed enough (or balanced). Full action
+  //             bar with Quick / Curated + Start is unlocked alongside Explore
+  //             Angles; either route can be taken. Also the state after
+  //             Explore Angles returns directions.
   const [introStage, setIntroStage] = useState<"blank" | "explore" | "full">("blank");
 
-  // Heuristic for "this query is rich enough to search directly" vs. "this
-  // is a keyword / phrase that will need angle-exploration first". Two
-  // conditions, both must hold: at least 6 whitespace-separated words AND
-  // at least 30 characters after trimming. Tuned so:
-  //   "NLP"                                                  → brief
-  //   "edge computing"                                       → brief
-  //   "sentiment analysis on Chinese tweets"                 → brief (5 words)
-  //   "how does sentiment analysis handle low-resource NLP"  → detailed
-  //   "effect of social media on teenage mental health 2020" → detailed
-  const isDetailedEnough = useCallback((text: string): boolean => {
-    const trimmed = (text || "").trim();
-    if (trimmed.length < 30) return false;
-    const words = trimmed.split(/\s+/).filter(Boolean);
-    return words.length >= 6;
+  // AI-driven triage state. `/api/workspace/assess-input` returns a verdict
+  // (brief / balanced / detailed) plus a short humanised message rendered in
+  // the action-bar middle space so the user sees WHY we're steering them
+  // toward one path or the other. While the call is in flight `assessing`
+  // is true and the message slot shows a "Let me read that…" placeholder
+  // so the wait feels like the AI is thinking, not the app hanging.
+  type AssessVerdict = "brief" | "balanced" | "detailed";
+  const [assessing,         setAssessing]         = useState(false);
+  const [assessmentMessage, setAssessmentMessage] = useState<string>("");
+  const [assessmentVerdict, setAssessmentVerdict] = useState<AssessVerdict | null>(null);
+  const assessAbortRef = useRef<AbortController | null>(null);
+
+  const runAssessment = useCallback(async (text: string): Promise<void> => {
+    // Abort any in-flight assessment — if the user presses Enter twice
+    // quickly, the second press should override the first rather than
+    // race with it.
+    assessAbortRef.current?.abort();
+    const ac = new AbortController();
+    assessAbortRef.current = ac;
+    setAssessing(true);
+    setAssessmentMessage("");
+    setAssessmentVerdict(null);
+    try {
+      const res = await fetchWithApiFallback("/api/workspace/assess-input", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text }),
+        signal:  ac.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { verdict: AssessVerdict; message: string };
+      setAssessmentVerdict(data.verdict);
+      setAssessmentMessage(data.message || "");
+      // Brief → only Explore Angles. Balanced + Detailed → full action bar
+      // (Explore Angles is still clickable in full too, in case the user
+      // wants to refine even on a rich question).
+      setIntroStage(data.verdict === "brief" ? "explore" : "full");
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
+      // Network failure — fall back to a length heuristic so the user
+      // isn't stuck on the landing indefinitely. Mild message too.
+      const trimmed = text.trim();
+      const words   = trimmed.split(/\s+/).filter(Boolean);
+      const deep    = trimmed.length >= 30 && words.length >= 6;
+      setAssessmentVerdict(deep ? "detailed" : "brief");
+      setAssessmentMessage(deep ? "Looks specific — ready when you are." : "Pretty short — I'll help find more angles.");
+      setIntroStage(deep ? "full" : "explore");
+    } finally {
+      setAssessing(false);
+    }
   }, []);
 
   // Adaptive placeholder font size is handled via CSS container-query units
@@ -4097,25 +4133,27 @@ ${html}
                     // that withholds the trailing onChange.
                     setQuery((e.target as HTMLTextAreaElement).value);
                   }}
-                  // Enter progresses through the intro stages:
-                  //   blank + detailed input    → "full" directly (show search modes)
-                  //   blank + brief  input      → "explore" (show Explore Angles only)
-                  //   explore / full            → trigger the normal handleSearch
-                  // Shift+Enter still inserts a newline so multi-line queries
-                  // remain possible. IME composition Enter is ignored so
-                  // Chinese/Japanese candidate confirmations don't submit.
+                  // Enter progresses through the intro stages. On first
+                  // submit from `blank`, we kick off an AI triage call that
+                  // decides whether the input is rich enough to search
+                  // directly or should go through Explore Angles first. The
+                  // verdict picks the stage; the message renders in the
+                  // action bar's middle slot. Subsequent Enter presses in
+                  // "full" stage trigger the normal handleSearch.
+                  //
+                  // Shift+Enter still inserts a newline; IME composition
+                  // Enter is ignored so CJK candidate confirms don't submit.
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
                       e.preventDefault();
                       const trimmed = query.trim();
                       if (!trimmed || isSubmitting) return;
                       if (introStage === "blank") {
-                        setIntroStage(isDetailedEnough(trimmed) ? "full" : "explore");
+                        void runAssessment(trimmed);
                         return;
                       }
-                      // Already in "full" stage — run the normal search.
-                      // (In "explore" stage we leave Enter a no-op for search;
-                      // the user clicks Explore Angles explicitly there.)
+                      // "explore" leaves Enter a no-op for search (user clicks
+                      // Explore Angles explicitly there). "full" runs search.
                       if (introStage === "full") void handleSearch();
                     }
                   }}
@@ -4187,10 +4225,42 @@ ${html}
                   <ChevronDown size={12} className={`shrink-0 ${settingsOpen ? "rotate-180 transition-transform duration-200" : "transition-transform duration-200"}`} />
                 </button>
 
-                {/* In "explore" stage we centre the Explore Angles button
-                    between Search Controls and the end of the row; in
-                    "full" the right-aligned group takes over. `flex-1`
-                    pushes everything that follows to the right edge. */}
+                {/* AI assessment message — sits in the middle of the action
+                    bar, between Search Controls (left) and the action
+                    buttons (right). While the nano model is deliberating
+                    we show a humanised "let me read that…" placeholder so
+                    the wait reads as thinking rather than latency. Once
+                    the verdict lands, the short message explaining WHY we
+                    picked this action set appears and stays until the
+                    user presses Enter again with a different query.
+                    `flex-1 min-w-0` absorbs the gap and naturally replaces
+                    the earlier `ml-auto` push on the right group. */}
+                {(assessing || assessmentMessage) && (
+                  <div className="flex-1 min-w-0 flex items-center justify-center px-3 text-center">
+                    {assessing ? (
+                      <span
+                        className="inline-flex items-center gap-1.5 text-[11px] italic animate-pulse"
+                        style={{ color: "var(--ats-fg-muted)" }}
+                      >
+                        <span
+                          className="inline-block h-1.5 w-1.5 rounded-full"
+                          style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                        />
+                        Let me read that…
+                      </span>
+                    ) : (
+                      <span
+                        className="stage-reveal inline-flex items-center gap-1.5 text-[11px] italic leading-snug truncate"
+                        style={{ color: "var(--ats-fg-secondary)" }}
+                        title={assessmentMessage}
+                      >
+                        <Sparkles size={10} style={{ color: "var(--ats-fg-accent)" }} />
+                        <span className="truncate">{assessmentMessage}</span>
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
                   <button
                     onClick={() => {
