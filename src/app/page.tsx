@@ -4701,6 +4701,13 @@ ${html}
 
             {/* Planner thinking is rendered inline under the Query box above — no separate panel */}
 
+            {/* Retrieved Papers is hidden on the clean landing and only
+                mounts once a search has actually started. `hasRunSearch`
+                stays true for the rest of the session, so subsequent runs
+                keep the list visible between searches. `firstInteractionDone`
+                is retained inside the className purely so the rise animation
+                keyframe fires on first reveal. */}
+            {(hasRunSearch || isSubmitting || displayedPapers.length > 0) && (
             <div className={`mt-6 border-t border-slate-800 pt-6 ${firstInteractionDone ? "retrieved-papers-rise" : "hidden"}`}>
               <div className="mb-3 flex items-center gap-3">
                 <span className="flex items-center gap-2 text-xl font-black"><BookOpen size={18} /><span>Retrieved Papers</span></span>
@@ -5217,6 +5224,7 @@ ${html}
                 <div className="rounded-2xl bg-slate-900/30 p-4 text-sm text-slate-500">No papers returned yet.</div>
               )}
             </div>
+            )}
             </div>
           </section>
           </ErrorBoundary>
