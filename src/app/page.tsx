@@ -1018,6 +1018,32 @@ export default function HomePage() {
   // that writes ta.style.height is deferred to just after isSubmitting so
   // the effect's dep array doesn't hit a TDZ error.
   const [hasRunSearch, setHasRunSearch] = useState(false);
+  // ── Staged entry ───────────────────────────────────────────────────────────
+  // "blank"   — landing: only the textarea + placeholder + an Enter-to-continue
+  //             hint are visible. No action buttons, no announcement banner.
+  // "explore" — user pressed Enter on a brief query (too thin to search
+  //             directly). Only the Explore Angles + Search Controls buttons
+  //             appear, steering them toward refining the question first.
+  // "full"    — user pressed Enter on a detailed query OR Explore Angles has
+  //             returned directions. The full action bar and announcement
+  //             banner become available.
+  const [introStage, setIntroStage] = useState<"blank" | "explore" | "full">("blank");
+
+  // Heuristic for "this query is rich enough to search directly" vs. "this
+  // is a keyword / phrase that will need angle-exploration first". Two
+  // conditions, both must hold: at least 6 whitespace-separated words AND
+  // at least 30 characters after trimming. Tuned so:
+  //   "NLP"                                                  → brief
+  //   "edge computing"                                       → brief
+  //   "sentiment analysis on Chinese tweets"                 → brief (5 words)
+  //   "how does sentiment analysis handle low-resource NLP"  → detailed
+  //   "effect of social media on teenage mental health 2020" → detailed
+  const isDetailedEnough = useCallback((text: string): boolean => {
+    const trimmed = (text || "").trim();
+    if (trimmed.length < 30) return false;
+    const words = trimmed.split(/\s+/).filter(Boolean);
+    return words.length >= 6;
+  }, []);
 
   // Adaptive placeholder font size is handled via CSS container-query units
   // (`cqh` / `cqw`) on the wrapper below — no JS observer needed. The wrapper
@@ -1155,7 +1181,10 @@ export default function HomePage() {
   const [analyticsVisible, setAnalyticsVisible] = useState(false);
   const [leftVisible, setLeftVisible] = useState(false);
   const [gridLeftCollapsed, setGridLeftCollapsed] = useState(true);
-  const [firstInteractionDone, setFirstInteractionDone] = useState(false);
+  // Kept as a compatibility shim: one downstream component (the retrieved-
+  // papers section) gates its rise animation on this flag. Now that there
+  // is no "click anywhere to begin" step, we just land in the "done" state.
+  const [firstInteractionDone] = useState(true);
 
   // ── Left panel tabs: Research Brief | Analytics ────────────────────────────
   const [leftTab, setLeftTab] = useState<"brief" | "analytics">("brief");
@@ -2708,6 +2737,10 @@ ${html}
     const trimmed = query.trim();
     if (!trimmed) return;
     if (isUnderstanding) { cancelUnderstand(); return; }
+    // If the user clicked Explore Angles directly from the "blank" stage
+    // (e.g. before pressing Enter), move them to "explore" so the action
+    // row reflects the new state while Angles is running.
+    if (introStage === "blank") setIntroStage("explore");
     setUiError("");
     setUnderstandStatus("Searching preview results\u2026");
     setIsUnderstanding(true);
@@ -2720,6 +2753,9 @@ ${html}
     const applyResult = (data: QueryDirectionsResponse) => {
       setDirectionData(data);
       setUnderstandOpen(true);
+      // Angles are now available — unlock the full action bar so the
+      // user can pick Quick or Curated search from the refined question.
+      setIntroStage("full");
       // Per spec: default to NO selection — the user opts in by clicking. The
       // recommended_direction / recommended_sub are still highlighted visually
       // (star icon on the recommended card) but not pre-chosen.
@@ -3353,15 +3389,10 @@ ${html}
     }
   }
 
-  // First-click expand: while the app is still in its collapsed idle state
-  // the user can click anywhere to "enter" — the overlay swallows the click
-  // so no accidental button presses fire. The panels themselves DO NOT open
-  // here; they now wait until the user actually kicks off a search. Users
-  // typing out a long question first want a clean, focused workspace; the
-  // side panels belong after there's results to put in them.
-  const completeFirstInteraction = useCallback(() => {
-    setFirstInteractionDone(true);
-  }, []);
+  // `completeFirstInteraction` / `setFirstInteractionDone` were retired
+  // alongside the "click anywhere to begin" overlay — users land directly
+  // on the workspace now. The `firstInteractionDone` constant stays so the
+  // downstream rise animation doesn't need its own gate rewrite.
 
   return (
     <TermsOfServiceGate>
@@ -3381,31 +3412,10 @@ ${html}
         ["--ats-theme-transition-ms" as any]: `${themeTransitionMs}ms`,
       }}
     >
-      {/* First-click click-catcher: swallows every initial click and turns it
-          into "expand both side panels". Mouse-down is captured so the click
-          never reaches the underlying control — no search, no focus change, no
-          button activation. The overlay is fully transparent (no visual chrome)
-          and pointer-cursor'd so it still feels like the app is interactive.
-          A faint blinking bottom-right hint tells the user to tap anywhere. */}
-      {!firstInteractionDone && (
-        <div
-          className="fixed inset-0 z-[70] cursor-pointer"
-          onMouseDownCapture={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            completeFirstInteraction();
-          }}
-          onClickCapture={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-          }}
-          aria-hidden
-        >
-          <span className="click-hint-blink pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 text-xs font-medium tracking-wide text-[var(--ats-fg-accent)] select-none whitespace-nowrap">
-            Click anywhere to begin
-          </span>
-        </div>
-      )}
+      {/* "Click anywhere to begin" overlay was removed — users now land
+          directly on an active workspace with the textarea focused and
+          intro-stage reveal logic (see `introStage` state) driving which
+          chrome appears when. No artificial click wall before first use. */}
 
       {/* ── Login-required gate ────────────────────────────────────────────
           Once auth is checked and the user is NOT signed in, a blocking
@@ -3580,31 +3590,29 @@ ${html}
                 overflow past the mascot's right edge. */}
             <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.7.0-Alpha</span></p>
           </div>
-          {/* Announcement banner – fills remaining width; extra left
-              padding gives the mascot image visual breathing room. The
-              wrapper is `relative` so the Day/Night toggle can pin to
-              the banner's top-right corner and read as part of the
-              banner chrome rather than a floating viewport button. */}
+          {/* Announcement banner – hidden during the "blank" landing stage
+              so new arrivals see only the logo + workspace. Reappears once
+              the user has moved past the initial decision point (pressing
+              Enter or clicking Explore Angles). Flex-1 / pl-4 still apply
+              so the top row layout stays unchanged in the full stage. */}
           <div className="relative min-w-0 flex-1 pl-4">
-            {/* Theme toggle is now rendered INSIDE AnnouncementBanner
-                at the right end of the card, so it visually belongs to
-                the banner chrome. The old external floating button has
-                been removed. */}
-            <AnnouncementBanner
-              collapsed={announcementCollapsed}
-              onCollapse={() => setAnnouncementCollapsed(true)}
-              onExpand={() => setAnnouncementCollapsed(false)}
-              announcements={announcementsFeed.items}
-              msgInput={msgInput}
-              setMsgInput={setMsgInput}
-              msgAnonymous={msgAnonymous}
-              setMsgAnonymous={setMsgAnonymous}
-              msgSending={msgSending}
-              msgSentOk={msgSentOk}
-              onSend={handleSendMessage}
-              themeMode={themeMode}
-              onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
-            />
+            {introStage !== "blank" && (
+              <AnnouncementBanner
+                collapsed={announcementCollapsed}
+                onCollapse={() => setAnnouncementCollapsed(true)}
+                onExpand={() => setAnnouncementCollapsed(false)}
+                announcements={announcementsFeed.items}
+                msgInput={msgInput}
+                setMsgInput={setMsgInput}
+                msgAnonymous={msgAnonymous}
+                setMsgAnonymous={setMsgAnonymous}
+                msgSending={msgSending}
+                msgSentOk={msgSentOk}
+                onSend={handleSendMessage}
+                themeMode={themeMode}
+                onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
+              />
+            )}
           </div>
         </div>
 
@@ -4087,14 +4095,26 @@ ${html}
                     // that withholds the trailing onChange.
                     setQuery((e.target as HTMLTextAreaElement).value);
                   }}
-                  // Enter submits the search (same as clicking Send). Shift+Enter
-                  // still inserts a newline so multi-line queries remain possible.
-                  // Guard against IME composition: pressing Enter to confirm a
-                  // Chinese/Japanese candidate must NOT trigger submit.
+                  // Enter progresses through the intro stages:
+                  //   blank + detailed input    → "full" directly (show search modes)
+                  //   blank + brief  input      → "explore" (show Explore Angles only)
+                  //   explore / full            → trigger the normal handleSearch
+                  // Shift+Enter still inserts a newline so multi-line queries
+                  // remain possible. IME composition Enter is ignored so
+                  // Chinese/Japanese candidate confirmations don't submit.
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
                       e.preventDefault();
-                      if (query.trim() && !isSubmitting) void handleSearch();
+                      const trimmed = query.trim();
+                      if (!trimmed || isSubmitting) return;
+                      if (introStage === "blank") {
+                        setIntroStage(isDetailedEnough(trimmed) ? "full" : "explore");
+                        return;
+                      }
+                      // Already in "full" stage — run the normal search.
+                      // (In "explore" stage we leave Enter a no-op for search;
+                      // the user clicks Explore Angles explicitly there.)
+                      if (introStage === "full") void handleSearch();
                     }
                   }}
                   onFocus={() => setTaFocused(true)}
@@ -4144,10 +4164,18 @@ ${html}
                   </div>
                 )}
               </div>
-              {/* Single-line responsive row: every control gets `min-w-0` + labels truncate,
-                  so compressing the panel shrinks buttons instead of wrapping them downward. */}
+
+              {/* ── Staged action bar ──────────────────────────────────────
+                  Visible after the user has chosen a direction from the
+                  blank landing. Which controls appear depends on
+                  introStage:
+                    explore → Search Controls + Explore Angles only
+                    full    → Search Controls + Explore Angles + Quick /
+                              Curated toggle + Start button
+                  Everything uses the same layout / classes so the row
+                  visually grows as the stage unlocks. */}
+              {introStage !== "blank" && (
               <div className="flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden">
-                {/* Search Controls */}
                 <button
                   onClick={() => setSettingsOpen(o => !o)}
                   className="shrink min-w-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm font-semibold text-slate-200 hover:border-blue-500/40 transition-colors"
@@ -4157,18 +4185,11 @@ ${html}
                   <ChevronDown size={12} className={`shrink-0 ${settingsOpen ? "rotate-180 transition-transform duration-200" : "transition-transform duration-200"}`} />
                 </button>
 
-                {/* Textarea hint — first thing to collapse; fully hidden if still too tight.
-                    Retinted to the theme accent so it reads as a gentle call-to-action
-                    rather than muted help text. */}
-                <span className="hidden md:block flex-1 min-w-0 truncate text-[11px] font-semibold leading-snug text-[var(--ats-fg-accent)]">
-                  Drop a research topic, a question, or a rough idea.
-                </span>
-
-                {/* Right-aligned group — no wrapping: each button collapses width /
-                    truncates its label before the row breaks into multiple lines. */}
+                {/* In "explore" stage we centre the Explore Angles button
+                    between Search Controls and the end of the row; in
+                    "full" the right-aligned group takes over. `flex-1`
+                    pushes everything that follows to the right edge. */}
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
-                  {/* Query Understanding — click again during analysis to cancel.
-                      min-w locks the width so the label toggle (Understand ↔ Cancel) doesn't resize the button. */}
                   <button
                     onClick={() => {
                       if (isUnderstanding) { cancelUnderstand(); return; }
@@ -4184,58 +4205,92 @@ ${html}
                       : <><Search size={14} className="shrink-0" /><span className="truncate">Explore Angles</span><ChevronRight size={12} className="shrink-0 hidden sm:inline-block" /></>}
                   </button>
 
-                  {/* Fast / Curated mode toggle */}
-                  <div className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
-                    <button
-                      type="button"
-                      onClick={() => setFastMode(true)}
-                      disabled={isSubmitting}
-                      aria-pressed={fastMode}
-                      className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
-                    ><Zap size={14} className="shrink-0" /><span className="truncate">Quick Search</span></button>
-                    <button
-                      type="button"
-                      onClick={() => setFastMode(false)}
-                      disabled={isSubmitting}
-                      aria-pressed={!fastMode}
-                      className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${!fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
-                    ><FlaskConical size={14} className="shrink-0" /><span className="truncate">Curated Analysis</span></button>
-                  </div>
+                  {introStage === "full" && (
+                    <>
+                      {/* Fast / Curated mode toggle */}
+                      <div className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
+                        <button
+                          type="button"
+                          onClick={() => setFastMode(true)}
+                          disabled={isSubmitting}
+                          aria-pressed={fastMode}
+                          className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
+                        ><Zap size={14} className="shrink-0" /><span className="truncate">Quick Search</span></button>
+                        <button
+                          type="button"
+                          onClick={() => setFastMode(false)}
+                          disabled={isSubmitting}
+                          aria-pressed={!fastMode}
+                          className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${!fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
+                        ><FlaskConical size={14} className="shrink-0" /><span className="truncate">Curated Analysis</span></button>
+                      </div>
 
-                  {/* Start / Stop — compact circular action */}
-                  {isSubmitting ? (
-                    <button
-                      onClick={handleStop}
-                      title="Stop search"
-                      aria-label="Stop search"
-                      className="flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-                    >
-                      <Square size={13} fill="currentColor" />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => void handleSearch()}
-                      disabled={!query.trim()}
-                      title="Start search"
-                      aria-label="Start search"
-                      className="flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <ArrowRight size={15} />
-                    </button>
+                      {/* Start / Stop — compact circular action */}
+                      {isSubmitting ? (
+                        <button
+                          onClick={handleStop}
+                          title="Stop search"
+                          aria-label="Stop search"
+                          className="flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                        >
+                          <Square size={13} fill="currentColor" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => void handleSearch()}
+                          disabled={!query.trim()}
+                          title="Start search"
+                          aria-label="Start search"
+                          className="flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <ArrowRight size={15} />
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
+              )}
             </div>
 
-            {/* Mode description — sits directly under the Start button (right group),
-                text centred within its own column so it visually lines up under Start. */}
-            <div className="mt-2 flex justify-end pr-1">
-              <p className="max-w-[22rem] text-center text-[11px] leading-snug text-slate-500">
-                {fastMode
-                  ? "Seconds-fast results with smart ranking. Great for rapid literature scanning."
-                  : "Deep AI curation with adversarial screening and 6-agent analysis. Best for thorough research."}
-              </p>
-            </div>
+            {/* ── Centered intro hint for the "blank" landing stage ─────────
+                Replaces the inline in-card hint. Sits BELOW the textarea,
+                centred, and includes a visual cue that Enter submits. Once
+                the user has chosen a direction (explore or full), this is
+                replaced by the usual mode description below. */}
+            {introStage === "blank" && (
+              <div className="mt-3 flex justify-center">
+                <p
+                  className="inline-flex items-center gap-2 text-xs leading-snug"
+                  style={{ color: "var(--ats-fg-muted)" }}
+                >
+                  <span>Type any key words, topic or theme you want to explore</span>
+                  <span
+                    aria-hidden
+                    className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide animate-pulse"
+                    style={{
+                      borderColor:     "var(--ats-border-accent)",
+                      backgroundColor: "var(--ats-bg-accent-soft)",
+                      color:           "var(--ats-fg-accent)",
+                    }}
+                  >
+                    Press <kbd className="font-mono">⏎ Enter</kbd>
+                  </span>
+                </p>
+              </div>
+            )}
+
+            {/* Mode description — only relevant once the Quick / Curated
+                toggle is visible (full stage). */}
+            {introStage === "full" && (
+              <div className="mt-2 flex justify-end pr-1">
+                <p className="max-w-[22rem] text-center text-[11px] leading-snug text-slate-500">
+                  {fastMode
+                    ? "Seconds-fast results with smart ranking. Great for rapid literature scanning."
+                    : "Deep AI curation with adversarial screening and 6-agent analysis. Best for thorough research."}
+                </p>
+              </div>
+            )}
 
             {/* Selected search query — shown below the card once a direction is chosen */}
             {selectedSearchQuery && (
