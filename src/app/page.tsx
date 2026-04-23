@@ -1047,12 +1047,13 @@ export default function HomePage() {
   const [assessmentVerdict, setAssessmentVerdict] = useState<AssessVerdict | null>(null);
   const assessAbortRef       = useRef<AbortController | null>(null);
   const lastAssessedTextRef  = useRef<string>("");
-  // Instant typing reactions — a pool of tiny cat-sprite lines shown the
-  // MOMENT the textarea changes, so the sprite feels like it's watching
-  // the user in real time instead of silent-then-verdict. The debounced
-  // AI call still fires at 900 ms and its message takes over once it
-  // lands. Cycles deterministically through the pool so consecutive
-  // edits give different micro-reactions rather than the same one.
+  // Instant typing reactions — a pool of 30+ tiny cat-sprite lines. These
+  // fire after a short "thinking" pause so the user feels the sprite is
+  // always mulling over what they just typed rather than shouting out
+  // instant canned words. The debounced AI verdict (at 900 ms) then takes
+  // over the slot with the real assessment. Rotates deterministically
+  // through the pool so consecutive edits get different micro-lines.
+  // No colored emoji — kaomoji only.
   const INSTANT_REACTIONS: string[] = [
     "ooh watching~",
     "mm ok ok",
@@ -1061,7 +1062,7 @@ export default function HomePage() {
     "let me see~",
     "mm mm",
     "ooh tell me more",
-    "paying attention ✨",
+    "paying attention",
     "peeking at your words (˙ᵕ˙)",
     "curious curious",
     "go on~",
@@ -1069,6 +1070,27 @@ export default function HomePage() {
     "watching you type (◕‿◕)",
     "oh neat",
     "mm carry on",
+    "ooh something new",
+    "alright, following along",
+    "hmm i see~",
+    "yay, writing something?",
+    "paws ready (´･ω･`)",
+    "oh interesting angle",
+    "mm thoughtful",
+    "ok i'm here",
+    "listening listening",
+    "got my ears up",
+    "ooh yes go~",
+    "mm reading along",
+    "oh cool direction",
+    "alright alright",
+    "keeping up (◡‿◡)",
+    "i'm with you",
+    "ooh ok ok",
+    "watching quietly",
+    "hmm what else?",
+    "go on, don't stop",
+    "mm taking notes",
   ];
   const [instantReaction, setInstantReaction] = useState<string>("");
   const instantTickRef = useRef<number>(0);
@@ -1136,22 +1158,26 @@ export default function HomePage() {
   // close over those states without tripping a TDZ on first render.
   const [spriteChoiceMade, setSpriteChoiceMade] = useState(false);
 
-  // Instant typing reaction — fires on EVERY query change (short debounce
-  // of 120 ms to coalesce bursts of keystrokes into one reaction change).
-  // Picks the next INSTANT_REACTIONS line in rotation so the sprite feels
-  // like it's cheering the user on while they type. This is LOCAL only,
-  // no AI call — the debounced assessment at 900 ms (below) produces the
-  // real verdict + message that overrides this micro-feedback.
+  // Instant typing reaction — fires after a short "thinking" pause
+  // (400 ms) so the user sees the sprite's dot pulse in thought before
+  // the line appears, creating a continuous "think then react" rhythm
+  // instead of a robotic instant echo. The line stays until either the
+  // user edits again (new cycle) or the 900 ms debounced AI verdict
+  // arrives and takes over. Pool rotates deterministically.
   useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < 1) {
       setInstantReaction("");
       return;
     }
+    // Clear the currently-shown reaction IMMEDIATELY on keystroke so the
+    // sprite's dot enters "thinking" mode visibly (no stale line hanging
+    // next to a thinking dot — that would look dumb).
+    setInstantReaction("");
     const id = window.setTimeout(() => {
       instantTickRef.current = (instantTickRef.current + 1) % INSTANT_REACTIONS.length;
       setInstantReaction(INSTANT_REACTIONS[instantTickRef.current]);
-    }, 120);
+    }, 400);
     return () => window.clearTimeout(id);
     // Only depend on query — the reactions are self-contained strings.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4635,16 +4661,21 @@ ${html}
               // Display logic for the sprite voice slot:
               //   1. If we have a current AI verdict message AND the query
               //      hasn't drifted since it was assessed, show it.
-              //   2. Else if the user is actively typing (query differs from
-              //      last assessed), show the INSTANT reaction — keeps the
-              //      sprite "alive" while the 900 ms debounce winds up.
-              //   3. Else if the assessment is actively running and we have
-              //      nothing to show yet, fall back to a "thinking" pulse.
+              //   2. Else if the instant reaction has been chosen after the
+              //      400 ms thinking pause, show that.
+              //   3. Else if the user has SOMETHING typed but no message
+              //      yet, show a pulsing "thinking" dot — covers both the
+              //      400 ms instant-reveal window and the 900 ms AI wait,
+              //      so there is no moment where the sprite is silent while
+              //      the user is editing.
               //   4. Else if the box is empty, show the default invite.
               const queryHasDrifted = query.trim() !== lastAssessedTextRef.current && lastAssessedTextRef.current.length > 0;
               const freshMessage    = !!assessmentMessage && !queryHasDrifted;
               const activeInstant   = !freshMessage && !!instantReaction && query.trim().length > 0;
-              const showThinking    = !freshMessage && !activeInstant && assessing;
+              // "Thinking" window covers both the pre-instant pause AND the
+              // AI debounce wait — whenever the user has typed something but
+              // no voice line is ready yet, the dot pulses.
+              const showThinking    = !freshMessage && !activeInstant && query.trim().length > 0;
               const showMessage     = freshMessage || activeInstant;
               const currentMessage  = freshMessage ? assessmentMessage : instantReaction;
               const showDefault     = !showThinking && !showMessage && query.trim().length === 0;
@@ -4691,7 +4722,13 @@ ${html}
                         className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
                         style={{ color: "var(--ats-fg-secondary)" }}
                       >
-                        <Sparkles size={14} style={{ color: "var(--ats-fg-accent)" }} />
+                        {/* Idle dot — the sprite is waiting for the user's
+                            confirmation answer, not actively thinking. */}
+                        <span
+                          className="sprite-dot-idle inline-block h-2 w-2 rounded-full shrink-0"
+                          style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                          aria-hidden
+                        />
                         <span>{newContentPrompt}</span>
                       </p>
                       <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
@@ -4726,24 +4763,26 @@ ${html}
                       Sparkles icon + thinking dot scaled to match. */}
                   {showThinking && (
                     <p
-                      className="inline-flex items-center gap-2 text-sm italic animate-pulse"
+                      className="inline-flex items-center gap-2 text-sm italic"
                       style={{ color: "var(--ats-fg-muted)" }}
                     >
                       <span
-                        className="inline-block h-2 w-2 rounded-full"
+                        className="sprite-dot-think inline-block h-2 w-2 rounded-full shrink-0"
                         style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                        aria-hidden
                       />
                       thinking…
                     </p>
                   )}
                   {showFindingAngles && !showMessage && (
                     <p
-                      className="inline-flex items-center gap-2 text-sm italic animate-pulse"
+                      className="inline-flex items-center gap-2 text-sm italic"
                       style={{ color: "var(--ats-fg-muted)" }}
                     >
                       <span
-                        className="inline-block h-2 w-2 rounded-full"
+                        className="sprite-dot-think inline-block h-2 w-2 rounded-full shrink-0"
                         style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                        aria-hidden
                       />
                       looking for angles…
                     </p>
@@ -4758,7 +4797,17 @@ ${html}
                       className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
                       style={{ color: "var(--ats-fg-secondary)" }}
                     >
-                      <Sparkles size={14} style={{ color: "var(--ats-fg-accent)" }} />
+                      {/* Sprite dot — THINK tempo while waiting on either
+                          the instant reaction's reveal or the AI verdict;
+                          IDLE tempo once a real AI verdict is settled. A
+                          subtle breathing-versus-pulsing cue lets users
+                          feel "sprite is working" vs "sprite is resting"
+                          without ever going fully still. */}
+                      <span
+                        className={`${(activeInstant || assessing) ? "sprite-dot-think" : "sprite-dot-idle"} inline-block h-2 w-2 rounded-full shrink-0`}
+                        style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                        aria-hidden
+                      />
                       <span>{currentMessage}</span>
                       {introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
                         <span

@@ -179,6 +179,28 @@ body {
   .stage-reveal { animation: none; }
 }
 
+/* Sprite dot — two modes:
+   - `.sprite-dot-think` : fast two-beat pulse, used while the sprite is
+     actively chewing on a keystroke (pre-reveal) OR the debounced AI
+     call is in flight. Reads as "thinking hard".
+   - `.sprite-dot-idle`  : slow breathing, used once a message is settled.
+     Reads as "still here, quietly listening".
+   Both scale opacity + size so the cue works even for colour-blind users.
+   Reduced-motion opts out of both and leaves a static dot.                 */
+@keyframes spriteDotThink {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1.15); }
+}
+@keyframes spriteDotIdle {
+  0%, 100% { opacity: 0.7;  transform: scale(1);    }
+  50%      { opacity: 1;    transform: scale(1.08); }
+}
+.sprite-dot-think { animation: spriteDotThink 0.9s ease-in-out infinite; }
+.sprite-dot-idle  { animation: spriteDotIdle  2.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .sprite-dot-think, .sprite-dot-idle { animation: none; }
+}
+
 /* Custom <details> marker reset — when a <details> is tagged with
    `.ats-details-reset`, suppress the default disclosure triangle so the
    component can render its own chevron indicator.                        */
