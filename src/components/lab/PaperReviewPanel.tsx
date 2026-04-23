@@ -382,7 +382,7 @@ export function PaperReviewPanel() {
         <label className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
           <Upload size={14} /><span>Upload your draft</span>
         </label>
-        <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>PDF, TXT, or Markdown. Drag-and-drop works too.</p>
+        <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>PDF, TXT, or Markdown. Drag & drop works.</p>
         <label
           className="mt-1.5 flex cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed px-3 py-2.5 text-xs transition"
           style={{
@@ -435,7 +435,7 @@ export function PaperReviewPanel() {
         </label>
         <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
           {paperText.length > 0 && `${paperText.length.toLocaleString()} chars · `}
-          Uploading a file replaces the contents.
+          Uploading a file replaces this.
         </p>
         <textarea
           value={paperText}
@@ -454,7 +454,7 @@ export function PaperReviewPanel() {
           <Lightbulb size={14} /><span>What kind of draft is this?</span>
         </label>
         <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
-          Different kinds of writing get reviewed with different priorities.
+          Different kinds get different review priorities.
         </p>
         <select
           value={draftType}
@@ -472,7 +472,7 @@ export function PaperReviewPanel() {
         <label className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
           <Target size={14} /><span>Anything else we should know?</span>
         </label>
-        <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>Field, target venue, specific concerns — optional.</p>
+        <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>Field, venue, concerns — optional.</p>
         <input
           value={contextHint}
           onChange={e => setContextHint(e.target.value)}
@@ -504,7 +504,7 @@ export function PaperReviewPanel() {
         <button
           onClick={() => void handleRun()}
           disabled={!paperText.trim() || generating}
-          title="Shares your daily allowance with the Synthesis Lab writer."
+          title="Shares daily quota with Synthesis Lab."
           className="relative flex-1 rounded-xl px-4 py-3 text-sm font-bold transition-all disabled:cursor-not-allowed disabled:opacity-50 overflow-hidden"
           style={{
             borderWidth: "1px",
@@ -608,8 +608,7 @@ export function PaperReviewPanel() {
           </div>
           <p className="leading-relaxed opacity-90">{quotaBlocked.message}</p>
           <p className="mt-2 text-[11px] opacity-75">
-            Paper Review shares a daily allowance with Synthesis Lab (both are heavy LLM flows).
-            Signed-in accounts get a bigger allowance; the admin can raise caps per tier.
+            Shares a daily quota with Synthesis Lab. Signed-in accounts get more.
           </p>
         </div>
       )}

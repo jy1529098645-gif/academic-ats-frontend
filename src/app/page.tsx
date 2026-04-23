@@ -6004,7 +6004,7 @@ ${html}
                       ? "bg-slate-900/70 text-slate-100"
                       : "text-slate-500 hover:text-slate-300"
                   }`}
-                  title="Paper Review — multi-agent peer review of your own draft"
+                  title="Peer review of your draft"
                 >
                   <ShieldCheck size={14} />
                   <span>Paper Review</span>
@@ -6016,7 +6016,7 @@ ${html}
                       ? "bg-slate-900/70 text-slate-100"
                       : "text-slate-500 hover:text-slate-300"
                   }`}
-                  title="Synthesis Lab — generate academic text from selected papers"
+                  title="Write from selected papers"
                 >
                   <PenLine size={14} />
                   <span>Synthesis Lab</span>
@@ -6058,8 +6058,7 @@ ${html}
                 })() ? (
                   <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
                     <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
-                      Run a search first —<br />
-                      the writing tools unlock once papers are available.
+                      Run a search first — writing tools unlock when papers arrive.
                     </div>
                   </div>
                 ) : (
@@ -6073,7 +6072,7 @@ ${html}
                     </div>
                     {labRefs.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-slate-700 py-2.5 text-center text-xs text-slate-600 leading-5">
-                        Click <span className="text-violet-400 font-semibold">Add as reference</span> on any paper to use it here
+                        Pick papers with <span className="text-violet-400 font-semibold">Add as reference</span>.
                       </div>
                     ) : (
                       <div className="space-y-1.5">
@@ -6092,7 +6091,7 @@ ${html}
                   {/* User file upload — compact dropzone so the top of the Lab stays dense. */}
                   <div>
                     <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Upload size={14} /><span>Add your own files</span></label>
-                    <p className="mt-0.5 text-[11px] text-slate-500">PDF, TXT, or Markdown. Drag and drop works too.</p>
+                    <p className="mt-0.5 text-[11px] text-slate-500">PDF, TXT, or Markdown. Drag & drop works.</p>
                     <label
                       className="mt-1.5 flex cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 px-3 py-2.5 text-xs text-slate-500 transition hover:border-violet-500/50 hover:text-violet-400"
                       onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("border-violet-500/60", "bg-violet-500/5"); }}
@@ -6171,7 +6170,7 @@ ${html}
                     const requiredBadge = (req: boolean) => (
                       req
                         ? <span className="ml-1.5 shrink-0 text-[10px] font-normal italic text-amber-400/80">
-                            strongly recommended
+                            recommended
                           </span>
                         : null
                     );
