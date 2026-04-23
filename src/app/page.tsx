@@ -1047,6 +1047,31 @@ export default function HomePage() {
   const [assessmentVerdict, setAssessmentVerdict] = useState<AssessVerdict | null>(null);
   const assessAbortRef       = useRef<AbortController | null>(null);
   const lastAssessedTextRef  = useRef<string>("");
+  // Instant typing reactions — a pool of tiny cat-sprite lines shown the
+  // MOMENT the textarea changes, so the sprite feels like it's watching
+  // the user in real time instead of silent-then-verdict. The debounced
+  // AI call still fires at 900 ms and its message takes over once it
+  // lands. Cycles deterministically through the pool so consecutive
+  // edits give different micro-reactions rather than the same one.
+  const INSTANT_REACTIONS: string[] = [
+    "ooh watching~",
+    "mm ok ok",
+    "hmm interesting",
+    "oh?",
+    "let me see~",
+    "mm mm",
+    "ooh tell me more",
+    "paying attention ✨",
+    "peeking at your words (˙ᵕ˙)",
+    "curious curious",
+    "go on~",
+    "ok ok ok",
+    "watching you type (◕‿◕)",
+    "oh neat",
+    "mm carry on",
+  ];
+  const [instantReaction, setInstantReaction] = useState<string>("");
+  const instantTickRef = useRef<number>(0);
   // Flag: if the user presses Enter while an assessment is still in flight
   // (or before the debounce fires), we mark this and the success handler
   // advances the stage once the verdict arrives.
@@ -1110,6 +1135,27 @@ export default function HomePage() {
   // `directionData` / `selectedDirIndex` are declared) so their bodies can
   // close over those states without tripping a TDZ on first render.
   const [spriteChoiceMade, setSpriteChoiceMade] = useState(false);
+
+  // Instant typing reaction — fires on EVERY query change (short debounce
+  // of 120 ms to coalesce bursts of keystrokes into one reaction change).
+  // Picks the next INSTANT_REACTIONS line in rotation so the sprite feels
+  // like it's cheering the user on while they type. This is LOCAL only,
+  // no AI call — the debounced assessment at 900 ms (below) produces the
+  // real verdict + message that overrides this micro-feedback.
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length < 1) {
+      setInstantReaction("");
+      return;
+    }
+    const id = window.setTimeout(() => {
+      instantTickRef.current = (instantTickRef.current + 1) % INSTANT_REACTIONS.length;
+      setInstantReaction(INSTANT_REACTIONS[instantTickRef.current]);
+    }, 120);
+    return () => window.clearTimeout(id);
+    // Only depend on query — the reactions are self-contained strings.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
 
   // Debounced real-time assessment. Every substantive change to `query` kicks
   // off a fresh AI call after 900 ms of typing quiet. Too-short / empty text
@@ -1189,6 +1235,35 @@ export default function HomePage() {
     for (const w of a) if (b.has(w)) overlap++;
     return overlap / a.size < 0.5;
   }
+
+  // Pool of sprite reactions for the "new content, starting over?" prompt.
+  // The choice is seeded by the committed text's length so successive
+  // prompts on the same committed snapshot stay stable (no flicker on
+  // every keystroke) but different committed snapshots give DIFFERENT
+  // lines across a session — the user doesn't see the same "looks
+  // different" every time.
+  const NEW_CONTENT_PROMPTS: string[] = [
+    "different path, huh? (◕‿◕)",
+    "ooh, new question?",
+    "wait — changing direction? (˙ᵕ˙)",
+    "mm, something fresh?",
+    "going somewhere new? (｡•́ᴗ•̀｡)",
+    "whole new angle?",
+    "changed your mind? ✨",
+    "different topic brewing?",
+    "oh, pivoting?",
+    "new thread starting?",
+  ];
+  const newContentPrompt = useMemo(() => {
+    // Simple deterministic pick keyed off the committed text.
+    if (!committedQuery) return NEW_CONTENT_PROMPTS[0];
+    let h = 0;
+    for (let i = 0; i < committedQuery.length; i++) {
+      h = ((h << 5) - h + committedQuery.charCodeAt(i)) | 0;
+    }
+    return NEW_CONTENT_PROMPTS[Math.abs(h) % NEW_CONTENT_PROMPTS.length];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [committedQuery]);
 
   function handleResetToBlankFromSprite() {
     // User confirmed they're searching something new — collapse back to
@@ -3779,12 +3854,14 @@ ${html}
 
       <div className="flex flex-col flex-1 min-h-0 px-5 pt-5 pb-4 gap-4">
         {/* ── Top bar: title + mascot + announcement side-by-side ──
-            `min-h-[76px]` reserves space equal to the announcement
-            banner's natural height (68 px card + breathing room) so
-            toggling the banner in/out via the megaphone doesn't
-            shake every element below. Empty space just sits there
-            when the banner is off, which costs nothing visually. */}
-        <div className="flex-none flex items-start gap-4 min-h-[76px]">
+            The banner ALWAYS mounts (see below); when the user hides it
+            via the megaphone we just hide the card with visibility /
+            opacity so its exact height stays reserved, forever. That
+            replaces the old min-h hack which was guessing at a number
+            and pushing content by a pixel or two when the banner did or
+            didn't render. Row uses items-start so the banner pins to
+            the top instead of vertically centering against the mascot. */}
+        <div className="flex-none flex items-start gap-4">
           {/* Title block — the mascot sits in the SAME row as the AcademiCats
               wordmark (right after "Cats"), NOT spanning down to the subtitle.
               That keeps the subtitle on its own line directly below the brand. */}
@@ -3835,12 +3912,25 @@ ${html}
                 overflow past the mascot's right edge. */}
             <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">v1.7.0-Alpha</span></p>
           </div>
-          {/* Announcement banner — off by default; revealed only when the
-              user clicks the megaphone toggle above. `stage-reveal` gives
-              the reveal the same 0.75 s fade every other surface uses. */}
+          {/* Announcement banner — ALWAYS mounted so its height is
+              always part of the top-bar flex row, preventing any pixel
+              shift when the user toggles visibility. When off, we hide
+              via opacity:0 + pointer-events:none (screen readers also
+              ignore it via aria-hidden). That means the layout below
+              is set in stone the moment the page renders. Fade timing
+              is driven by CSS transition here instead of the
+              stage-reveal keyframe because we're toggling opacity on an
+              already-mounted element. */}
           <div className="relative min-w-0 flex-1 pl-4">
-            {announcementsVisible && (
-              <div className="stage-reveal">
+            <div
+              aria-hidden={!announcementsVisible}
+              style={{
+                opacity: announcementsVisible ? 1 : 0,
+                transform: announcementsVisible ? "translateY(0)" : "translateY(-3px)",
+                transition: "opacity 0.75s cubic-bezier(0.22, 0.8, 0.28, 1), transform 0.75s cubic-bezier(0.22, 0.8, 0.28, 1)",
+                pointerEvents: announcementsVisible ? "auto" : "none",
+              }}
+            >
               <AnnouncementBanner
                 collapsed={announcementCollapsed}
                 onCollapse={() => setAnnouncementCollapsed(true)}
@@ -3856,8 +3946,7 @@ ${html}
                 themeMode={themeMode}
                 onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
               />
-              </div>
-            )}
+            </div>
           </div>
         </div>
 
@@ -4543,8 +4632,21 @@ ${html}
                 The whole row uses `stage-reveal` on first mount so it fades
                 in with the rest of the landing rather than popping. */}
             {(() => {
-              const showThinking    = assessing && !assessmentMessage;
-              const showMessage     = !!assessmentMessage;
+              // Display logic for the sprite voice slot:
+              //   1. If we have a current AI verdict message AND the query
+              //      hasn't drifted since it was assessed, show it.
+              //   2. Else if the user is actively typing (query differs from
+              //      last assessed), show the INSTANT reaction — keeps the
+              //      sprite "alive" while the 900 ms debounce winds up.
+              //   3. Else if the assessment is actively running and we have
+              //      nothing to show yet, fall back to a "thinking" pulse.
+              //   4. Else if the box is empty, show the default invite.
+              const queryHasDrifted = query.trim() !== lastAssessedTextRef.current && lastAssessedTextRef.current.length > 0;
+              const freshMessage    = !!assessmentMessage && !queryHasDrifted;
+              const activeInstant   = !freshMessage && !!instantReaction && query.trim().length > 0;
+              const showThinking    = !freshMessage && !activeInstant && assessing;
+              const showMessage     = freshMessage || activeInstant;
+              const currentMessage  = freshMessage ? assessmentMessage : instantReaction;
               const showDefault     = !showThinking && !showMessage && query.trim().length === 0;
               const needsAngles     = (assessmentVerdict === "brief" || assessmentVerdict === "balanced");
               // New-content confirmation: if the user has already advanced past
@@ -4583,14 +4685,14 @@ ${html}
                       committed question we pause normal sprite chatter
                       and ask explicitly before blowing the session away. */}
                   {askNewContentConfirm ? (
-                    <>
+                    <div className="flex flex-col items-center gap-2.5">
                       <p
-                        key="ask-new-content"
+                        key={`ask-new-${newContentPrompt}`}
                         className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
                         style={{ color: "var(--ats-fg-secondary)" }}
                       >
                         <Sparkles size={14} style={{ color: "var(--ats-fg-accent)" }} />
-                        <span>looks different — starting fresh? (｡•́ᴗ•̀｡)</span>
+                        <span>{newContentPrompt}</span>
                       </p>
                       <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
                         <button
@@ -4616,9 +4718,9 @@ ${html}
                           <span>Nope, just tweaking</span>
                         </button>
                       </div>
-                    </>
+                    </div>
                   ) : (
-                  <>
+                  <div className="flex flex-col items-center gap-2.5 w-full">
                   {/* Sprite voice line. Bumped from text-xs (12 px) to text-sm
                       (14 px) — the old size was too small to read at a glance.
                       Sparkles icon + thinking dot scaled to match. */}
@@ -4652,12 +4754,12 @@ ${html}
                     // words would silently swap in. Fun side-effect: looks
                     // like the sprite is "saying" a new line each time.
                     <p
-                      key={assessmentMessage}
+                      key={currentMessage}
                       className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
                       style={{ color: "var(--ats-fg-secondary)" }}
                     >
                       <Sparkles size={14} style={{ color: "var(--ats-fg-accent)" }} />
-                      <span>{assessmentMessage}</span>
+                      <span>{currentMessage}</span>
                       {introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
                         <span
                           aria-hidden
@@ -4757,7 +4859,7 @@ ${html}
                       })}
                     </div>
                   )}
-                  </>
+                  </div>
                   )}
                 </div>
               );

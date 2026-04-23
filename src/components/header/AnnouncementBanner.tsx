@@ -269,20 +269,10 @@ function ControlStrip({
           </button>
         </div>
       )}
-      {/* Mode toggle — ALWAYS present, never repositions. Flips between
-          "announcement board" and "danmu board" modes. `collapsed` was
-          the historical name for danmu mode; the prop is kept stable
-          so page.tsx doesn't need changing. Icon is Sparkles when
-          board-mode is active (click to enter danmu), Megaphone when
-          danmu-mode is active (click to come back). */}
-      <button
-        onClick={collapsed ? onExpand : onCollapse}
-        title={collapsed ? "Show announcement board" : "Switch to danmu board"}
-        aria-label={collapsed ? "Switch to announcement board" : "Switch to danmu board"}
-        className="shrink-0 flex h-4 w-4 items-center justify-center rounded text-slate-500 hover:text-[var(--ats-fg-accent)] hover:bg-[var(--ats-bg-accent-soft)] transition-colors select-none"
-      >
-        {collapsed ? <Megaphone size={10} /> : <Sparkles size={10} />}
-      </button>
+      {/* Danmu-mode toggle was removed — the feature competed with the
+          external megaphone button for visual attention and was the
+          reason the control strip had an always-allocated right slot.
+          Strip is now just prev / next navigation. */}
     </div>
   );
 }
