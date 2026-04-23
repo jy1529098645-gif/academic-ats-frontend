@@ -2857,6 +2857,14 @@ ${html}
     // immediate, in-modal explanation instead of a network round-trip.
     if (!ensureQuota(fastMode ? "quick_search" : "deep_search")) return;
 
+    // Open both side panels NOW — they're hidden by default so users can
+    // compose a long research question without side-panel distractions,
+    // and auto-slide in the moment a search kicks off so the results have
+    // somewhere to land. `setX(true)` is a no-op if the user had manually
+    // opened them earlier; we just guarantee they're visible from here.
+    setLeftVisible(true);
+    setAnalyticsVisible(true);
+
     // Start the 1:3:1 snap immediately on Run. Waiting until the first
     // phase result lands meant the user saw the grid reflow at the same
     // moment the panels were pushing streamed papers / agent cards into
@@ -3345,14 +3353,14 @@ ${html}
     }
   }
 
-  // First-click expand: while the app is still in its collapsed idle state the
-  // user can click anywhere — every click is swallowed by a transparent overlay
-  // and redirected into "open both side panels". Any single click completes
-  // the first interaction; from then on the UI behaves normally.
+  // First-click expand: while the app is still in its collapsed idle state
+  // the user can click anywhere to "enter" — the overlay swallows the click
+  // so no accidental button presses fire. The panels themselves DO NOT open
+  // here; they now wait until the user actually kicks off a search. Users
+  // typing out a long question first want a clean, focused workspace; the
+  // side panels belong after there's results to put in them.
   const completeFirstInteraction = useCallback(() => {
     setFirstInteractionDone(true);
-    setLeftVisible(true);
-    setAnalyticsVisible(true);
   }, []);
 
   return (
@@ -3864,15 +3872,22 @@ ${html}
 
                 {researchBriefMarkdown ? (
                   <>
-                    {/* translate="no" — Google Translate rewrites text nodes, which collides
-                        with the streamed markdown diff and crashes the page mid-generation.
-                        For in-app translation (the button below), we swap the rendered
-                        markdown to the backend-streamed translation instead. */}
-                    {/* Body text at 0.78rem — one step below the previous
-                        0.85rem — with tighter line-height/margins so the
-                        brief reads more densely without the headings
-                        (prose-h2 / h3 controlled by mdComponents) changing. */}
-                    <div translate="no" className="notranslate fade-in prose prose-invert max-w-none break-words
+                    {/* Research Brief is now Google-Translate-eligible. The
+                        old guard (`translate="no"` + `notranslate` class)
+                        existed because we worried the extension's DOM
+                        rewrite would collide with our streamed-markdown
+                        diff. After real-world testing that never
+                        materialised, so we let Google Translate handle
+                        this container — users reading in a non-English
+                        locale get an auto-translated brief for free,
+                        and our in-app Translate button below still
+                        handles the higher-quality LLM translation.
+                        Body text at 0.78rem — one step below the
+                        previous 0.85rem — with tighter line-height /
+                        margins so the brief reads more densely without
+                        the headings (prose-h2 / h3 controlled by
+                        mdComponents) changing. */}
+                    <div className="fade-in prose prose-invert max-w-none break-words
                       prose-p:text-[0.78rem] prose-p:leading-[1.45] prose-p:my-0.5 prose-p:text-slate-300
                       prose-strong:text-slate-100 prose-strong:font-semibold
                       prose-li:text-[0.78rem] prose-li:leading-[1.4] prose-li:text-slate-300 prose-li:my-0
@@ -4945,7 +4960,21 @@ ${html}
                               <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-2">
                                 <span>Abstract</span>
                                 {isMissing && <span className="text-[10px] font-normal text-slate-500">not provided by source</span>}
-                                {looksTruncated && <span className="text-[10px] font-normal text-amber-400/80">only a preview snippet — see source for the full abstract</span>}
+                                {looksTruncated && (
+                                  // Subdued muted-foreground token instead of
+                                  // the old amber-400/80 — the previous colour
+                                  // fought with every warm-paper / light theme
+                                  // and still jumped out on dark themes, which
+                                  // was overstating how important this note is.
+                                  // A quiet meta-annotation reads correctly on
+                                  // every surface.
+                                  <span
+                                    className="text-[10px] font-normal italic"
+                                    style={{ color: "var(--ats-fg-muted)" }}
+                                  >
+                                    only a preview snippet — see source for the full abstract
+                                  </span>
+                                )}
                               </summary>
                               <p className="px-3 pb-3 pt-1 whitespace-pre-wrap break-words text-sm leading-7 text-slate-300">{paper.summary}</p>
                               {looksTruncated && paper.url && (

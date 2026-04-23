@@ -24,10 +24,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   // Page-level translation is re-enabled — Google Translate can freely translate
-  // static copy (titles, labels, sidebar, Settings panels, etc.). The volatile
-  // regions that React re-renders streaming tokens into (Research Brief, agent
-  // logs, Lab output, textarea overlay, history timeline) opt out individually
-  // via `translate="no"` + `notranslate` class to avoid the DOM-rewrite crash.
+  // the whole app, including the Research Brief (previously gated because we
+  // worried the streaming markdown diff would collide with Google's DOM
+  // rewrite, which turned out not to happen in practice). A few remaining
+  // volatile regions (textarea overlay, Lab result, history timeline, agent
+  // logs) still opt out individually via `translate="no"` + `notranslate`
+  // because their mid-render DOM churn IS sensitive to external rewrites —
+  // the in-app Translate button is the higher-quality path for those.
   return (
     <html
       lang="en"
