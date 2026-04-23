@@ -1315,6 +1315,38 @@ export default function HomePage() {
     setCommittedQuery(query.trim());
   }
 
+  // ── Sprite reactions when the user toggles Quick / Curated manually ───────
+  // Only fired from the toggle button onClick — the AI's
+  // requestModeRecommendation calls setFastMode directly so its longer
+  // recommendation line doesn't get overwritten by these canned brief
+  // descriptions. Two pools (one per mode), deterministically rotated
+  // by a ref so consecutive toggles show different lines.
+  const MODE_SWITCH_LINES_QUICK: string[] = [
+    "quick it is~ fast smart ranking, good for a skim",
+    "ok quick mode, seconds-fast results (◕‿◕)",
+    "going quick, great for rapid scanning",
+    "quick search on, light touch and speedy (˙ᵕ˙)",
+    "skim mode, smart ranking, in and out",
+  ];
+  const MODE_SWITCH_LINES_CURATED: string[] = [
+    "curated, nice — deep dive with agent screening",
+    "going deep, multi-agent analysis takes a few minutes",
+    "curated mode on, adversarial screening kicks in (˙ᵕ˙)",
+    "ok deep dive, slower but more careful",
+    "full analysis incoming, sit tight (◡‿◡)",
+  ];
+  const modeSwitchTickRef = useRef(0);
+
+  function handleModeSwitchFromUser(wantQuick: boolean) {
+    // Only update / react if the mode actually changed — double-clicking
+    // the already-active toggle shouldn't emit a sprite line.
+    if (wantQuick === fastMode) return;
+    setFastMode(wantQuick);
+    modeSwitchTickRef.current = (modeSwitchTickRef.current + 1) % 5;
+    const pool = wantQuick ? MODE_SWITCH_LINES_QUICK : MODE_SWITCH_LINES_CURATED;
+    setAssessmentMessage(pool[modeSwitchTickRef.current]);
+  }
+
   // Clicking a direction bubble from the sprite area. Selecting the direction
   // drives `selectedSearchQuery` via the existing useMemo (see line ~2358),
   // and we advance to "full" so the search buttons show up.
@@ -4600,14 +4632,14 @@ ${html}
                       <div className="stage-reveal inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
                         <button
                           type="button"
-                          onClick={() => setFastMode(true)}
+                          onClick={() => handleModeSwitchFromUser(true)}
                           disabled={isSubmitting}
                           aria-pressed={fastMode}
                           className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
                         ><Zap size={14} className="shrink-0" /><span className="truncate">Quick Search</span></button>
                         <button
                           type="button"
-                          onClick={() => setFastMode(false)}
+                          onClick={() => handleModeSwitchFromUser(false)}
                           disabled={isSubmitting}
                           aria-pressed={!fastMode}
                           className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${!fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
