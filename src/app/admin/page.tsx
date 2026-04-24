@@ -3777,7 +3777,7 @@ function SystemSnapshot({ overview }: { overview: Overview | null }) {
     { icon: <Database  size={12} />, label: "History entries",       value: overview?.history_entries ?? "—" },
     { icon: <FileText  size={12} />, label: "Announcements stored",  value: overview?.announcements_total ?? "—" },
     { icon: <DollarSign size={12} />, label: "Today's LLM cost",     value: overview ? `$${overview.today.llm_cost_usd.toFixed(4)}` : "—" },
-    { icon: <Clock     size={12} />, label: "Server time (UTC)",     value: overview ? fmtDateTime(overview.server_time) : "—" },
+    { icon: <Clock     size={12} />, label: "Server time (NY)",      value: overview ? fmtDateTime(overview.server_time) : "—" },
     { icon: <Clock     size={12} />, label: "Day bucket",            value: overview?.today.day_utc ?? "—" },
   ];
   return (
@@ -4871,11 +4871,19 @@ function fmtDate(iso: string | null): string {
   return d.toISOString().slice(0, 10);
 }
 
+const _NY_DATETIME_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+  hour12: false,
+});
+
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toISOString().replace("T", " ").slice(0, 19);
+  // en-CA gives "YYYY-MM-DD, HH:MM:SS" → strip the comma.
+  return _NY_DATETIME_FMT.format(d).replace(", ", " ") + " ET";
 }
 
 function relativeTime(ts: number): string {

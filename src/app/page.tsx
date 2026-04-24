@@ -1225,14 +1225,15 @@ export default function HomePage() {
   }, [query]);
 
   // Debounced real-time assessment. Every substantive change to `query` kicks
-  // off a fresh AI call after 900 ms of typing quiet. Too-short / empty text
-  // clears the message so the sprite goes silent rather than jumping on an
-  // empty box. 900 ms is the sweet spot between "feels reactive" and "doesn't
-  // fire 10 times while the user finishes their sentence".
+  // off a fresh AI call after 900 ms of typing quiet. Only fully-empty input
+  // is silent — for any non-empty text, the sprite always responds (even on
+  // 1–2 chars) so the user never feels stuck with no signal. 900 ms is the
+  // sweet spot between "feels reactive" and "doesn't fire 10 times while the
+  // user finishes their sentence".
   useEffect(() => {
     const trimmed = query.trim();
-    if (trimmed.length < 3) {
-      // Too short — blank the sprite out.
+    if (trimmed.length === 0) {
+      // Truly empty — blank the sprite out.
       setAssessmentMessage("");
       setAssessmentVerdict(null);
       lastAssessedTextRef.current = "";
