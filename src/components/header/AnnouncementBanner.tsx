@@ -435,10 +435,11 @@ export function AnnouncementBanner({
           (~40px) + composer row (~28px) with no slack; tweak this
           number as a pair with the row paddings below. */}
       <div className="relative h-[68px] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
-        {/* Integrated theme toggle — lives inside the card chrome at the
-            right end of the top row. z-20 keeps it above the danmu
-            overlay when collapsed. */}
-        <ThemeToggleButton mode={themeMode} onToggle={onToggleTheme} />
+        {/* Theme toggle moved out to the title row in page.tsx so it stays
+            visible even when the announcement banner is hidden. The
+            ThemeToggleButton helper below + props (themeMode/onToggleTheme)
+            are kept for reference but no longer rendered here. */}
+        {false && <ThemeToggleButton mode={themeMode} onToggle={onToggleTheme} />}
 
         {/* ── Board-mode structure ───────────────────────────────────
             Always mounted; only its visibility flips. `invisible` keeps
@@ -462,22 +463,24 @@ export function AnnouncementBanner({
               <AnnouncementRotatorCard items={announcements} paused={hoverPaused} idx={idx} />
             </div>
           </div>
-          {/* Row 2 — composer */}
+          {/* Row 2 — composer
+              · ALWAYS anonymous (signed/anon toggle removed) so the
+                ticker stays clean and doesn't dox the sender.
+              · 50-char hard cap (was 280) — anything longer should be
+                a private message, not the public ticker. */}
           <div className="flex items-center gap-1.5 border-t border-slate-800/50 px-3 py-1.5">
-            <SignedAnonymousToggle value={msgAnonymous} onChange={setMsgAnonymous} />
             <MessageSquare size={11} className="shrink-0 text-slate-600" />
             <input
               type="text"
               value={msgInput}
-              onChange={(e) => setMsgInput(e.target.value)}
+              onChange={(e) => setMsgInput(e.target.value.slice(0, 50))}
               onKeyDown={(e) => { if (e.key === "Enter" && !msgSending) void onSend(); }}
-              placeholder={msgAnonymous
-                ? "Broadcast anonymously — your email won't appear"
-                : "Broadcast as your account — visible to everyone"}
-              maxLength={280}
+              placeholder="Broadcast a short message (up to 50 chars)"
+              maxLength={50}
               tabIndex={collapsed ? -1 : 0}
               className="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-slate-300 outline-none placeholder:text-slate-700"
             />
+            <span className="shrink-0 text-[10px] tabular-nums text-slate-600">{msgInput.length}/50</span>
             <button
               onClick={() => void onSend()}
               disabled={!msgInput.trim() || msgSending}

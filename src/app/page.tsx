@@ -6,6 +6,13 @@ import { useRouter } from "next/navigation";
 import { PaperCharts } from "./charts";
 import { supabase } from "@/lib/supabase/client";
 import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
+import { Sprite, type SpriteHandle } from "@/components/sprite/Sprite";
+import {
+  INSTANT_REACTIONS,
+  MODE_SWITCH_LINES_QUICK,
+  MODE_SWITCH_LINES_CURATED,
+} from "@/components/sprite/spriteConstants";
+import { looksLikeNewContent, pickNewContentPrompt } from "@/components/sprite/spriteUtils";
 import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
@@ -51,7 +58,7 @@ import {
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   Link as LinkIcon, ShieldCheck,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical,
-  Megaphone,
+  Megaphone, CornerDownLeft, RotateCcw,
 } from "lucide-react";
 
 // Transport / auth / error-copy helpers live in src/lib/api.ts. They used to
@@ -1019,6 +1026,20 @@ export default function HomePage() {
   // - taRef: used to imperatively set height so user's manual resize isn't overridden.
   // - placeholderWrapperRef: observed to compute an ideal placeholder font size.
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // Imperative handle into Sprite — lets the textarea's onKeyDown drive
+  // bubble focus (ArrowLeft / ArrowRight) and trigger the focused bubble
+  // (Enter) without page.tsx having to mirror Sprite's bubble shape.
+  const spriteRef = useRef<SpriteHandle>(null);
+  // Hover-help overlay text — when set, the sprite voice line shows
+  // this string in priority, so the user gets an instant explanation
+  // of whatever UI element they're aiming at. Cleared on mouse-leave.
+  const [hoverHelpText, setHoverHelpText] = useState<string>("");
+  const helpProps = useCallback((msg: string) => ({
+    onMouseEnter: () => setHoverHelpText(msg),
+    onMouseLeave: () => setHoverHelpText(prev => prev === msg ? "" : prev),
+    onFocus:      () => setHoverHelpText(msg),
+    onBlur:       () => setHoverHelpText(prev => prev === msg ? "" : prev),
+  }), []);
   const placeholderWrapperRef = useRef<HTMLDivElement>(null);
   const [placeholderFontSize, setPlaceholderFontSize] = useState(48);
   // IME composition guard. Without this, Chinese / Japanese / Korean input
@@ -1077,57 +1098,20 @@ export default function HomePage() {
   const [assessmentVerdict, setAssessmentVerdict] = useState<AssessVerdict | null>(null);
   const assessAbortRef       = useRef<AbortController | null>(null);
   const lastAssessedTextRef  = useRef<string>("");
-  // Instant typing reactions — a pool of 30+ tiny cat-sprite lines. These
-  // fire after a short "thinking" pause so the user feels the sprite is
-  // always mulling over what they just typed rather than shouting out
-  // instant canned words. The debounced AI verdict (at 900 ms) then takes
-  // over the slot with the real assessment. Rotates deterministically
-  // through the pool so consecutive edits get different micro-lines.
-  // No colored emoji — kaomoji only.
-  const INSTANT_REACTIONS: string[] = [
-    "ooh watching~",
-    "mm ok ok",
-    "hmm interesting",
-    "oh?",
-    "let me see~",
-    "mm mm",
-    "ooh tell me more",
-    "paying attention",
-    "peeking at your words (˙ᵕ˙)",
-    "curious curious",
-    "go on~",
-    "ok ok ok",
-    "watching you type (◕‿◕)",
-    "oh neat",
-    "mm carry on",
-    "ooh something new",
-    "alright, following along",
-    "hmm i see~",
-    "yay, writing something?",
-    "paws ready (´･ω･`)",
-    "oh interesting angle",
-    "mm thoughtful",
-    "ok i'm here",
-    "listening listening",
-    "got my ears up",
-    "ooh yes go~",
-    "mm reading along",
-    "oh cool direction",
-    "alright alright",
-    "keeping up (◡‿◡)",
-    "i'm with you",
-    "ooh ok ok",
-    "watching quietly",
-    "hmm what else?",
-    "go on, don't stop",
-    "mm taking notes",
-  ];
+  // Sprite voice pools live in src/components/sprite/spriteConstants.ts —
+  // edit there to add or tune lines. Imported above as INSTANT_REACTIONS,
+  // MODE_SWITCH_LINES_QUICK, MODE_SWITCH_LINES_CURATED.
   const [instantReaction, setInstantReaction] = useState<string>("");
   const instantTickRef = useRef<number>(0);
   // Flag: if the user presses Enter while an assessment is still in flight
   // (or before the debounce fires), we mark this and the success handler
   // advances the stage once the verdict arrives.
   const pendingEnterRef      = useRef<boolean>(false);
+  // Handle for the in-flight 900 ms debounce timer. Stored in a ref so the
+  // Enter handler can cancel it before kicking off an immediate assess —
+  // otherwise the debounce fires a second `runAssessment` ~900 ms later
+  // that aborts and replaces Enter's already-in-flight call.
+  const assessDebounceRef    = useRef<number | null>(null);
 
   // Track the latest verdict via a ref so the short-circuit check below
   // can read the freshest value without re-creating `runAssessment` on
@@ -1156,19 +1140,6 @@ export default function HomePage() {
       lastAssessedTextRef.current = text;
       setAssessmentVerdict(data.verdict);
       setAssessmentMessage(data.message || "");
-      // If user pressed Enter while we were waiting, advance stage now.
-      if (pendingEnterRef.current) {
-        pendingEnterRef.current = false;
-        setIntroStage(data.verdict === "brief" ? "explore" : "full");
-        setCommittedQuery(text);
-        // Detailed / balanced Enter-advance → follow up with a mode +
-        // paper-count recommendation so the sprite can guide the search
-        // settings. "brief" skips this since the user still needs to
-        // pick an angle first.
-        if (data.verdict !== "brief") {
-          setTimeout(() => { void requestModeRecommendation(text, ""); }, 350);
-        }
-      }
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
       // Network failure — heuristic fallback so the sprite isn't silent.
@@ -1178,10 +1149,6 @@ export default function HomePage() {
       lastAssessedTextRef.current = text;
       setAssessmentVerdict(deep ? "detailed" : "brief");
       setAssessmentMessage(deep ? "looks specific" : "pretty short");
-      if (pendingEnterRef.current) {
-        pendingEnterRef.current = false;
-        setIntroStage(deep ? "full" : "explore");
-      }
     } finally {
       setAssessing(false);
     }
@@ -1198,6 +1165,17 @@ export default function HomePage() {
   // `directionData` / `selectedDirIndex` are declared) so their bodies can
   // close over those states without tripping a TDZ on first render.
   const [spriteChoiceMade, setSpriteChoiceMade] = useState(false);
+  // Tracks whether the user has explicitly asked to see the choice bubbles
+  // (by pressing Enter). Bubbles also auto-appear once the AI verdict lands,
+  // but Enter forces them immediately so the user never stares at a typed
+  // box with no actionable next step. Cleared whenever the textarea empties
+  // out or the workspace advances past blank.
+  const [bubblesRequested, setBubblesRequested] = useState(false);
+  useEffect(() => {
+    if (!query.trim() || introStage !== "blank") setBubblesRequested(false);
+  }, [query, introStage]);
+  // Auto-scroll-bubbles-into-view effect lives lower in the file, after
+  // `directionData` and `selectedDirIndex` are declared — see below.
 
   // Instant typing reaction — fires after a short "thinking" pause
   // (400 ms) so the user sees the sprite's dot pulse in thought before
@@ -1243,8 +1221,15 @@ export default function HomePage() {
     // explore step — once in "full" with a running search, the sprite's
     // opinion isn't what they need anymore.
     if (introStage === "full" && hasRunSearch) return;
-    const handle = window.setTimeout(() => { void runAssessment(trimmed); }, 900);
-    return () => window.clearTimeout(handle);
+    const handle = window.setTimeout(() => {
+      assessDebounceRef.current = null;
+      void runAssessment(trimmed);
+    }, 900);
+    assessDebounceRef.current = handle;
+    return () => {
+      window.clearTimeout(handle);
+      if (assessDebounceRef.current === handle) assessDebounceRef.current = null;
+    };
   }, [query, introStage, hasRunSearch, runAssessment]);
 
   // Adaptive placeholder font size is handled via CSS container-query units
@@ -1261,6 +1246,7 @@ export default function HomePage() {
   const [understandOpen, setUnderstandOpen] = useState(true);
   const [selectedDirIndex, setSelectedDirIndex] = useState<number | null>(null);
   const [selectedSubIndex, setSelectedSubIndex] = useState<number | null>(null);
+
 
   // ── Sprite handler functions (see the `spriteChoiceMade` declaration above
   // for the conceptual overview). Kept here, AFTER `directionData` etc., so
@@ -1290,51 +1276,12 @@ export default function HomePage() {
     setTimeout(() => { void requestModeRecommendation(query.trim(), ""); }, 350);
   }
 
-  // Word-overlap heuristic for "is this a fresh question or just a tweak".
-  // Fires only when ≥ 50 % of the committed query's meaningful words have
-  // disappeared. A typo fix ("mental helath" → "mental health") keeps
-  // everything so no prompt; a total rewrite ("mental health" → "crypto
-  // markets") trips it.
-  function looksLikeNewContent(committed: string, current: string): boolean {
-    if (!committed) return false;
-    const tok = (s: string) =>
-      new Set(s.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-    const a = tok(committed);
-    const b = tok(current);
-    if (a.size === 0) return false;
-    let overlap = 0;
-    for (const w of a) if (b.has(w)) overlap++;
-    return overlap / a.size < 0.5;
-  }
-
-  // Pool of sprite reactions for the "new content, starting over?" prompt.
-  // The choice is seeded by the committed text's length so successive
-  // prompts on the same committed snapshot stay stable (no flicker on
-  // every keystroke) but different committed snapshots give DIFFERENT
-  // lines across a session — the user doesn't see the same "looks
-  // different" every time.
-  const NEW_CONTENT_PROMPTS: string[] = [
-    "different path, huh? (◕‿◕)",
-    "ooh, new question?",
-    "wait — changing direction? (˙ᵕ˙)",
-    "mm, something fresh?",
-    "going somewhere new? (｡•́ᴗ•̀｡)",
-    "whole new angle?",
-    "changed your mind? (˙ᵕ˙)",
-    "different topic brewing?",
-    "oh, pivoting?",
-    "new thread starting?",
-  ];
-  const newContentPrompt = useMemo(() => {
-    // Simple deterministic pick keyed off the committed text.
-    if (!committedQuery) return NEW_CONTENT_PROMPTS[0];
-    let h = 0;
-    for (let i = 0; i < committedQuery.length; i++) {
-      h = ((h << 5) - h + committedQuery.charCodeAt(i)) | 0;
-    }
-    return NEW_CONTENT_PROMPTS[Math.abs(h) % NEW_CONTENT_PROMPTS.length];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [committedQuery]);
+  // looksLikeNewContent + pickNewContentPrompt live in
+  // src/components/sprite/spriteUtils.ts.
+  const newContentPrompt = useMemo(
+    () => pickNewContentPrompt(committedQuery),
+    [committedQuery],
+  );
 
   function handleResetToBlankFromSprite() {
     // User confirmed they're searching something new — collapse back to
@@ -1364,26 +1311,10 @@ export default function HomePage() {
     setCommittedQuery(query.trim());
   }
 
-  // ── Sprite reactions when the user toggles Quick / Curated manually ───────
-  // Only fired from the toggle button onClick — the AI's
-  // requestModeRecommendation calls setFastMode directly so its longer
-  // recommendation line doesn't get overwritten by these canned brief
-  // descriptions. Two pools (one per mode), deterministically rotated
-  // by a ref so consecutive toggles show different lines.
-  const MODE_SWITCH_LINES_QUICK: string[] = [
-    "quick it is~ fast smart ranking, good for a skim",
-    "ok quick mode, seconds-fast results (◕‿◕)",
-    "going quick, great for rapid scanning",
-    "quick search on, light touch and speedy (˙ᵕ˙)",
-    "skim mode, smart ranking, in and out",
-  ];
-  const MODE_SWITCH_LINES_CURATED: string[] = [
-    "curated, nice — deep dive with agent screening",
-    "going deep, multi-agent analysis takes a few minutes",
-    "curated mode on, adversarial screening kicks in (˙ᵕ˙)",
-    "ok deep dive, slower but more careful",
-    "full analysis incoming, sit tight (◡‿◡)",
-  ];
+  // Sprite reactions when the user toggles Quick / Curated manually. The
+  // AI's requestModeRecommendation calls setFastMode directly so its longer
+  // recommendation line isn't overwritten by these canned descriptions.
+  // Pools (MODE_SWITCH_LINES_QUICK / _CURATED) live in spriteConstants.ts.
   const modeSwitchTickRef = useRef(0);
 
   function handleModeSwitchFromUser(wantQuick: boolean) {
@@ -1391,30 +1322,98 @@ export default function HomePage() {
     // the already-active toggle shouldn't emit a sprite line.
     if (wantQuick === fastMode) return;
     setFastMode(wantQuick);
-    modeSwitchTickRef.current = (modeSwitchTickRef.current + 1) % 5;
     const pool = wantQuick ? MODE_SWITCH_LINES_QUICK : MODE_SWITCH_LINES_CURATED;
+    modeSwitchTickRef.current = (modeSwitchTickRef.current + 1) % pool.length;
     setAssessmentMessage(pool[modeSwitchTickRef.current]);
   }
 
   // Clicking a direction bubble from the sprite area. Selecting the direction
   // drives `selectedSearchQuery` via the existing useMemo (see line ~2358),
   // and we advance to "full" so the search buttons show up.
+  // Picking a big direction in the sprite chat: register the choice and
+  // surface the sub-option bubbles for that direction. The action bar
+  // doesn't open until the user either picks a sub-option (or commits via
+  // a sub-less direction) — keeps the conversation feel intact.
   function handleDirectionPickFromSprite(di: number) {
+    // Toggle off if re-clicking the same direction.
+    if (di === selectedDirIndex) {
+      setSelectedDirIndex(null);
+      setSelectedSubIndex(null);
+      return;
+    }
     setSelectedDirIndex(di);
     setSelectedSubIndex(null);
     setCustomQueryEnabled(false);
-    // Clear any lingering instant reaction so it doesn't swap in between
-    // "nice pick" and the mode recommendation a moment later.
+    setInstantReaction("");
+    const dir = directionData?.directions?.[di];
+    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()} (◕‿◕)`);
+    // If this direction has NO sub-options, commit straight to the action
+    // bar so the user isn't stranded with a picked direction and nowhere
+    // to go. With sub-options, wait for them to pick one (or skip).
+    if (!dir?.sub_options || dir.sub_options.length === 0) {
+      setIntroStage("full");
+      setCommittedQuery(query.trim());
+      setTimeout(() => { void requestModeRecommendation(query.trim(), dir?.label || ""); }, 700);
+    }
+  }
+
+  // Picking a sub-option from the sprite chat: this is the commit signal —
+  // advance the workspace + ask the AI for a Quick/Curated + paper-count
+  // recommendation. Re-clicking the same sub deselects (escape hatch).
+  function handleSubPickFromSprite(si: number) {
+    if (si === selectedSubIndex) {
+      setSelectedSubIndex(null);
+      return;
+    }
+    setSelectedSubIndex(si);
+    setCustomQueryEnabled(false);
     setInstantReaction("");
     setIntroStage("full");
     setCommittedQuery(query.trim());
-    const dir = directionData?.directions?.[di];
-    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()} (◕‿◕)`);
-    // Sprite follows up with a mode + paper-count recommendation. Small
-    // delay lets the "nice pick" line breathe for ~0.7 s before the
-    // recommendation replaces it; feels like two sentences in a
-    // conversation rather than one swap.
-    setTimeout(() => { void requestModeRecommendation(query.trim(), dir?.label || ""); }, 700);
+    const dir = directionData?.directions?.[selectedDirIndex ?? 0];
+    const sub = dir?.sub_options?.[si];
+    if (sub?.label) setAssessmentMessage(`got it — ${sub.label.toLowerCase()} (◕‿◕)`);
+    setTimeout(() => { void requestModeRecommendation(query.trim(), sub?.label || dir?.label || ""); }, 700);
+  }
+
+  // "Type my own…" bubble — opens the inline input.
+  function handleCustomQueryEnableFromSprite() {
+    setCustomQueryEnabled(true);
+    setSelectedDirIndex(null);
+    setSelectedSubIndex(null);
+    setAssessmentMessage("type your refined wording, hit Enter (˙ᵕ˙)");
+  }
+
+  function handleCustomQueryChangeFromSprite(value: string) {
+    setCustomQueryValue(value);
+  }
+
+  function handleCustomQuerySubmitFromSprite() {
+    const trimmed = customQueryValue.trim();
+    if (!trimmed) return;
+    setIntroStage("full");
+    setCommittedQuery(trimmed);
+    setAssessmentMessage(`got it — searching "${trimmed}" (◕‿◕)`);
+    setTimeout(() => { void requestModeRecommendation(trimmed, ""); }, 700);
+  }
+
+  // Quick / Curated bubble in the sprite chat IS the search trigger now —
+  // replaces the old in-action-bar mode toggle + Start button. Picks the
+  // mode, commits whatever query/direction state the user has settled on,
+  // advances to "full", and immediately fires handleSearch.
+  function handleStartSearchFromSprite(mode: "quick" | "curated") {
+    const trimmed = query.trim();
+    if (!trimmed || isSubmitting) return;
+    setFastMode(mode === "quick");
+    setIntroStage("full");
+    setCommittedQuery(trimmed);
+    setAssessmentMessage(mode === "quick"
+      ? "going quick, fast smart ranking (◕‿◕)"
+      : "curated mode — deep dive, sit tight (˙ᵕ˙)"
+    );
+    // Defer one tick so the introStage / fastMode state settles into the
+    // closure handleSearch reads.
+    setTimeout(() => { void handleSearch(); }, 50);
   }
 
   // Ask the nano model to recommend Quick vs Curated + a paper count for
@@ -1447,7 +1446,7 @@ export default function HomePage() {
   }, [query, introStage]);
 
   const [fastMode, setFastMode] = useState(true);
-  const [paperCount, setPaperCount] = useState(10);
+  const [paperCount, setPaperCount] = useState(15);
   const [sortMode, setSortMode] = useState("Relevance score");
   const [preferAbstracts, setPreferAbstracts] = useState(true);
   const [strictCoreOnly, setStrictCoreOnly] = useState(false);
@@ -1493,6 +1492,11 @@ export default function HomePage() {
 
   const [isUnderstanding, setIsUnderstanding] = useState(false);
   const [understandStatus, setUnderstandStatus] = useState("");
+  // Live decompose + expand payloads streamed from the directions SSE.
+  // Surfaced in the sprite chat so the user can watch the AI's "what I'm
+  // looking at" thinking instead of an opaque progress bar.
+  const [understandDecompose, setUnderstandDecompose] = useState<Record<string, unknown> | null>(null);
+  const [understandExpand,    setUnderstandExpand]    = useState<Record<string, unknown> | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Textarea geometry + type scale. Before a search has run the textarea
   // is a tall "greeting" box; once a search runs (hasRunSearch) or a
@@ -1567,6 +1571,24 @@ export default function HomePage() {
   // After that, the user can drag freely from whichever ratio they just landed on.
   const [leftPct, setLeftPct] = useState(14.3);
   const [centerPct, setCenterPct] = useState(71.4);
+  // Layout mode preset — the user picks one of four templates from the
+  // header bar, and `applyLayoutMode` writes the matching visibility +
+  // column ratios. handleSearch reads `layoutMode` instead of always
+  // snapping to 1:3:1 so a mode the user picked sticks across runs.
+  type LayoutMode = "default" | "scholar" | "student" | "writing";
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("default");
+  // Snapshot of the layout the moment a search kicks off — captured so
+  // Stop can restore the user back to whatever they had open (collapsed
+  // side panels, custom column ratios) instead of leaving the auto-
+  // expanded "working layout" up after they explicitly aborted.
+  // Cleared on natural completion so a normal-finish search doesn't
+  // ghost-revert when the user hits Stop on the NEXT one.
+  const prePuttingSearchLayoutRef = useRef<null | {
+    leftVisible: boolean;
+    analyticsVisible: boolean;
+    leftPct: number;
+    centerPct: number;
+  }>(null);
   const rightPct = Math.max(100 - leftPct - centerPct, 12);
   const snapDividerToDefault = useCallback(() => {
     setLeftPct(20);
@@ -1604,7 +1626,11 @@ export default function HomePage() {
   // user's email local-part next to the message; ANONYMOUS hides the
   // identity on the display side (server still stores author_id for
   // moderation — the display is what's anonymised).
-  const [msgAnonymous, setMsgAnonymous] = useState(false);
+  // Public ticker messages are always anonymous now — the SIGNED /
+  // ANONYMOUS toggle was removed so the composer can't surface email
+  // local-parts on the ticker. The state is kept (always true) so the
+  // post call still has a value to send.
+  const [msgAnonymous, setMsgAnonymous] = useState(true);
   const [msgSending, setMsgSending] = useState(false);
   const [msgSentOk, setMsgSentOk] = useState(false);
 
@@ -2542,6 +2568,38 @@ export default function HomePage() {
     window.setTimeout(() => setGridTransitioning(false), 950);
   }, []);
 
+  /** Apply one of four layout-mode presets:
+   *    default — both side panels open, balanced 1:3:1
+   *    scholar — right panel HIDDEN, big left panel for charts / brief
+   *    student — both visible, right (Lab) takes more space
+   *    writing — left panel HIDDEN, right takes most of the room */
+  const applyLayoutMode = useCallback((mode: LayoutMode) => {
+    setLayoutMode(mode);
+    setGridTransitioning(true);
+    if (mode === "default") {
+      setLeftVisible(true); setAnalyticsVisible(true);
+      setLeftPct(20); setCenterPct(60);
+    } else if (mode === "scholar") {
+      setLeftVisible(true); setAnalyticsVisible(false);
+      setLeftPct(32); setCenterPct(68);
+    } else if (mode === "student") {
+      // Student = focus on data → left big AND default to the Charts /
+      // Analytics tab so the user lands in the visualization, not the
+      // brief. Right Lab kept at modest size for note-taking.
+      setLeftVisible(true); setAnalyticsVisible(true);
+      setLeftPct(20); setCenterPct(50);   // → right ≈ 30
+      setLeftTab("analytics");
+    } else if (mode === "writing") {
+      // Writing = focus on output → left collapsed, right big AND
+      // default the right tab to Synthesis Lab (the actual writing
+      // surface) instead of Paper Review.
+      setLeftVisible(false); setAnalyticsVisible(true);
+      setLeftPct(0); setCenterPct(48);    // → right ≈ 52
+      setLabModule("synthesis");
+    }
+    window.setTimeout(() => setGridTransitioning(false), 950);
+  }, []);
+
   // Layout-snap guard. The Run button owns the happy path: handleSearch()
   // flips this ref to true BEFORE kicking off the SSE so the grid
   // transition finishes before the panels fill with content (prevents the
@@ -3140,12 +3198,16 @@ ${html}
     const trimmed = query.trim();
     if (!trimmed) return;
     if (isUnderstanding) { cancelUnderstand(); return; }
-    // If the user clicked Explore Angles directly from the "blank" stage
-    // (e.g. before pressing Enter), move them to "explore" so the action
-    // row reflects the new state while Angles is running.
-    if (introStage === "blank") setIntroStage("explore");
+    // The legacy auto-advance to "explore" on understand-start has been
+    // removed: in the new sprite-driven flow Find Angles fires
+    // automatically on Enter and the sprite Quick / Curated bubbles need
+    // introStage to STAY "blank" so they keep rendering. The user's
+    // explicit commit (Quick / Curated click) is what advances the
+    // stage now — see handleStartSearchFromSprite.
     setUiError("");
     setUnderstandStatus("Searching preview results\u2026");
+    setUnderstandDecompose(null);
+    setUnderstandExpand(null);
     setIsUnderstanding(true);
     setDirectionData(null);
     setSelectedDirIndex(null);
@@ -3248,6 +3310,38 @@ ${html}
                 const obj = JSON.parse(sseData) as Record<string, unknown>;
                 if (sseEvent === "status") {
                   setUnderstandStatus(String(obj.message ?? ""));
+                } else if (sseEvent === "decompose") {
+                  // Stage 1 payload — key terms, contexts, intent type.
+                  // Pipe to sprite so the user sees what the AI extracted
+                  // from their query in real time.
+                  const dec = obj.decompose as Record<string, unknown> | undefined;
+                  if (dec) setUnderstandDecompose(dec);
+                } else if (sseEvent === "expand") {
+                  // Stage 2 payload — synonyms / related terms / clusters.
+                  const exp = obj.expand as Record<string, unknown> | undefined;
+                  if (exp) setUnderstandExpand(exp);
+                } else if (sseEvent === "direction") {
+                  // Per-direction streaming — append a single direction to
+                  // the running list as soon as it lands. The final
+                  // `result` event still fires with the complete payload
+                  // (with decompose/expand attached) and replaces this
+                  // running list, so the optimistic incremental render
+                  // converges with the full data without flicker.
+                  const dir = obj.direction as Record<string, unknown> | undefined;
+                  if (dir && typeof obj.index === "number") {
+                    setDirectionData(prev => {
+                      const existing = (prev?.directions ?? []).slice();
+                      existing[obj.index as number] = dir as never;
+                      return {
+                        ...(prev ?? {}),
+                        original_query: prev?.original_query ?? trimmed,
+                        directions: existing,
+                        recommended_direction: typeof obj.recommended_direction === "number" ? obj.recommended_direction : (prev?.recommended_direction ?? 0),
+                        recommended_sub:       typeof obj.recommended_sub === "number" ? obj.recommended_sub : (prev?.recommended_sub ?? 0),
+                      } as QueryDirectionsResponse;
+                    });
+                    setUnderstandOpen(true);
+                  }
                 } else if (sseEvent === "result") {
                   applyResult(obj as QueryDirectionsResponse);
                   break outer;
@@ -3296,26 +3390,28 @@ ${html}
     // immediate, in-modal explanation instead of a network round-trip.
     if (!ensureQuota(fastMode ? "quick_search" : "deep_search")) return;
 
-    // Open both side panels NOW — they're hidden by default so users can
-    // compose a long research question without side-panel distractions,
-    // and auto-slide in the moment a search kicks off so the results have
-    // somewhere to land. `setX(true)` is a no-op if the user had manually
-    // opened them earlier; we just guarantee they're visible from here.
-    setLeftVisible(true);
-    setAnalyticsVisible(true);
+    // Auto-cancel any in-flight Find Angles stream — once the user has
+    // committed to a search via the sprite Quick / Curated bubble, the
+    // direction-finding is moot and just wastes LLM tokens. Replaces
+    // the explicit "Cancel angles" button.
+    if (isUnderstanding) {
+      cancelUnderstand();
+    }
 
-    // Start the 1:3:1 snap immediately on Run. Waiting until the first
-    // phase result lands meant the user saw the grid reflow at the same
-    // moment the panels were pushing streamed papers / agent cards into
-    // their new homes — too much happening at once. Kicking off the
-    // ~1 s grid transition here, BEFORE the SSE connection even opens,
-    // lets the layout settle into position by the time content starts
-    // streaming. Ref marked snapped so the result-watching fallback
-    // effect doesn't fire a second time for this search. The ref is
-    // reset first (not relying on initial `false`) so users who dragged
-    // the dividers after a previous search still get a fresh snap now.
+    // Snapshot the current layout BEFORE we auto-expand panels + snap
+    // the column ratios — Stop uses this to revert the user back to
+    // whatever they had on screen (e.g. both side panels collapsed,
+    // textarea-only landing) instead of stranding them in the running-
+    // search layout after an explicit abort.
+    prePuttingSearchLayoutRef.current = { leftVisible, analyticsVisible, leftPct, centerPct };
+
+    // Apply the user's chosen layout mode (default / scholar / student /
+    // writing). The mode dictates which side panels open and how the
+    // column ratios divide — replaces the old hardcoded 1:3:1 snap so a
+    // user who picked, say, Scholar mode keeps the right panel collapsed
+    // when they hit Run instead of seeing it pop open against their will.
     _autoSnappedRef.current = false;
-    snapToWorkingLayout();
+    applyLayoutMode(layoutMode);
     _autoSnappedRef.current = true;
 
     const _usedUnderstand = directionData !== null;
@@ -3579,6 +3675,11 @@ ${html}
     } finally {
       setIsSubmitting(false);
       abortRef.current = null;
+      // Drop the pre-search layout snapshot — a search that ran to
+      // completion shouldn't auto-revert if the user hits Stop on a
+      // FUTURE search; only the abort-immediately-after-start case
+      // should restore.
+      prePuttingSearchLayoutRef.current = null;
     }
   }
 
@@ -3594,10 +3695,94 @@ ${html}
     document.body.style.userSelect = "none";
   }
 
+  // Full pristine reset — drops the user back at the landing exactly
+  // as they first saw it. Aborts any in-flight search, clears the query
+  // + sprite results, restores the default 14.3/71.4/14.3 layout and
+  // re-collapses both side panels. Different from handleStop, which
+  // PRESERVES the query + directions so the user can resume.
+  // Defined as `const` (not `function`) because Turbopack's HMR
+  // wrapper occasionally tree-shakes/re-orders top-of-component
+  // function-declaration hoisting in dev — using a `const` fixes the
+  // declaration order so the JSX renderer always sees the binding.
+  const handleStartOver = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    understandAbortRef.current?.abort();
+    understandAbortRef.current = null;
+    setIsSubmitting(false);
+    setIsUnderstanding(false);
+    setUnderstandStatus("");
+    setUnderstandDecompose(null);
+    setUnderstandExpand(null);
+    setQuery("");
+    setCommittedQuery("");
+    setDirectionData(null);
+    setSelectedDirIndex(null);
+    setSelectedSubIndex(null);
+    setCustomQueryEnabled(false);
+    setCustomQueryValue("");
+    setBubblesRequested(false);
+    setSpriteChoiceMade(false);
+    setAssessmentMessage("");
+    setAssessmentVerdict(null);
+    setInstantReaction("");
+    lastAssessedTextRef.current = "";
+    pendingEnterRef.current = false;
+    setIntroStage("blank");
+    setHasRunSearch(false);
+    setJob(null);
+    setStreamPapers([]);
+    setStreamAgents({});
+    setStartedAgents(new Set());
+    setRetrievalCount(null);
+    setCandidateLimit(null);
+    setBriefStreamText("");
+    setBriefStatus(null);
+    // Layout snap back to the freshly-opened landing.
+    setGridTransitioning(true);
+    setLeftVisible(false);
+    setAnalyticsVisible(false);
+    setLeftPct(14.3);
+    setCenterPct(71.4);
+    window.setTimeout(() => setGridTransitioning(false), 950);
+    prePuttingSearchLayoutRef.current = null;
+    _autoSnappedRef.current = false;
+  };
+
   function handleStop() {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsSubmitting(false);
+    // Restore the workspace to the "just opened" landing layout — both
+    // side panels collapsed, default column ratios, textarea back to its
+    // tall greeting mode, intro stage = blank — but PRESERVE the user's
+    // query + sprite thinking results (directionData / decompose /
+    // expand) so they can pick up exactly where they left off without
+    // re-typing or re-running Find Angles.
+    setGridTransitioning(true);
+    setLeftVisible(false);
+    setAnalyticsVisible(false);
+    setLeftPct(14.3);
+    setCenterPct(71.4);
+    window.setTimeout(() => setGridTransitioning(false), 950);
+    setIntroStage("blank");
+    setHasRunSearch(false);
+    setSelectedDirIndex(null);
+    setSelectedSubIndex(null);
+    setCommittedQuery("");
+    // Wipe in-flight result state so the workspace doesn't display a
+    // partial / stale search beneath the sprite. The query + directions
+    // (sprite results) intentionally STAY.
+    setJob(null);
+    setStreamPapers([]);
+    setStreamAgents({});
+    setStartedAgents(new Set());
+    setRetrievalCount(null);
+    setCandidateLimit(null);
+    setBriefStreamText("");
+    setBriefStatus(null);
+    prePuttingSearchLayoutRef.current = null;
+    _autoSnappedRef.current = false;
   }
 
   // ── Synthesis Lab helpers ─────────────────────────────────────────────────
@@ -3802,7 +3987,7 @@ ${html}
     <main
       data-theme={theme}
       data-tone={themeMode}
-      className="h-screen overflow-hidden flex flex-col bg-[var(--ats-bg-base)] text-slate-100"
+      className="workspace-main h-screen overflow-hidden flex flex-col bg-[var(--ats-bg-base)] text-slate-100"
       style={{
         // Per-panel alpha exposed as CSS vars — the panel rules in globals.css
         // read them via `rgb(from var(--ats-bg-panel) r g b / var(--ats-alpha-*))`.
@@ -3994,31 +4179,51 @@ ${html}
                 className="h-12 w-12 object-contain select-none pointer-events-none shrink-0"
                 draggable={false}
               />
-              {/* Megaphone toggle — shrunk from 36 px → 26 px and
-                  aligned to the TOP of the mascot column (roughly at
-                  the cat's face) via `self-start mt-0.5`, per the
-                  "next to the cat's head" spec. The in-banner
-                  megaphone's breathing animation has been moved here
-                  — when the banner is open this button gently breathes
-                  via `.megaphone-breath`, giving the UI ONE focal
-                  point for "ticker is live". Active state (banner
-                  open) also tints the button with the accent token. */}
-              <button
-                onClick={() => setAnnouncementsVisible(v => !v)}
-                title={announcementsVisible ? "Hide announcements" : "Show announcements"}
-                aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
-                aria-pressed={announcementsVisible}
-                className={`shrink-0 self-start mt-0.5 flex h-6.5 w-6.5 items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
-                style={{
-                  height: "26px",
-                  width: "26px",
-                  borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
-                  backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
-                  color:           announcementsVisible ? "var(--ats-fg-accent)"     : "var(--ats-fg-muted)",
-                }}
-              >
-                <Megaphone size={13} />
-              </button>
+              {/* Megaphone toggle (banner show/hide) on top + Day/Night
+                  toggle directly below it — stacked vertically in a single
+                  flex column so both buttons share the same horizontal
+                  slot. Stacking keeps them out of the wordmark + tagline
+                  width, so the title row never gets pushed when extra
+                  controls land here in the future. */}
+              <div className="shrink-0 self-start mt-0.5 flex flex-col items-center gap-1">
+                <button
+                  onClick={() => setAnnouncementsVisible(v => !v)}
+                  title={announcementsVisible ? "Hide announcements" : "Show announcements"}
+                  aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
+                  aria-pressed={announcementsVisible}
+                  {...helpProps(announcementsVisible ? "this hides the public ticker (◕‿◕)" : "click me to show the public announcement ticker")}
+                  className={`flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
+                  style={{
+                    height: "26px",
+                    width: "26px",
+                    borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                    backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                    color:           announcementsVisible ? "var(--ats-fg-accent)"     : "var(--ats-fg-muted)",
+                  }}
+                >
+                  <Megaphone size={13} />
+                </button>
+                {/* Day / Night toggle — always visible, even when the
+                    announcement banner is hidden. Sits directly below the
+                    megaphone so the two share one column instead of
+                    crowding the title row left/right. */}
+                <button
+                  onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
+                  title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
+                  aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
+                  {...helpProps(themeMode === "night" ? "click to swap to a Day palette ☀" : "click to swap to a Night palette 🌙")}
+                  className="flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
+                  style={{
+                    height: "26px",
+                    width: "26px",
+                    borderColor:     "var(--ats-border-subtle)",
+                    backgroundColor: "var(--ats-bg-accent-soft)",
+                    color:           "var(--ats-fg-accent)",
+                  }}
+                >
+                  {themeMode === "night" ? <Sun size={13} /> : <Moon size={13} />}
+                </button>
+              </div>
             </div>
             {/* Tagline is sized so the whole line (descriptor + version)
                 fits within the wordmark + mascot row width above — no
@@ -4034,7 +4239,47 @@ ${html}
               is driven by CSS transition here instead of the
               stage-reveal keyframe because we're toggling opacity on an
               already-mounted element. */}
+          {/* Right column = announcement banner with the layout-mode
+              picker absolutely positioned in its top-right corner. The
+              picker takes ZERO layout height (it floats over the
+              banner's right edge), so it never pushes the rest of the
+              UI down — even on short viewports. */}
           <div className="relative min-w-0 flex-1 pl-4">
+            {/* Layout-mode picker — absolute top-right, lifted just
+                enough above the banner top to leave a ~6px visible gap
+                (not glued, not pushed away). z-30 stays above banner
+                chrome. */}
+            <div className="absolute -top-[10px] right-0 z-30 flex items-center gap-1">
+            {([
+              { mode: "default" as const, label: "Default", icon: <LayoutGrid size={13} />,        desc: "Balanced 3-pane layout" },
+              { mode: "scholar" as const, label: "Scholar", icon: <BookOpen size={13} />,         desc: "Big left for charts + brief; right hidden" },
+              { mode: "student" as const, label: "Student", icon: <FlaskConical size={13} />,     desc: "Right Lab panel takes more room" },
+              { mode: "writing" as const, label: "Writing", icon: <PenLine size={13} />,          desc: "Left hidden; right wide for the Lab" },
+            ]).map(({ mode, label, icon, desc }) => {
+                const active = layoutMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => applyLayoutMode(mode)}
+                    title={`${label} mode — ${desc}`}
+                    aria-label={`${label} layout`}
+                    aria-pressed={active}
+                    {...helpProps(`${label} layout — ${desc}`)}
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md border transition-all hover:brightness-110"
+                    style={{
+                      borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                      backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                      color:           active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                    }}
+                  >
+                    {icon}
+                  </button>
+                );
+              })}
+            </div>
+            {/* Announcement banner. Visibility is opacity-toggled so its
+                height stays reserved even when hidden. The picker above
+                this is absolute so it doesn't add to the row height. */}
             <div
               aria-hidden={!announcementsVisible}
               style={{
@@ -4187,6 +4432,7 @@ ${html}
               <div className="shrink-0 flex items-center gap-1.5 pl-12 pr-3 py-2.5 border-b border-slate-800/60">
                 <button
                   onClick={() => setLeftTab("brief")}
+                  {...helpProps("Research Brief — synthesised summary of what the retrieved papers are saying")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     leftTab === "brief"
                       ? "bg-slate-900/70 text-slate-100"
@@ -4195,6 +4441,7 @@ ${html}
                 ><ClipboardList size={14} /><span>Research Brief</span></button>
                 <button
                   onClick={() => setLeftTab("analytics")}
+                  {...helpProps("Charts — year / venue / citation distribution of the retrieved papers")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     leftTab === "analytics"
                       ? "bg-slate-900/70 text-slate-100"
@@ -4516,7 +4763,28 @@ ${html}
           <ErrorBoundary label="Workspace">
           <section data-region="workspace" className="min-w-0 h-full rounded-xl bg-[var(--ats-bg-section)] ats-panel flex flex-col overflow-hidden transition-[width] duration-200">
             <div ref={centerSectionRef as React.RefObject<HTMLDivElement>} className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5">
-            <div className="mb-4 flex items-center gap-2 text-xl font-bold"><LayoutGrid size={18} /><span>Workspace</span></div>
+            <div className="mb-4 flex items-center gap-2 text-xl font-bold">
+              <LayoutGrid size={18} /><span>Workspace</span>
+              {/* Start over — clears query, sprite results, layout, and
+                  any in-flight search to drop the user back at the
+                  pristine landing. Lives in the workspace title row so
+                  it's always reachable but visually small enough not to
+                  compete with the search action bubbles. */}
+              <button
+                onClick={handleStartOver}
+                title="Start over — clear query, directions, and any in-flight search"
+                {...helpProps("clears your query, directions, and any in-flight search — full reset to the landing")}
+                className="ml-auto inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-all hover:brightness-110"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  color:           "var(--ats-fg-muted)",
+                }}
+              >
+                <RotateCcw size={12} />
+                <span>Start over</span>
+              </button>
+            </div>
 
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
             <div className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
@@ -4542,29 +4810,75 @@ ${html}
                     // that withholds the trailing onChange.
                     setQuery((e.target as HTMLTextAreaElement).value);
                   }}
-                  // Enter progresses through the intro stages. In `blank`,
-                  // Enter consumes the AI's current verdict (the debounced
-                  // real-time assessment has usually already populated it).
-                  // If the verdict hasn't arrived yet the flag ref queues up
-                  // an advance for when it lands. Shift+Enter still inserts
-                  // a newline; IME composition Enter is ignored so CJK
-                  // candidate confirmations don't submit.
+                  // Enter behaviour on the landing (`blank`) stage:
+                  //   1. Sub-bubbles visible (a direction is picked + that
+                  //      direction has sub_options + no sub selected yet)
+                  //      → pick the recommended sub.
+                  //   2. Direction bubbles visible, none picked yet →
+                  //      pick the recommended big-direction.
+                  //   3. Still streaming directions → no-op (wait).
+                  //   4. Otherwise (first Enter) → AUTO-FIRE Find Angles.
+                  //      The user no longer has to click an intermediate
+                  //      "Find angles for me" bubble — typing + Enter is
+                  //      enough; the directions stream in directly.
+                  // Shift+Enter still inserts a newline; IME composition
+                  // Enter is ignored so CJK candidate confirmations don't
+                  // submit.
                   onKeyDown={(e) => {
+                    // Bubble navigation (Arrow keys) — when the sprite has
+                    // any actionable bubble on screen, ArrowLeft/Right
+                    // cycle the focused bubble instead of moving the
+                    // textarea cursor. Suppressed during IME composition
+                    // so CJK candidate selection still works.
+                    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+                        !e.nativeEvent.isComposing && !_composingRef.current &&
+                        spriteRef.current?.hasBubbles()) {
+                      e.preventDefault();
+                      spriteRef.current.moveFocus(e.key === "ArrowLeft" ? -1 : 1);
+                      return;
+                    }
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
                       e.preventDefault();
                       const trimmed = query.trim();
                       if (!trimmed || isSubmitting) return;
+                      // First priority: if a sprite bubble is focused,
+                      // commit it. Bubbles ARE the action surface — Enter
+                      // here is "click the highlighted bubble".
+                      if (spriteRef.current?.hasBubbles() && spriteRef.current.commitFocused()) {
+                        return;
+                      }
                       if (introStage === "blank") {
-                        if (assessmentVerdict) {
-                          setIntroStage(assessmentVerdict === "brief" ? "explore" : "full");
-                          setCommittedQuery(trimmed);
-                        } else {
-                          // No verdict yet — trigger an assessment immediately
-                          // (skipping the 900ms debounce wait) and mark the
-                          // Enter intent so the result handler auto-advances.
-                          pendingEnterRef.current = true;
-                          void runAssessment(trimmed);
+                        const dirs = directionData?.directions ?? [];
+                        const hasDirections = dirs.length > 0;
+                        if (hasDirections && selectedDirIndex !== null && selectedSubIndex === null) {
+                          const picked = dirs[selectedDirIndex];
+                          const subs = picked?.sub_options ?? [];
+                          if (subs.length > 0) {
+                            const recSub = directionData?.recommended_sub ?? 0;
+                            const idx = recSub >= 0 && recSub < subs.length ? recSub : 0;
+                            handleSubPickFromSprite(idx);
+                            return;
+                          }
                         }
+                        if (hasDirections && selectedDirIndex === null) {
+                          const recDir = directionData?.recommended_direction ?? 0;
+                          const idx = recDir >= 0 && recDir < dirs.length ? recDir : 0;
+                          handleDirectionPickFromSprite(idx);
+                          return;
+                        }
+                        if (isUnderstanding) return;
+                        // First Enter — kick the directions stream off
+                        // directly. No more intermediate Find-angles /
+                        // Just-search-it bubble; the user types and the
+                        // sprite immediately starts pushing angles.
+                        if (assessDebounceRef.current !== null) {
+                          window.clearTimeout(assessDebounceRef.current);
+                          assessDebounceRef.current = null;
+                        }
+                        // Fire assess in the background so the verdict
+                        // line catches up — purely cosmetic now.
+                        void runAssessment(trimmed);
+                        handleFindAnglesFromSprite();
                         return;
                       }
                       // "explore" leaves Enter a no-op for search (user clicks
@@ -4649,6 +4963,7 @@ ${html}
               <div className="stage-reveal flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden">
                 <button
                   onClick={() => setSettingsOpen(o => !o)}
+                  {...helpProps("open per-search settings — paper count, sort mode, year range, source filters…")}
                   className="shrink min-w-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm font-semibold text-slate-200 hover:border-blue-500/40 transition-colors"
                 >
                   <SlidersHorizontal size={14} className="shrink-0" />
@@ -4662,67 +4977,29 @@ ${html}
                     the action bar free of duplicate commentary. */}
 
                 <div className="ml-auto flex flex-nowrap items-center gap-2 min-w-0">
-                  {/* Explore Angles was previously a standalone button here.
-                      It's now absorbed into the sprite conversation — the
-                      sprite offers it as a bubble choice whenever it judges
-                      the input too brief. We keep a small Cancel affordance
-                      while a sprite-triggered angle search is in flight so
-                      the user can back out. */}
-                  {isUnderstanding && (
+                  {/* Cancel-angles button removed — when the user kicks
+                      off a search via the sprite Quick / Curated bubble,
+                      handleSearch auto-cancels any in-flight Find Angles
+                      stream (see the cancelUnderstand call there). The
+                      explicit cancel was never the right escape because
+                      the user almost always wanted to commit, not back
+                      out. */}
+
+                  {/* Quick / Curated toggle + Start search button were
+                      removed — those are now sprite chat bubbles (see
+                      handleStartSearchFromSprite + Sprite.tsx
+                      showSearchModeBubbles). The action bar keeps only
+                      Search Controls + Cancel/Stop affordances. */}
+                  {introStage === "full" && isSubmitting && (
                     <button
-                      onClick={() => cancelUnderstand()}
-                      title="Cancel angle search"
-                      className="flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-semibold transition-colors border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                      onClick={handleStop}
+                      title="Stop search"
+                      aria-label="Stop search"
+                      {...helpProps("stop the search and restore the layout — your query + directions stay")}
+                      className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
                     >
-                      <Square size={12} fill="currentColor" className="shrink-0" />
-                      <span className="truncate">Cancel angles</span>
+                      <Square size={13} fill="currentColor" />
                     </button>
-                  )}
-
-                  {introStage === "full" && (
-                    <>
-                      {/* Fast / Curated mode toggle — wrapped in stage-reveal
-                          so the upgrade from "explore" to "full" isn't an
-                          abrupt pop of three new controls. */}
-                      <div className="stage-reveal inline-flex items-center rounded-xl border border-slate-700 bg-slate-900/50 p-0.5 text-sm font-semibold">
-                        <button
-                          type="button"
-                          onClick={() => handleModeSwitchFromUser(true)}
-                          disabled={isSubmitting}
-                          aria-pressed={fastMode}
-                          className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
-                        ><Zap size={14} className="shrink-0" /><span className="truncate">Quick Search</span></button>
-                        <button
-                          type="button"
-                          onClick={() => handleModeSwitchFromUser(false)}
-                          disabled={isSubmitting}
-                          aria-pressed={!fastMode}
-                          className={`flex min-w-0 items-center gap-1.5 rounded-lg px-3 py-1 transition-colors disabled:opacity-60 ${!fastMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"}`}
-                        ><FlaskConical size={14} className="shrink-0" /><span className="truncate">Curated Analysis</span></button>
-                      </div>
-
-                      {/* Start / Stop — compact circular action */}
-                      {isSubmitting ? (
-                        <button
-                          onClick={handleStop}
-                          title="Stop search"
-                          aria-label="Stop search"
-                          className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-                        >
-                          <Square size={13} fill="currentColor" />
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => void handleSearch()}
-                          disabled={!query.trim()}
-                          title="Start search"
-                          aria-label="Start search"
-                          className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/50 bg-blue-500/10 text-blue-400 hover:border-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          <ArrowRight size={15} />
-                        </button>
-                      )}
-                    </>
                   )}
                 </div>
               </div>
@@ -4743,269 +5020,58 @@ ${html}
                 The Enter badge is only shown with the default hint AND at
                 blank stage, since Enter-to-advance is only meaningful then.
                 The whole row uses `stage-reveal` on first mount so it fades
-                in with the rest of the landing rather than popping. */}
-            {(() => {
-              // Display logic for the sprite voice slot:
-              //   1. If we have a current AI verdict message AND the query
-              //      hasn't drifted since it was assessed, show it.
-              //   2. Else if the instant reaction has been chosen after the
-              //      400 ms thinking pause, show that.
-              //   3. Else if the user has SOMETHING typed but no message
-              //      yet, show a pulsing "thinking" dot — covers both the
-              //      400 ms instant-reveal window and the 900 ms AI wait,
-              //      so there is no moment where the sprite is silent while
-              //      the user is editing.
-              //   4. Else if the box is empty, show the default invite.
-              const queryHasDrifted = query.trim() !== lastAssessedTextRef.current && lastAssessedTextRef.current.length > 0;
-              const freshMessage    = !!assessmentMessage && !queryHasDrifted;
-              const activeInstant   = !freshMessage && !!instantReaction && query.trim().length > 0;
-              // "Thinking" window covers both the pre-instant pause AND the
-              // AI debounce wait — whenever the user has typed something but
-              // no voice line is ready yet, the dot pulses.
-              const showThinking    = !freshMessage && !activeInstant && query.trim().length > 0;
-              const showMessage     = freshMessage || activeInstant;
-              const currentMessage  = freshMessage ? assessmentMessage : instantReaction;
-              const showDefault     = !showThinking && !showMessage && query.trim().length === 0;
-              const needsAngles     = (assessmentVerdict === "brief" || assessmentVerdict === "balanced");
-              // New-content confirmation: if the user has already advanced past
-              // blank and is now typing something materially different from the
-              // committed question, the sprite interrupts normal processing to
-              // ask if they want to start over. Non-destructive — nothing
-              // changes until they click Yes.
-              const askNewContentConfirm =
-                introStage !== "blank" &&
-                committedQuery.length > 0 &&
-                query.trim().length > 0 &&
-                looksLikeNewContent(committedQuery, query.trim());
-              // Show the two conversational bubbles only on the landing
-              // (blank stage), after the sprite has spoken, when the user
-              // hasn't already chosen a path, AND while directions haven't
-              // arrived yet (if they have, the direction bubbles take over
-              // the same slot).
-              const showChoiceBubbles =
-                introStage === "blank" &&
-                needsAngles &&
-                showMessage &&
-                !spriteChoiceMade &&
-                !isUnderstanding &&
-                !directionData;
-              // Direction bubbles: once Explore Angles has returned directions,
-              // surface them as clickable chat bubbles right under the sprite's
-              // voice so picking one feels like answering the sprite.
-              const directions = directionData?.directions || [];
-              const showDirectionBubbles = directions.length > 0 && introStage !== "full";
-              const showFindingAngles    = isUnderstanding;
-              if (!showThinking && !showMessage && !showDefault && !showChoiceBubbles && !showDirectionBubbles && !showFindingAngles && !askNewContentConfirm) return null;
-              return (
-                <div className="stage-reveal mt-3 flex flex-col items-center gap-2.5">
-                  {/* New-content confirmation takes priority over every
-                      other sprite output. When the user drifts from the
-                      committed question we pause normal sprite chatter
-                      and ask explicitly before blowing the session away. */}
-                  {askNewContentConfirm ? (
-                    <div className="flex flex-col items-center gap-2.5">
-                      <p
-                        key={`ask-new-${newContentPrompt}`}
-                        className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
-                        style={{ color: "var(--ats-fg-secondary)" }}
-                      >
-                        {/* Idle dot — the sprite is waiting for the user's
-                            confirmation answer, not actively thinking. */}
-                        <span
-                          className="sprite-dot-idle inline-block h-2 w-2 rounded-full shrink-0"
-                          style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                          aria-hidden
-                        />
-                        <span>{newContentPrompt}</span>
-                      </p>
-                      <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
-                        <button
-                          onClick={handleResetToBlankFromSprite}
-                          className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
-                          style={{
-                            borderColor:     "var(--ats-border-accent)",
-                            backgroundColor: "var(--ats-bg-accent-soft)",
-                            color:           "var(--ats-fg-accent)",
-                          }}
-                        >
-                          <span>Yes, start over</span>
-                        </button>
-                        <button
-                          onClick={handleKeepCurrentFromSprite}
-                          className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
-                          style={{
-                            borderColor:     "var(--ats-border-subtle)",
-                            backgroundColor: "var(--ats-bg-panel)",
-                            color:           "var(--ats-fg-secondary)",
-                          }}
-                        >
-                          <span>Nope, just tweaking</span>
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                  <div className="flex flex-col items-center gap-2.5 w-full">
-                  {/* Sprite voice line. Bumped from text-xs (12 px) to text-sm
-                      (14 px) — the old size was too small to read at a glance.
-                      Sparkles icon + thinking dot scaled to match. */}
-                  {showThinking && (
-                    <p
-                      className="inline-flex items-center gap-2 text-sm italic"
-                      style={{ color: "var(--ats-fg-muted)" }}
-                    >
-                      <span
-                        className="sprite-dot-think inline-block h-2 w-2 rounded-full shrink-0"
-                        style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                        aria-hidden
-                      />
-                      thinking…
-                    </p>
-                  )}
-                  {showFindingAngles && !showMessage && (
-                    <p
-                      className="inline-flex items-center gap-2 text-sm italic"
-                      style={{ color: "var(--ats-fg-muted)" }}
-                    >
-                      <span
-                        className="sprite-dot-think inline-block h-2 w-2 rounded-full shrink-0"
-                        style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                        aria-hidden
-                      />
-                      looking for angles…
-                    </p>
-                  )}
-                  {showMessage && !showFindingAngles && (
-                    // key on the message text so a fresh message re-fires
-                    // the stage-reveal fade — otherwise the sprite's new
-                    // words would silently swap in. Fun side-effect: looks
-                    // like the sprite is "saying" a new line each time.
-                    <p
-                      key={currentMessage}
-                      className="stage-reveal inline-flex items-center gap-2 text-sm italic leading-snug"
-                      style={{ color: "var(--ats-fg-secondary)" }}
-                    >
-                      {/* Sprite dot — THINK tempo while waiting on either
-                          the instant reaction's reveal or the AI verdict;
-                          IDLE tempo once a real AI verdict is settled. A
-                          subtle breathing-versus-pulsing cue lets users
-                          feel "sprite is working" vs "sprite is resting"
-                          without ever going fully still. */}
-                      <span
-                        className={`${(activeInstant || assessing) ? "sprite-dot-think" : "sprite-dot-idle"} inline-block h-2 w-2 rounded-full shrink-0`}
-                        style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                        aria-hidden
-                      />
-                      <span>{currentMessage}</span>
-                      {/* Enter badge only shows alongside a FRESH AI verdict
-                          — during the instant-reaction layer the sprite
-                          hasn't judged yet, and the user's Enter at that
-                          point would just queue up for the real verdict
-                          anyway. Show it only when there's a real
-                          actionable decision on screen. */}
-                      {freshMessage && introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
-                        <span
-                          aria-hidden
-                          className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold not-italic tracking-wide"
-                          style={{
-                            borderColor:     "var(--ats-border-accent)",
-                            backgroundColor: "var(--ats-bg-accent-soft)",
-                            color:           "var(--ats-fg-accent)",
-                          }}
-                        >
-                          Press <kbd className="font-mono">⏎ Enter</kbd>
-                        </span>
-                      )}
-                    </p>
-                  )}
-                  {showDefault && (
-                    <p
-                      className="inline-flex items-center gap-2 text-sm leading-snug"
-                      style={{ color: "var(--ats-fg-muted)" }}
-                    >
-                      <span>Type any key words, topic or theme you want to explore</span>
-                      <span
-                        aria-hidden
-                        className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide animate-pulse"
-                        style={{
-                          borderColor:     "var(--ats-border-accent)",
-                          backgroundColor: "var(--ats-bg-accent-soft)",
-                          color:           "var(--ats-fg-accent)",
-                        }}
-                      >
-                        Press <kbd className="font-mono">⏎ Enter</kbd>
-                      </span>
-                    </p>
-                  )}
+                in with the rest of the landing rather than popping.
 
-                  {/* Choice bubbles — the wording is first-person from the
-                      USER's point of view (asking the sprite to do something)
-                      rather than the sprite volunteering. Kept plain-English:
-                      no "as-is" (ESL-unfriendly), no CTA jargon. Font
-                      bumped to text-xs and padding stretched a touch so the
-                      bubbles feel tappable. */}
-                  {showChoiceBubbles && (
-                    <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
-                      <button
-                        onClick={handleFindAnglesFromSprite}
-                        className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
-                        style={{
-                          borderColor:     "var(--ats-border-accent)",
-                          backgroundColor: "var(--ats-bg-accent-soft)",
-                          color:           "var(--ats-fg-accent)",
-                        }}
-                      >
-                        <Search size={12} />
-                        <span>Find angles for me</span>
-                      </button>
-                      <button
-                        onClick={handleSearchAsIsFromSprite}
-                        className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all hover:brightness-105"
-                        style={{
-                          borderColor:     "var(--ats-border-subtle)",
-                          backgroundColor: "var(--ats-bg-panel)",
-                          color:           "var(--ats-fg-secondary)",
-                        }}
-                      >
-                        <ArrowRight size={12} />
-                        <span>Just search it</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Direction chat bubbles — once handleUnderstand has
-                      returned, the sprite serves up the angles as clickable
-                      options. Picking one advances to the full action bar
-                      with the refined query already selected. Matched font
-                      size with the choice bubbles (text-xs) so the two
-                      types of bubble feel like siblings. */}
-                  {showDirectionBubbles && !showFindingAngles && (
-                    <div className="stage-reveal flex flex-wrap items-center justify-center gap-1.5 max-w-2xl">
-                      {directions.slice(0, 6).map((dir, di) => {
-                        const isRecommended = di === (directionData?.recommended_direction ?? -1);
-                        return (
-                          <button
-                            key={di}
-                            onClick={() => handleDirectionPickFromSprite(di)}
-                            title={dir.description || dir.label}
-                            className="inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-medium transition-all hover:brightness-105 max-w-[18rem]"
-                            style={{
-                              borderColor:     isRecommended ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
-                              backgroundColor: isRecommended ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
-                              color:           isRecommended ? "var(--ats-fg-accent)"    : "var(--ats-fg-primary)",
-                            }}
-                          >
-                            {isRecommended && <Star size={11} className="shrink-0" />}
-                            <span className="truncate">{dir.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                  </div>
-                  )}
-                </div>
-              );
-            })()}
+                The wrapper sets a generous min-height + flex-center so the
+                sprite floats vertically AND horizontally centred in the
+                empty band below the textarea on the landing. Once the
+                sprite has rich content (direction or sub-direction bubbles
+                streamed in), we DROP the min-height so the bubbles snap
+                upward toward the textarea — otherwise sub-bubbles would
+                land below the fold on smaller viewports and force the
+                user to scroll. The horizontal centering stays. */}
+            <div className={`flex flex-col items-center justify-center w-full ${directionData?.directions?.length ? "" : "min-h-[14rem]"}`}>
+            <Sprite
+              ref={spriteRef}
+              query={query}
+              committedQuery={committedQuery}
+              introStage={introStage as "blank" | "explore" | "full"}
+              hasRunSearch={hasRunSearch}
+              isUnderstanding={isUnderstanding}
+              message={assessmentMessage}
+              verdict={assessmentVerdict}
+              assessing={assessing}
+              instantReaction={instantReaction}
+              spriteChoiceMade={spriteChoiceMade}
+              directionData={directionData}
+              lastAssessedText={lastAssessedTextRef.current}
+              newContentPrompt={newContentPrompt}
+              bubblesRequested={bubblesRequested}
+              understandStatus={understandStatus}
+              understandDecompose={understandDecompose}
+              understandExpand={understandExpand}
+              hoverHelp={hoverHelpText}
+              onHoverHelp={setHoverHelpText}
+              selectedDirIndex={selectedDirIndex}
+              selectedSubIndex={selectedSubIndex}
+              customQueryEnabled={customQueryEnabled}
+              customQueryValue={customQueryValue}
+              onFindAngles={handleFindAnglesFromSprite}
+              onSearchAsIs={handleSearchAsIsFromSprite}
+              onResetToBlank={handleResetToBlankFromSprite}
+              onKeepCurrent={handleKeepCurrentFromSprite}
+              onPickDirection={handleDirectionPickFromSprite}
+              onPickSubDirection={handleSubPickFromSprite}
+              onCustomQueryEnable={handleCustomQueryEnableFromSprite}
+              onCustomQueryChange={handleCustomQueryChangeFromSprite}
+              onCustomQuerySubmit={handleCustomQuerySubmitFromSprite}
+              onStartSearch={handleStartSearchFromSprite}
+            />
+            </div>
+            {/* Sprite UI lives in src/components/sprite/Sprite.tsx — rendering
+                logic, derived booleans (queryHasDrifted, showChoiceBubbles
+                etc.) and the per-state markup are encapsulated there. The
+                page only owns state + handler wiring. */}
 
             {/* Previously this slot held a two-line blurb explaining what
                 Quick / Curated does. Removed — the sprite now volunteers a
@@ -5038,55 +5104,14 @@ ${html}
               </div>
             )}
 
-            {/* Understanding progress bar — uses the product-wide
-                `progress-slide` keyframe (same one driving ProgressStrip on
-                every action button + the agent progress bar). A single
-                narrow fill segment glides left↔right, which is the pattern
-                users now associate with "something's working" everywhere
-                else in the app. Unifying on this keyframe kills two problems
-                at once: the previous shimmer-over-determinate combo looked
-                bespoke and occasionally read as "stuck" when the backing
-                percentage held steady between backend events, and having
-                two different indeterminate idioms in one product was
-                visually inconsistent. Status text + pulsing dot above the
-                bar still show the current stage label, but the bar itself
-                is now indeterminate + always in motion so there's no
-                "which of these percentage bands am I in" guessing. */}
-            {isUnderstanding && (() => {
-              const statusText = understandStatus || "Starting query analysis…";
-              return (
-                <div className="mt-2">
-                  <div
-                    className="mb-1 flex items-center gap-1.5 text-[10px]"
-                    style={{ color: "var(--ats-fg-muted)" }}
-                  >
-                    <span
-                      className="inline-block h-1.5 w-1.5 rounded-full animate-pulse"
-                      style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                      aria-hidden
-                    />
-                    <span className="italic truncate">{statusText}</span>
-                  </div>
-                  {/* Indeterminate bar — rail + sliding fill segment.
-                      Rail uses --ats-border-subtle so it picks up the
-                      theme; fill segment uses --ats-fg-accent so the
-                      motion colour matches the rest of the product's
-                      accent highlights. */}
-                  <div
-                    className="relative h-1 w-full overflow-hidden rounded-full"
-                    style={{ backgroundColor: "var(--ats-border-subtle)" }}
-                  >
-                    <div
-                      className="absolute inset-y-0 left-0 w-1/3 rounded-full"
-                      style={{
-                        backgroundColor: "var(--ats-fg-accent)",
-                        animation:       "progress-slide 1.2s ease-in-out infinite",
-                      }}
-                    />
-                  </div>
-                </div>
-              );
-            })()}
+            {/* Understanding progress bar removed — the streaming progress
+                now lives entirely in the sprite chat. The sprite voice
+                line surfaces the current stage ("Decomposing…",
+                "Expanding…", "Building direction tree…") and a small
+                "what I'm seeing" panel below shows the live decompose +
+                expand payload (key terms, contexts, synonyms) as they
+                stream in, so the user can watch the AI's thinking instead
+                of staring at an indeterminate bar. */}
 
             {/* Settings panel — controlled. `stage-reveal` smooths the open
                 transition so the panel doesn't pop into place. */}
@@ -5151,200 +5176,16 @@ ${html}
             </div>
             )}
 
-            {/* Research Angles section — visible ONLY once directionData
-                actually holds results. Previously we mounted it as soon
-                as the Understand call started, which meant an empty
-                accordion flashed onto the page for a few seconds while
-                the request was in flight. Now the accordion only
-                appears when there are directions to show, fades in via
-                `stage-reveal`, and during the Understand request the
-                SPRITE's "looking for angles…" line covers the waiting
-                state instead. */}
-            {Boolean(directionData?.directions?.length) && (
-            <div className="stage-reveal mt-5 rounded-xl bg-[var(--ats-bg-card-muted)] px-3 py-2.5">
-              <div
-                className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-1"
-                onClick={() => setUnderstandOpen(o => !o)}
-                title={understandOpen ? "Collapse the directions grid" : "Expand — your earlier results are preserved"}
-              >
-                <Search size={14} /><span>Research Angles</span>
-                {/* "Preserved results" hint — only when collapsed AND
-                    directionData has content. Tiny accent dot + count.
-                    Disappears when expanded (the content itself is
-                    the indicator) and while actively understanding. */}
-                {!understandOpen && !isUnderstanding && Boolean(directionData?.directions?.length) && (
-                  <span className="ml-1 inline-flex items-center gap-1 text-[10px] font-normal" style={{ color: "var(--ats-fg-muted)" }}>
-                    <span
-                      className="inline-block h-1.5 w-1.5 rounded-full"
-                      style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                      aria-hidden
-                    />
-                    <span className="italic">
-                      {directionData!.directions.length} direction{directionData!.directions.length !== 1 ? "s" : ""} preserved — click to reopen
-                    </span>
-                  </span>
-                )}
-                <ChevronDown size={12} className={`ml-auto transition-transform duration-200 ${understandOpen ? "" : "rotate-180"}`} />
-              </div>
-              {understandOpen && (
-              <div className="mt-3">
-                {directionData?.directions?.length ? (
-                  <>
-                    {/* 6 direction cards — fixed 2-column × 3-row grid; sub-options expand inside the selected card */}
-                    <div className="grid grid-cols-2 gap-2 items-start">
-                      {directionData.directions.map((dir, di) => {
-                        // Selection is strictly user-driven; no recommended-as-default so the
-                        // user can pick a main direction without committing to a sub-option.
-                        const isSelDir = selectedDirIndex === di;
-                        // Token-based styling for both states. Selected uses
-                        // the accent tokens so the card follows the active
-                        // theme (Morning Mint = emerald, Warm Paper = amber,
-                        // Night Blue = blue, etc). Unselected uses the
-                        // panel tokens so nothing hardcoded-slate-gray
-                        // bleeds through in day themes.
-                        const dirCardStyle: React.CSSProperties = isSelDir
-                          ? {
-                              borderColor:     "var(--ats-border-accent)",
-                              backgroundColor: "var(--ats-bg-accent-soft)",
-                            }
-                          : {
-                              borderColor:     "var(--ats-border-subtle)",
-                              backgroundColor: "var(--ats-bg-panel)",
-                            };
-                        return (
-                          <div key={di}
-                            className="qu-direction-card rounded-xl border p-2 cursor-pointer transition-colors"
-                            style={dirCardStyle}
-                            onClick={() => {
-                              // Clicking an already-selected direction toggles it off.
-                              if (isSelDir) {
-                                setSelectedDirIndex(null);
-                                setSelectedSubIndex(null);
-                              } else {
-                                setSelectedDirIndex(di);
-                                setSelectedSubIndex(null);          // sub is opt-in too
-                                setCustomQueryEnabled(false);
-                              }
-                            }}>
-                            <div
-                              className="flex items-start gap-1.5 text-xs font-semibold leading-snug"
-                              style={{ color: isSelDir ? "var(--ats-fg-accent)" : "var(--ats-fg-primary)" }}
-                            >
-                              <span
-                                className="shrink-0 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-md px-1 text-[10px] font-bold tabular-nums"
-                                style={{
-                                  backgroundColor: isSelDir ? "var(--ats-bg-accent-soft)" : "var(--ats-border-subtle)",
-                                  color:           isSelDir ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
-                                }}
-                              >{di + 1}</span>
-                              {di === (directionData.recommended_direction ?? 0) && <Star size={10} className="shrink-0 mt-0.5 fill-amber-400 text-amber-400" />}
-                              <span className="min-w-0">{dir.label}</span>
-                            </div>
-                            {dir.description && (
-                              <div
-                                className="mt-0.5 text-[10px] leading-tight line-clamp-2"
-                                style={{ color: "var(--ats-fg-muted)" }}
-                              >
-                                {dir.description}
-                              </div>
-                            )}
-                            {/* Sub-options — visible only when this direction is selected. A sub is optional;
-                                re-clicking the same one cancels it. */}
-                            {isSelDir && dir.sub_options?.length > 0 && (
-                              <div className="mt-2 space-y-1">
-                                {dir.sub_options.map((sub, si) => {
-                                  const isSelSub = selectedSubIndex === si && !customQueryEnabled;
-                                  const toggleSub = (e: React.SyntheticEvent) => {
-                                    // Stop propagation so the parent direction card's onClick doesn't
-                                    // fire and toggle the direction itself off.
-                                    e.stopPropagation();
-                                    setSelectedSubIndex(prev => (prev === si ? null : si));
-                                    setCustomQueryEnabled(false);
-                                  };
-                                  // Token-based sub-option style. Selected
-                                  // + hovered + idle states all use theme
-                                  // tokens so NOTHING shows up as a hard-
-                                  // coded slate-gray block. Hover-only
-                                  // feedback lives on the individual row
-                                  // (class `.qu-sub-option:hover` below)
-                                  // because the parent card's hover class
-                                  // would otherwise cascade to all children
-                                  // through `filter: brightness()` — that
-                                  // was the "hover one sub, all turn grey"
-                                  // bug.
-                                  const subStyle: React.CSSProperties = isSelSub
-                                    ? {
-                                        borderColor:     "var(--ats-border-accent)",
-                                        backgroundColor: "var(--ats-bg-accent-soft)",
-                                      }
-                                    : {
-                                        borderColor:     "var(--ats-border-subtle)",
-                                        backgroundColor: "var(--ats-bg-base)",
-                                      };
-                                  return (
-                                    // Plain <div> (not <label>) so clicking anywhere in the row goes
-                                    // through one handler. <label> + <input radio> previously fired
-                                    // twice on click (input onClick + label onClick), toggling the
-                                    // selection to-and-back and making the row look unresponsive.
-                                    <div key={si}
-                                      role="radio"
-                                      aria-checked={isSelSub}
-                                      tabIndex={0}
-                                      className="qu-sub-option flex items-start gap-1.5 rounded-lg border px-2 py-1 cursor-pointer transition-colors"
-                                      style={subStyle}
-                                      onClick={toggleSub}
-                                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSub(e); } }}>
-                                      {/* Decorative radio disc — visual only, click is handled by the row. */}
-                                      <span
-                                        aria-hidden
-                                        className="mt-1 shrink-0 h-3 w-3 rounded-full border"
-                                        style={{
-                                          borderColor:     isSelSub ? "var(--ats-fg-accent)" : "var(--ats-border-subtle)",
-                                          backgroundColor: isSelSub ? "var(--ats-fg-accent)" : "transparent",
-                                        }}
-                                      />
-                                      <div className="min-w-0">
-                                        <div
-                                          className="text-[11px] font-semibold leading-snug"
-                                          style={{ color: isSelSub ? "var(--ats-fg-accent)" : "var(--ats-fg-primary)" }}
-                                        >
-                                          {sub.label}
-                                        </div>
-                                        {sub.reason && (
-                                          <div
-                                            className="mt-0.5 text-[10px] leading-tight"
-                                            style={{ color: "var(--ats-fg-muted)" }}
-                                          >
-                                            {sub.reason}
-                                          </div>
-                                        )}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Custom query option */}
-                    <label className={`mt-2 flex items-start gap-2 rounded-xl border p-2 cursor-pointer transition-all ${customQueryEnabled ? "border-blue-500/50 bg-blue-500/8" : "border-slate-800 bg-slate-900/20 hover:border-slate-700"}`}>
-                      <input type="radio" name="sub-option" checked={customQueryEnabled} onChange={() => setCustomQueryEnabled(true)} className="mt-0.5 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-semibold text-slate-300">Custom query</div>
-                        <input value={customQueryValue} onChange={(e) => { setCustomQueryValue(e.target.value); setCustomQueryEnabled(true); }} placeholder="Enter your own search query..." className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1 text-xs text-slate-100 outline-none focus:border-blue-500" />
-                      </div>
-                    </label>
-                  </>
-                ) : (
-                  <div className="text-xs text-slate-500">Click &quot;Explore Angles&quot; to see research directions for your question.</div>
-                )}
-              </div>
-              )}
-            </div>
-            )}
-
+            {/* The legacy Research Angles accordion / direction-card grid /
+                custom-query input was removed. The same flow now happens
+                entirely as a sprite chat conversation:
+                  · directions stream → bubbles render under the sprite
+                  · picking a big-direction reveals sub-option bubbles
+                  · "type my own…" bubble swaps in an inline input
+                See src/components/sprite/Sprite.tsx for the bubble UI and
+                handleDirectionPickFromSprite / handleSubPickFromSprite /
+                handleCustomQuery* in this file for the wiring. */}
+            
             {/* Divider between the action area and retrieved results — hidden alongside the
                 Current Run block when idle, so the space below action row stays clean. */}
             {(isSubmitting || job?.status === "done" || job?.status === "error") && (
@@ -5446,7 +5287,7 @@ ${html}
               </div>
               {papersAreStreaming && (
                 <div className="mb-3 rounded-2xl border border-blue-500/20 bg-blue-500/5 px-4 py-3">
-                  <div className="flex items-center justify-between text-xs mb-1.5">
+                  <div className="flex items-center justify-between text-sm mb-1.5">
                     <span className="flex items-center gap-1.5 text-blue-300 font-semibold">
                       <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400 shrink-0" />
                       Deep analysis in progress
@@ -6000,6 +5841,7 @@ ${html}
                     flow. */}
                 <button
                   onClick={() => setLabModule("review")}
+                  {...helpProps("Paper Review — paste your draft and get adversarial multi-agent peer review")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     labModule === "review"
                       ? "bg-slate-900/70 text-slate-100"
@@ -6012,6 +5854,7 @@ ${html}
                 </button>
                 <button
                   onClick={() => setLabModule("synthesis")}
+                  {...helpProps("Synthesis Lab — write a draft using the papers you've collected as references")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     labModule === "synthesis"
                       ? "bg-slate-900/70 text-slate-100"
@@ -6544,17 +6387,23 @@ ${html}
                             entry.error    ? "text-red-400"     :
                             entry.revision ? "text-amber-400"   :
                             "text-violet-400";
+                          // Status glyphs replaced with lucide icons so the
+                          // agent log matches the rest of the iconography
+                          // (lucide everywhere) instead of mixing emoji /
+                          // arrow chars that render inconsistently across
+                          // platforms (especially on Windows zh-CN where the
+                          // bare ▶ rendered as a tofu box).
                           const icon =
-                            entry.done     ? "✓" :
-                            entry.error    ? "✗" :
-                            entry.revision ? (entry.msg.startsWith("↩") ? "↩" : "↺") :
-                            <span className="inline-block animate-pulse">▶</span>;
+                            entry.done     ? <Check size={13} /> :
+                            entry.error    ? <X size={13} /> :
+                            entry.revision ? (entry.msg.startsWith("↩") ? <CornerDownLeft size={13} /> : <RotateCcw size={13} />) :
+                            <Play size={13} className="animate-pulse" />;
                           return (
                             <div key={entry.name} className="flex items-start gap-2 py-0.5">
-                              <span className={`shrink-0 text-xs mt-0.5 ${iconColor}`}>{icon}</span>
+                              <span className={`shrink-0 mt-0.5 ${iconColor}`}>{icon}</span>
                               <div className="min-w-0">
-                                <span className={`text-xs font-semibold ${nameColor}`}>{entry.name}</span>
-                                <span className="text-xs text-slate-500 ml-1.5 break-words">
+                                <span className={`text-sm font-semibold ${nameColor}`}>{entry.name}</span>
+                                <span className="text-sm text-slate-500 ml-1.5 break-words">
                                   {entry.msg.replace(/^[✓✗▶↩↺]\s*/, "")}
                                 </span>
                               </div>
