@@ -1146,7 +1146,7 @@ export default function HomePage() {
   // caret to the end so the user can keep typing if they want to refine.
   function handlePickRecommendedTerm(term: string) {
     setQuery(term);
-    setAssessmentMessage("");
+    setAssessmentMessage(`picked “${term}” — Enter when you're ready (◕‿◕)`);
     // Defer the focus / caret move one frame so React has committed the
     // controlled-value update; otherwise setSelectionRange writes to the
     // pre-update value and ends up in the wrong place.
@@ -1157,6 +1157,13 @@ export default function HomePage() {
       try { ta.setSelectionRange(term.length, term.length); } catch {}
     });
   }
+
+  // The sprite typing-reaction + step-aware voice useEffects live AFTER
+  // `buttonStep` and `isSubmitting` are declared further down — they
+  // reference both, and React 19 + Turbopack TDZ-rejects the closure
+  // when those bindings are read before their declaration. See the
+  // matching effects right under the `buttonStep` state at the bottom
+  // of this section.
 
   const [fastMode, setFastMode] = useState(true);
   const [paperCount, setPaperCount] = useState(15);
@@ -1350,6 +1357,42 @@ export default function HomePage() {
       setButtonStep(0);
     }
   }, [query, hasRunSearch]);
+
+  // Sprite typing-reaction loop — gives the sprite a voice while the
+  // user is composing a query, so the surface never feels dead. Tiers:
+  //   · empty input → blank message, the "Type any key words…" default
+  //                   invite owns the slot.
+  //   · short input (< 4 chars) → "thinking…" — feels like the sprite
+  //                               is reading along.
+  //   · medium input (4–25 chars) → encouraging mid-typing line.
+  //   · longer input (≥ 25 chars) → "got plenty to work with — Enter"
+  //                                 nudge so the user knows to commit.
+  // Only fires when buttonStep === 0 (the user hasn't started the
+  // 3-Enter ritual yet); the step-aware effect below owns the slot
+  // once they have. Debounced 350 ms so steady typing doesn't churn.
+  useEffect(() => {
+    if (hasRunSearch || isSubmitting) return;
+    if (buttonStep !== 0) return;
+    const trimmed = query.trim();
+    const id = window.setTimeout(() => {
+      if (trimmed.length === 0)        setAssessmentMessage("");
+      else if (trimmed.length < 4)     setAssessmentMessage("hmm, keep going…");
+      else if (trimmed.length < 25)    setAssessmentMessage("nice — add a bit more or hit Enter (˙ᵕ˙)");
+      else                             setAssessmentMessage("got plenty to work with — Enter when ready (◕‿◕)");
+    }, 350);
+    return () => window.clearTimeout(id);
+  }, [query, buttonStep, hasRunSearch, isSubmitting]);
+
+  // Step-aware sprite voice — fires the moment buttonStep changes so
+  // the user always knows what the next Enter does. Putting it here
+  // (instead of inside the textarea Enter handler) keeps the line in
+  // sync if the step flips via any other path.
+  useEffect(() => {
+    if (hasRunSearch || isSubmitting) return;
+    if (buttonStep === 1) setAssessmentMessage("Quick or Curated? Enter again to pick (◕‿◕)");
+    if (buttonStep === 2) setAssessmentMessage("Enter to fire · ← → to switch · Esc to back out");
+  }, [buttonStep, hasRunSearch, isSubmitting]);
+
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
   // Announcement banner is OFF by default now — a megaphone button next to
   // the mascot toggles it. Users who never need the banner get a cleaner
@@ -4355,6 +4398,15 @@ ${html}
                   // Enter is ignored so CJK candidate confirmations don't
                   // submit.
                   onKeyDown={(e) => {
+                    // Esc — back out of the 3-step Enter ritual without
+                    // losing the typed query. Step 2 → 1 (drop the focus
+                    // ring), step 1 → 0 (hide the buttons). At step 0
+                    // there's nothing to back out of, so Esc is a no-op.
+                    if (e.key === "Escape" && buttonStep > 0 && !isSubmitting) {
+                      e.preventDefault();
+                      setButtonStep((s) => (s > 0 ? ((s - 1) as 0 | 1 | 2) : 0));
+                      return;
+                    }
                     // Bubble navigation (Arrow keys) — when the sprite has
                     // any actionable bubble on screen (Quick / Curated +
                     // recommended-term chips), arrow keys cycle the

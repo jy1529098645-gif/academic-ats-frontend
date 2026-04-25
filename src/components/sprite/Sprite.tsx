@@ -266,16 +266,18 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
         )}
       </div>
 
-      {/* Quick / Curated buttons — ALWAYS mounted so the row reserves
-          its vertical space at all times. We swap visibility via
-          opacity + pointer-events instead of mount/unmount, which keeps
-          the chips below pinned at the same y when the user starts
-          typing and through the 3-step Enter reveal. We DON'T use a
-          CSS opacity transition here: React's strict-mode re-renders
-          (driven by hover-help + the buttonStep state machine) kept
-          resetting the in-flight transition to currentTime=0, leaving
-          the row stuck at opacity:0 even though inline style was
-          opacity:1. The reveal reads fine as an instant flip. */}
+      {/* Quick / Curated buttons — mounted while we're on the landing
+          (hasRunSearch=false) so the row reserves space and the chips
+          below stay pinned through the 3-step Enter reveal. Once a
+          search fires we COLLAPSE the row entirely (height: 0, no
+          children) so the retrieved-papers / brief sections below can
+          slide up and fill what would otherwise be a dead band of
+          empty pixels under the sprite. We DON'T use a CSS opacity
+          transition here: React's strict-mode re-renders (driven by
+          hover-help + the buttonStep state machine) kept resetting
+          the in-flight transition to currentTime=0. The reveal reads
+          fine as an instant flip. */}
+      {!hasRunSearch && (
       <div
         className="flex flex-row items-center justify-center gap-2"
         style={{
@@ -319,15 +321,15 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           <span>Curated Analysis</span>
         </button>
       </div>
+      )}
 
-      {/* Recommended-term chips — borderless ghost row, always mounted
-          so it can fade in/out with the search-mode-buttons strip
-          above. Hover scales each chip via CSS `transform` (does NOT
-          reflow neighbours) and the chip whose text matches the
-          current input is rendered in a "selected" style: same
-          transform-only scale + a darker text colour. No padding /
-          font-size changes anywhere — every visual emphasis is done
-          off the layout flow so neighbouring chips stay put. */}
+      {/* Recommended-term chips — borderless ghost row. Like the
+          Quick/Curated row above, this disappears outright once a
+          search is running so the retrieved-papers / brief sections
+          below can climb up. While on the landing the row is always
+          mounted (with opacity 0/1) so its height stays reserved and
+          the chip strip never blinks in/out as the user types. */}
+      {!hasRunSearch && (
       <div
         className="flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight"
         style={{
@@ -359,6 +361,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           );
         })}
       </div>
+      )}
     </div>
   );
 });
