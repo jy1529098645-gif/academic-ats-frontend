@@ -1020,28 +1020,13 @@ export default function AdminPage() {
     }
   };
 
-  // ── Gate screens ────────────────────────────────────────────────────────
-  // All three gate screens inherit the day-mint theme wrapper below so
-  // even an unauthorised visitor sees the correct palette (no brief dark
-  // flash before the login redirect).
-  if (!authChecked) {
-    return (
-      <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center">
-        <p className="text-sm" style={{ color: "var(--ats-fg-muted)" }}>Checking access…</p>
-      </div>
-    );
-  }
-
-  // No admin session OR non-dev email signed in → show the dedicated
-  // admin login. This is the ONLY surface where the operator authenticates
-  // the admin context; the main app's session is irrelevant here. A
-  // successful sign-in writes tokens to `ats-admin-auth-token` in
-  // localStorage, from which the client auto-refreshes going forward.
-  if (!authEmail || !isDev) {
-    return <AdminLoginScreen currentEmail={authEmail} />;
-  }
-
-  // ── Authorised render ───────────────────────────────────────────────────
+  // ── Derived values (must compute BEFORE the gate-screen early returns
+  //    so every hook below — useMemo for userList in particular — is
+  //    called on every render). React #310 ("Rendered more hooks than
+  //    during the previous render") fires the moment the auth state
+  //    flips between login screen and authenticated, because hooks
+  //    AFTER the early returns suddenly start running. Lifting them
+  //    above the returns keeps the hook count stable. ──────────────────
   const ov = overview.data;
   const ts = timeseries.data?.data ?? [];
   const rawUserList = users.data?.users ?? [];
@@ -1074,6 +1059,27 @@ export default function AdminPage() {
     }
     return arr;
   }, [rawUserList, userSort]);
+
+  // ── Gate screens ────────────────────────────────────────────────────────
+  // All three gate screens inherit the day-mint theme wrapper below so
+  // even an unauthorised visitor sees the correct palette (no brief dark
+  // flash before the login redirect).
+  if (!authChecked) {
+    return (
+      <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center">
+        <p className="text-sm" style={{ color: "var(--ats-fg-muted)" }}>Checking access…</p>
+      </div>
+    );
+  }
+
+  // No admin session OR non-dev email signed in → show the dedicated
+  // admin login. This is the ONLY surface where the operator authenticates
+  // the admin context; the main app's session is irrelevant here. A
+  // successful sign-in writes tokens to `ats-admin-auth-token` in
+  // localStorage, from which the client auto-refreshes going forward.
+  if (!authEmail || !isDev) {
+    return <AdminLoginScreen currentEmail={authEmail} />;
+  }
 
   // Pinned to Morning Mint (day-mint, emerald accents). The admin console
   // is a daytime tool — dev eyes spend hours reading numbers, so we
