@@ -73,6 +73,52 @@
      · muted background tint                                              */
 .sprite-bubble-soft { font-size: calc(12.5px * var(--sprite-zoom-comp)); line-height: 1.35; }
 
+/* ── Recommended-term chips ────────────────────────────────────────────────
+   Transform-only emphasis so hover / selection NEVER reflows the row.
+   `transform: scale(...)` paints around the chip's existing layout box,
+   so neighbouring chips and surfaces below stay pinned. All visual
+   states (default / hover / selected) live in CSS so the React render
+   passes a stable inline style and the cascade alone decides the look —
+   that avoids the inline-vs-class fight where a transition was leaving
+   the chip stuck at the old computed values.
+   IMPORTANT: must declare opacity / color BEFORE the global transition
+   so it has something to transition between. */
+/* Recommended-term chips — instant transform / color swaps (no CSS
+   transition). The page lives inside React strict-mode + frequent
+   parent re-renders from hover-help; explicit transitions on this
+   element kept getting reset to currentTime=0 every render loop,
+   leaving the [data-selected] / :hover overrides effectively stuck
+   at their default. We BOTH drop our own transition AND override the
+   global `*, ::before, ::after { transition-property: color, ... }`
+   rule with `transition: none` so color flips instantly when data-
+   selected toggles. The small scale/colour deltas read fine without
+   easing. */
+.recommended-chip {
+  color:            var(--ats-fg-muted);
+  opacity:          0.6;
+  transform:        scale(1);
+  transform-origin: center;
+  transition:       none !important;
+}
+.recommended-chip:hover            { transform: scale(1.08); }
+.recommended-chip[data-selected] {
+  color:     var(--ats-fg-primary);
+  opacity:   1;
+  transform: scale(1.10);
+}
+.recommended-chip[data-selected]:hover { transform: scale(1.14); }
+
+/* ── Sprite voice-line fade ────────────────────────────────────────────────
+   Voice lines are key-remounted on text change; this animation gives the
+   incoming line a soft fade-in so the swap doesn't feel like a hard cut.
+   We can't fade the OUTGOING element (React unmounts it immediately) but
+   the fixed-height voice slot above ensures no layout shift either way. */
+@keyframes voice-fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.voice-fade { animation: voice-fade-in 220ms ease-out both; }
+
 /* ── Minimum readable font size baseline ───────────────────────────────────
    The product peppers explicit `text-[10px]`, `text-[11px]`, `text-[9.5px]`
    etc. for hint / label / caption text. After the html zoom multiplier on

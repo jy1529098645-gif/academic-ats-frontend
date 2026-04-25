@@ -140,16 +140,38 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
     },
   }), [actionables, focusedIdx, focusedKey]);
 
+  // The "selected" chip is whichever entry exactly matches the trimmed
+  // textarea contents. Lets us style a chip the user has just picked
+  // (or is in the middle of editing into the input) without tracking a
+  // separate selection state. Equality is intentionally strict — if
+  // the user starts typing past the chip's text, it deselects.
+  const selectedTerm = trimmedQuery;
+
   return (
     <div className="stage-reveal mt-3 flex flex-col items-center gap-2.5 w-full">
-      {/* Sprite VOICE SLOT — fixed-height reservation so this row's
-          vertical position never shifts. */}
-      <div className="w-full min-h-[2.4rem] flex items-center justify-center px-3 text-center">
+      {/* Sprite VOICE SLOT — FIXED-height reservation so the slot's
+          height never changes when the voice line swaps. Earlier we
+          used min-h-[2.4rem] which let the slot grow when a longer
+          hover-help message wrapped to a second line, pushing the
+          buttons + chips below it down by a row and back up again on
+          mouse-out — the visible "shake" the user reported. Locking
+          the height + line-clamping at 2 lines keeps the row's
+          baseline pinned across every voice transition. */}
+      <div
+        className="w-full flex items-center justify-center px-3 text-center overflow-hidden"
+        style={{ height: "3rem" }}
+      >
         {hoverHelp ? (
           <p
             key={`help-${hoverHelp}`}
-            className="sprite-voice stage-reveal inline-flex items-center gap-2 italic leading-snug"
-            style={{ color: "var(--ats-fg-accent)" }}
+            className="sprite-voice voice-fade inline-flex items-center gap-2 italic leading-snug max-w-full"
+            style={{
+              color:           "var(--ats-fg-accent)",
+              display:         "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow:        "hidden",
+            }}
           >
             <span
               className="sprite-dot-idle inline-block h-2.5 w-2.5 rounded-full shrink-0"
@@ -162,8 +184,14 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
         {showMessage && (
           <p
             key={message}
-            className="sprite-voice stage-reveal inline-flex items-center gap-2 italic leading-snug"
-            style={{ color: "var(--ats-fg-secondary)" }}
+            className="sprite-voice voice-fade inline-flex items-center gap-2 italic leading-snug max-w-full"
+            style={{
+              color:           "var(--ats-fg-secondary)",
+              display:         "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow:        "hidden",
+            }}
           >
             <span
               className="sprite-dot-idle inline-block h-2.5 w-2.5 rounded-full shrink-0"
@@ -176,8 +204,14 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
         {showFallback && (
           <p
             key={fallbackVoice}
-            className="sprite-voice stage-reveal inline-flex items-center gap-2 italic leading-snug"
-            style={{ color: "var(--ats-fg-secondary)" }}
+            className="sprite-voice voice-fade inline-flex items-center gap-2 italic leading-snug max-w-full"
+            style={{
+              color:           "var(--ats-fg-secondary)",
+              display:         "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow:        "hidden",
+            }}
           >
             <span
               className="sprite-dot-idle inline-block h-2.5 w-2.5 rounded-full shrink-0"
@@ -189,7 +223,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
         )}
         {showDefaultInvite && (
           <p
-            className="sprite-voice inline-flex items-center gap-2 leading-snug flex-wrap justify-center"
+            className="sprite-voice voice-fade inline-flex items-center gap-2 leading-snug flex-wrap justify-center"
             style={{ color: "var(--ats-fg-muted)" }}
           >
             <span>Type any key words, topic or theme you want to explore</span>
@@ -208,74 +242,94 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
         )}
       </div>
 
-      {/* Quick / Curated buttons — the search trigger. Only render once
-          the textarea has content; an empty query has nothing to fire. */}
-      {showSearchModeButtons && (
-        <div className="stage-reveal flex flex-row items-center justify-center gap-2">
-          <button
-            onClick={() => onStartSearch("quick")}
-            title="Fast smart-ranked search — seconds to results"
-            {...hh("Quick Search — fast smart-ranked retrieval, results in seconds")}
-            data-focused={isFocused("mode-quick") || undefined}
-            className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
-            style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "var(--ats-bg-panel)",
-              color:           "var(--ats-fg-secondary)",
-            }}
-          >
-            <Zap size={14} />
-            <span>Quick Search</span>
-          </button>
-          <button
-            onClick={() => onStartSearch("curated")}
-            title="Multi-agent deep dive — slower, more careful"
-            {...hh("Curated Analysis — multi-agent deep dive (in minutes), much more careful evidence chains")}
-            data-focused={isFocused("mode-curated") || undefined}
-            className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
-            style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "var(--ats-bg-panel)",
-              color:           "var(--ats-fg-secondary)",
-            }}
-          >
-            <FlaskConical size={14} />
-            <span>Curated Analysis</span>
-          </button>
-        </div>
-      )}
+      {/* Quick / Curated buttons — ALWAYS mounted so the row reserves
+          its vertical space at all times. We cross-fade in/out via
+          opacity + pointer-events instead of mount/unmount, which (a)
+          keeps the chips below pinned at the same y when the user
+          starts typing and (b) gives a smooth fade-out when search
+          fires. `aria-hidden` and pointer-events:none keep AT and
+          mouse interactions consistent with the visual state. */}
+      <div
+        className="flex flex-row items-center justify-center gap-2 transition-opacity duration-300 ease-out"
+        style={{
+          minHeight:     "2.5rem",
+          opacity:       showSearchModeButtons ? 1 : 0,
+          pointerEvents: showSearchModeButtons ? "auto" : "none",
+        }}
+        aria-hidden={!showSearchModeButtons}
+      >
+        <button
+          onClick={() => onStartSearch("quick")}
+          title="Fast smart-ranked search — seconds to results"
+          {...hh("Quick Search — fast smart-ranked retrieval, results in seconds")}
+          data-focused={isFocused("mode-quick") || undefined}
+          tabIndex={showSearchModeButtons ? 0 : -1}
+          className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-secondary)",
+          }}
+        >
+          <Zap size={14} />
+          <span>Quick Search</span>
+        </button>
+        <button
+          onClick={() => onStartSearch("curated")}
+          title="Multi-agent deep dive — slower, more careful"
+          {...hh("Curated Analysis — multi-agent deep dive (in minutes), much more careful evidence chains")}
+          data-focused={isFocused("mode-curated") || undefined}
+          tabIndex={showSearchModeButtons ? 0 : -1}
+          className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-secondary)",
+          }}
+        >
+          <FlaskConical size={14} />
+          <span>Curated Analysis</span>
+        </button>
+      </div>
 
-      {/* Recommended-term chips — sit directly below the mode buttons.
-          Clicking a chip replaces the textarea contents wholesale, so the
-          user can scan a few suggested topics and pick one without typing.
-          Also keyboard-navigable via the same arrow-key flow that walks
-          the mode buttons.
-          Visual: borderless, lightweight ghost chips. They use the same
-          tight vertical rhythm (gap-x-3, leading-tight) so the whole
-          row collapses to the minimum height the wrapped labels need —
-          centered + auto-fits, never reserves empty space. */}
-      {showRecommendedTerms && (
-        <div className="stage-reveal flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight">
-          {recommendedTerms.map((term, i) => (
+      {/* Recommended-term chips — borderless ghost row, always mounted
+          so it can fade in/out with the search-mode-buttons strip
+          above. Hover scales each chip via CSS `transform` (does NOT
+          reflow neighbours) and the chip whose text matches the
+          current input is rendered in a "selected" style: same
+          transform-only scale + a darker text colour. No padding /
+          font-size changes anywhere — every visual emphasis is done
+          off the layout flow so neighbouring chips stay put. */}
+      <div
+        className="flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight transition-opacity duration-300 ease-out"
+        style={{
+          opacity:       showRecommendedTerms ? 1 : 0,
+          pointerEvents: showRecommendedTerms ? "auto" : "none",
+        }}
+        aria-hidden={!showRecommendedTerms}
+      >
+        {recommendedTerms.map((term, i) => {
+          const isSelected = selectedTerm === term;
+          return (
             <button
               key={`term-${i}`}
               onClick={() => onPickRecommendedTerm(term)}
               title={`Use "${term}" as your search`}
               {...hh(`Replace your input with "${term}" — click to set, then pick Quick or Curated`)}
               data-focused={isFocused(`term-${i}`) || undefined}
-              className="inline-flex items-center rounded-md px-1.5 py-0.5 font-normal transition-colors hover:text-[var(--ats-fg-secondary)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+              data-selected={isSelected || undefined}
+              tabIndex={showRecommendedTerms ? 0 : -1}
+              className="recommended-chip inline-flex items-center rounded-md px-1.5 py-0.5 font-normal data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
               style={{
-                color:    "var(--ats-fg-muted)",
-                opacity:  0.6,
-                fontSize: "11px",
+                fontSize:   "11px",
                 lineHeight: 1.25,
               }}
             >
               {term}
             </button>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 });
