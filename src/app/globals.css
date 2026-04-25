@@ -83,30 +83,59 @@
    the chip stuck at the old computed values.
    IMPORTANT: must declare opacity / color BEFORE the global transition
    so it has something to transition between. */
-/* Recommended-term chips — instant transform / color swaps (no CSS
-   transition). The page lives inside React strict-mode + frequent
-   parent re-renders from hover-help; explicit transitions on this
-   element kept getting reset to currentTime=0 every render loop,
-   leaving the [data-selected] / :hover overrides effectively stuck
-   at their default. We BOTH drop our own transition AND override the
-   global `*, ::before, ::after { transition-property: color, ... }`
-   rule with `transition: none` so color flips instantly when data-
-   selected toggles. The small scale/colour deltas read fine without
-   easing. */
+/* Recommended-term chips — borderless ghost text, transform-only
+   emphasis. Subtle "lively" hover via a CSS keyframe animation
+   (NOT a transition) so React's strict-mode re-renders don't reset
+   the easing curve to currentTime=0 — animations keep running on
+   their own clock and only restart when `:hover` actually toggles.
+   The data-selected override applies instantly (no transition) so
+   the click-to-pick → input-fill → chip-grows flow doesn't lag. */
 .recommended-chip {
   color:            var(--ats-fg-muted);
   opacity:          0.6;
   transform:        scale(1);
   transform-origin: center;
-  transition:       none !important;
+  transition:       none !important;       /* color/opacity stay snappy */
+  outline:          none;                  /* nuke focus ring */
 }
-.recommended-chip:hover            { transform: scale(1.08); }
+.recommended-chip:focus,
+.recommended-chip:focus-visible {
+  outline: none;
+  box-shadow: none;                         /* nuke any UA / Tailwind ring */
+}
+@keyframes chipHoverPop {
+  0%   { transform: scale(1);    }
+  60%  { transform: scale(1.12); }          /* slight overshoot */
+  100% { transform: scale(1.08); }
+}
+@keyframes chipSelectedPop {
+  0%   { transform: scale(1);    }
+  60%  { transform: scale(1.16); }
+  100% { transform: scale(1.10); }
+}
+/* Mouse hover — driven by the browser's :hover pseudo-class, NOT React,
+   so the keyframe runs uninterrupted with the soft overshoot easing. */
+.recommended-chip:hover {
+  animation: chipHoverPop 220ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+/* Keyboard focus + selected — both are toggled by React via data-attrs,
+   and React strict-mode re-renders kept resetting CSS animations on
+   these elements to currentTime=0 (chip stayed at scale(1)). We use
+   STATIC transforms here so the visual state is locked in without
+   relying on the animation timeline. The hover keyframe above still
+   gives mouse interactions the lively feel. */
+.recommended-chip[data-focused] {
+  transform: scale(1.08);
+}
 .recommended-chip[data-selected] {
   color:     var(--ats-fg-primary);
   opacity:   1;
   transform: scale(1.10);
 }
-.recommended-chip[data-selected]:hover { transform: scale(1.14); }
+.recommended-chip[data-selected]:hover,
+.recommended-chip[data-selected][data-focused] {
+  transform: scale(1.14);
+}
 
 /* ── Sprite voice-line fade ────────────────────────────────────────────────
    Voice lines are key-remounted on text change; this animation gives the

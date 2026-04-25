@@ -44,6 +44,7 @@ import {
   BarChart as BarChartIcon, Users, Activity, MessageSquare, Zap,
   DollarSign, RefreshCw, ArrowLeft, Sparkles,
   FileText, Clock, Database, LogOut,
+  Plus, Trash2, Check, X,
 } from "lucide-react";
 
 // ── Must stay in sync with the same list in src/app/page.tsx ────────────────
@@ -866,6 +867,94 @@ export default function AdminPage() {
     }
   };
 
+  // ── Recommended-term pool ───────────────────────────────────────────────
+  // CRUD on the admin-managed pool that backs the workspace landing chips.
+  // Independent state — not part of the auto-poll set since the pool is
+  // edited rarely and a manual Refresh button covers it.
+  type RecTermRow = {
+    id:         number;
+    text:       string;
+    active:     boolean;
+    created_at: string;
+    updated_at: string;
+  };
+  const [recTerms, setRecTerms]           = useState<RecTermRow[]>([]);
+  const [recTermsLoading, setRecTermsLoading] = useState(false);
+  const [recTermsError, setRecTermsError] = useState<string>("");
+  const [newRecTerm, setNewRecTerm]       = useState<string>("");
+  const refreshRecTerms = useCallback(async () => {
+    setRecTermsLoading(true);
+    setRecTermsError("");
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/recommended-terms"));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { terms?: RecTermRow[] };
+      setRecTerms(data.terms ?? []);
+    } catch (e) {
+      setRecTermsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRecTermsLoading(false);
+    }
+  }, []);
+  useEffect(() => { void refreshRecTerms(); }, [refreshRecTerms]);
+
+  const createRecTerm = async () => {
+    const trimmed = newRecTerm.trim();
+    if (!trimmed) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/recommended-terms"), {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text: trimmed }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setNewRecTerm("");
+      await refreshRecTerms();
+    } catch (e) {
+      alert(`Add failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const toggleRecTerm = async (row: RecTermRow) => {
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/recommended-terms/${row.id}`), {
+        method:  "PUT",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ active: !row.active }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await refreshRecTerms();
+    } catch (e) {
+      alert(`Toggle failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const editRecTerm = async (row: RecTermRow, nextText: string) => {
+    const trimmed = nextText.trim();
+    if (!trimmed || trimmed === row.text) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/recommended-terms/${row.id}`), {
+        method:  "PUT",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text: trimmed }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await refreshRecTerms();
+    } catch (e) {
+      alert(`Edit failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const deleteRecTerm = async (row: RecTermRow) => {
+    if (!confirm(`Delete "${row.text}"? Cannot be undone.`)) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/recommended-terms/${row.id}`), {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await refreshRecTerms();
+    } catch (e) {
+      alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const refreshAll = () => {
     overview.refresh();
     timeseries.refresh();
@@ -878,6 +967,7 @@ export default function AdminPage() {
     feedback.refresh();
     tierLimits.refresh();
     activity.refresh();
+    void refreshRecTerms();
   };
 
   // Batch-save every pending tier-limit edit. The editor accumulates
@@ -1610,6 +1700,88 @@ export default function AdminPage() {
           {isPanelOpen("feedback") && (
             <div className="max-h-[520px] overflow-y-auto thin-scrollbar pr-1">
               <FeedbackInbox rows={feedback.data?.feedback ?? []} onToggle={toggleFeedbackResolved} />
+            </div>
+          )}
+        </section>
+
+        {/* ── Recommended-term pool (workspace landing chips) ────────────────
+             Edits here surface to every user's landing chips on the next
+             page mount (the daily shuffle reads the active subset). The
+             pool can be larger than the deck size — the backend samples
+             ~12 chips per day from whatever is `active`. */}
+        <section className="rounded-2xl border p-4" style={panelStyle}>
+          <div className="flex items-start justify-between mb-3 gap-2">
+            <div>
+              <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                Recommended terms
+              </h3>
+              <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                {recTerms.length} total · {recTerms.filter(t => t.active).length} active.
+                Daily shuffle picks ~12 from the active set; users see the same deck per UTC day.
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => void refreshRecTerms()}
+                className="text-[10px] inline-flex items-center gap-1 transition-colors"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <RefreshCw size={10} /> Refresh
+              </button>
+              <CollapseCaret open={isPanelOpen("rec-terms")} onClick={() => togglePanel("rec-terms")} />
+            </div>
+          </div>
+          {isPanelOpen("rec-terms") && (
+            <div className="space-y-2">
+              {/* Add row */}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={newRecTerm}
+                  onChange={e => setNewRecTerm(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") void createRecTerm(); }}
+                  placeholder="New recommended term…"
+                  maxLength={200}
+                  className="flex-1 rounded-md border px-2 py-1 text-xs outline-none"
+                  style={{
+                    borderColor:     "var(--ats-border-subtle)",
+                    backgroundColor: "var(--ats-bg-base)",
+                    color:           "var(--ats-fg-primary)",
+                  }}
+                />
+                <button
+                  onClick={() => void createRecTerm()}
+                  disabled={!newRecTerm.trim()}
+                  className="text-[10px] inline-flex items-center gap-1 rounded border px-2 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ color: "var(--ats-fg-accent)", borderColor: "var(--ats-border-accent)" }}
+                >
+                  <Plus size={10} /> Add
+                </button>
+              </div>
+              {recTermsLoading && (
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>Loading…</p>
+              )}
+              {recTermsError && (
+                <p className="text-[10px]" style={{ color: "#ef4444" }}>Error: {recTermsError}</p>
+              )}
+              {!recTermsLoading && recTerms.length === 0 && !recTermsError && (
+                <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  Pool is empty — users currently see the hard-coded fallback. Add some terms above.
+                </p>
+              )}
+              {recTerms.length > 0 && (
+                <div className="max-h-[420px] overflow-y-auto thin-scrollbar pr-1 space-y-1">
+                  {recTerms.map(row => (
+                    <RecTermRowEditor
+                      key={row.id}
+                      row={row}
+                      onToggle={() => void toggleRecTerm(row)}
+                      onSave={(text) => void editRecTerm(row, text)}
+                      onDelete={() => void deleteRecTerm(row)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -2426,6 +2598,64 @@ function useCollapsed(id: string, defaultOpen = true): { open: boolean; toggle: 
 // panel header next to the Refresh button so operators can tuck away
 // any panel they don't currently care about and the admin page stays
 // scannable even with 15+ sections.
+
+// ── RecTermRowEditor ──────────────────────────────────────────────────────
+// One row of the recommended-term pool table. Inline-editable text + an
+// active/disabled toggle + a delete button. Local edit buffer so typing
+// doesn't fire PUT on every keystroke; commits on blur or Enter when the
+// text actually changed.
+function RecTermRowEditor({
+  row, onToggle, onSave, onDelete,
+}: {
+  row: { id: number; text: string; active: boolean };
+  onToggle: () => void;
+  onSave: (text: string) => void;
+  onDelete: () => void;
+}) {
+  const [draft, setDraft] = useState(row.text);
+  useEffect(() => { setDraft(row.text); }, [row.text]);
+  return (
+    <div
+      className="flex items-center gap-1.5 rounded border px-2 py-1"
+      style={{
+        borderColor:     "var(--ats-border-subtle)",
+        backgroundColor: row.active ? "var(--ats-bg-base)" : "var(--ats-bg-panel)",
+        opacity:         row.active ? 1 : 0.6,
+      }}
+    >
+      <input
+        type="text"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={() => { if (draft.trim() && draft !== row.text) onSave(draft); }}
+        onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        maxLength={200}
+        className="flex-1 bg-transparent text-xs outline-none"
+        style={{ color: "var(--ats-fg-primary)" }}
+      />
+      <button
+        onClick={onToggle}
+        title={row.active ? "Disable (hide from users)" : "Enable (show to users)"}
+        className="text-[10px] inline-flex items-center justify-center rounded border h-5 w-5 transition-colors"
+        style={{
+          color:       row.active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+          borderColor: row.active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+        }}
+      >
+        {row.active ? <Check size={10} /> : <X size={10} />}
+      </button>
+      <button
+        onClick={onDelete}
+        title="Delete this term permanently"
+        className="text-[10px] inline-flex items-center justify-center rounded border h-5 w-5 transition-colors"
+        style={{ color: "#ef4444", borderColor: "rgba(239,68,68,0.4)" }}
+      >
+        <Trash2 size={10} />
+      </button>
+    </div>
+  );
+}
+
 
 function CollapseCaret({ open, onClick }: { open: boolean; onClick: () => void }) {
   return (

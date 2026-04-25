@@ -40,6 +40,7 @@ import {
   AnnouncementBanner,
 } from "@/components/header/AnnouncementBanner";
 import { useAnnouncements } from "@/lib/hooks/use-announcements";
+import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
 import { PaperReviewPanel } from "@/components/lab/PaperReviewPanel";
 import { TOS_SECTIONS, TOS_VERSION, APP_VERSION } from "@/lib/tos-content";
 import {
@@ -103,19 +104,12 @@ const SORT_MODES = [
   "Balanced",
 ];
 
-// Curated suggestion chips shown in the Sprite landing UI. Clicking a chip
-// replaces the textarea contents with the chip text — purely a starter
-// surface, the user can edit before firing Quick / Curated.
-const RECOMMENDED_TERMS: string[] = [
-  "academic motivation in undergraduates",
-  "machine learning for medical imaging",
-  "climate adaptation in coastal cities",
-  "large language model evaluation",
-  "social media and adolescent wellbeing",
-  "open science reproducibility",
-  "renewable energy grid integration",
-  "post-pandemic learning loss",
-];
+// Recommended-term chips for the Sprite landing UI now come from the
+// admin-managed `recommended_terms` table via useRecommendedTerms (see
+// src/lib/hooks/use-recommended-terms.ts). The hook does a daily-seeded
+// shuffle so the deck rotates at midnight UTC and every user sees the
+// same picks on the same day. Clicking a chip replaces the textarea
+// contents wholesale; admin CRUD lives in /admin → Recommended Terms.
 
 // WORKSPACE_PLACEHOLDERS lives in src/lib/workspace-placeholders.ts — edit there to add phrases.
 
@@ -1335,6 +1329,9 @@ export default function HomePage() {
   // was removed when the per-tab localStorage scheme was replaced by the
   // server-backed feed — every open tab now sees the same list.
   const announcementsFeed = useAnnouncements();
+  // Daily-rotated recommended-term chips from the admin pool. See
+  // src/lib/hooks/use-recommended-terms.ts for the fetch + fallback.
+  const recommendedTerms = useRecommendedTerms();
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
   // Announcement banner is OFF by default now — a megaphone button next to
   // the mascot toggles it. Users who never need the banner get a cleaner
@@ -4676,7 +4673,7 @@ ${html}
               message={assessmentMessage}
               hoverHelp={hoverHelpText}
               onHoverHelp={setHoverHelpText}
-              recommendedTerms={RECOMMENDED_TERMS}
+              recommendedTerms={recommendedTerms}
               onPickRecommendedTerm={handlePickRecommendedTerm}
               onStartSearch={handleStartSearchFromSprite}
             />

@@ -319,7 +319,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               data-focused={isFocused(`term-${i}`) || undefined}
               data-selected={isSelected || undefined}
               tabIndex={showRecommendedTerms ? 0 : -1}
-              className="recommended-chip inline-flex items-center rounded-md px-1.5 py-0.5 font-normal data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+              className="recommended-chip inline-flex items-center rounded-md px-1.5 py-0.5 font-normal"
               style={{
                 fontSize:   "11px",
                 lineHeight: 1.25,
