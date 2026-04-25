@@ -896,7 +896,16 @@ export default function AdminPage() {
       setRecTermsLoading(false);
     }
   }, []);
-  useEffect(() => { void refreshRecTerms(); }, [refreshRecTerms]);
+  // Only auto-fetch the rec-terms pool once the operator is authenticated
+  // AND has dev clearance. Firing this fetch on the login screen leaves a
+  // dangling rejected promise (no admin session) every page load — harmless
+  // in dev, but on Vercel it would surface in /admin/__sentry/... reports
+  // and confuse on-call. `enabled` is the auth gate the rest of the dashboard
+  // uses, so we mirror it here.
+  useEffect(() => {
+    if (!enabled) return;
+    void refreshRecTerms();
+  }, [enabled, refreshRecTerms]);
 
   const createRecTerm = async () => {
     const trimmed = newRecTerm.trim();
