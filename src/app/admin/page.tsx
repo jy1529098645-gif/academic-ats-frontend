@@ -1066,7 +1066,7 @@ export default function AdminPage() {
   // flash before the login redirect).
   if (!authChecked) {
     return (
-      <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center">
+      <div data-theme="day-mint" data-tone="day" className="admin-main h-screen bg-[var(--ats-bg-base)] flex items-center justify-center">
         <p className="text-sm" style={{ color: "var(--ats-fg-muted)" }}>Checking access…</p>
       </div>
     );
@@ -1098,7 +1098,7 @@ export default function AdminPage() {
     <div
       data-theme="day-mint"
       data-tone="day"
-      className="h-screen overflow-y-auto thin-scrollbar bg-[var(--ats-bg-base)] text-[var(--ats-fg-primary)]"
+      className="admin-main h-screen overflow-y-auto thin-scrollbar bg-[var(--ats-bg-base)] text-[var(--ats-fg-primary)]"
     >
       {/* ── Header ────────────────────────────────────────────────── */}
       <header
@@ -3264,7 +3264,7 @@ function AdminLoginScreen({ currentEmail }: { currentEmail: string | null }) {
   };
 
   return (
-    <div data-theme="day-mint" data-tone="day" className="min-h-screen bg-[var(--ats-bg-base)] flex items-center justify-center px-4">
+    <div data-theme="day-mint" data-tone="day" className="admin-main h-screen bg-[var(--ats-bg-base)] flex items-center justify-center px-4">
       <div
         className="w-full max-w-sm rounded-2xl border p-6 shadow-lg"
         style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
