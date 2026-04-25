@@ -151,6 +151,29 @@ type AdminUser = {
   };
 };
 
+type UserSort =
+  | "active"      // most-recent activity desc (server default)
+  | "email_az"    // alphabetical by email — first letter A → Z
+  | "email_za"    // reverse alphabetical
+  | "tier"        // dev → scholar → basic → free
+  | "quick" | "deep" | "synth" | "chain" | "cost" // today's column desc
+  | "first_new"   // signup date — newest first
+  | "first_old";  // signup date — oldest first
+
+const USER_SORT_LABEL: Record<UserSort, string> = {
+  active:    "most-recent activity",
+  email_az:  "email A → Z",
+  email_za:  "email Z → A",
+  tier:      "tier (dev first)",
+  quick:     "quick searches today",
+  deep:      "deep searches today",
+  synth:     "synthesis runs today",
+  chain:     "chain reports today",
+  cost:      "cost today",
+  first_new: "first seen (newest)",
+  first_old: "first seen (oldest)",
+};
+
 type ActivityEntry = {
   id:         number;
   created_at: string;
@@ -577,6 +600,19 @@ export default function AdminPage() {
   // modals keeps the admin's mental model simple ("here's this user →
   // do stuff to them") and avoids 5 levels of modal stacking.
   const [userDrawer, setUserDrawer] = useState<AdminUser | null>(null);
+  // All-users sort. Default 'active' = most-recent activity desc (matches
+  // the server's default order); 'email_az' / 'email_za' add the explicit
+  // alphabetical sort the panel was missing; the rest mirror the table's
+  // numeric / date columns so an admin can re-rank without leaving the
+  // page. Persists to localStorage so the choice sticks across reloads.
+  const [userSort, setUserSort] = useState<UserSort>(() => {
+    if (typeof window === "undefined") return "active";
+    const saved = localStorage.getItem("ats-admin-user-sort") as UserSort | null;
+    return saved ?? "active";
+  });
+  useEffect(() => {
+    if (typeof window !== "undefined") localStorage.setItem("ats-admin-user-sort", userSort);
+  }, [userSort]);
 
   // ── Collapsed panel tracking ──────────────────────────────────────
   // Single Set of panel-ids that the operator has collapsed. Every
@@ -909,8 +945,36 @@ export default function AdminPage() {
   // ── Authorised render ───────────────────────────────────────────────────
   const ov = overview.data;
   const ts = timeseries.data?.data ?? [];
-  const userList = users.data?.users ?? [];
+  const rawUserList = users.data?.users ?? [];
   const annList  = announcements.data?.announcements ?? [];
+  // Sorted view of the user list — defaults to the server-provided order
+  // (most-recent activity desc) so the panel keeps its existing behaviour
+  // until an admin picks a different sort. Adding alphabetical email is
+  // the explicit ask; the other keys piggy-back on the same dropdown so
+  // an admin can also slice by the columns they actually read.
+  const userList = useMemo(() => {
+    const arr = rawUserList.slice();
+    const cmpStr  = (a: string | null | undefined, b: string | null | undefined) =>
+      (a ?? "").toLocaleLowerCase().localeCompare((b ?? "").toLocaleLowerCase());
+    const cmpDate = (a: string | null | undefined, b: string | null | undefined) =>
+      (b ? new Date(b).getTime() : 0) - (a ? new Date(a).getTime() : 0);
+    const TIER_RANK: Record<string, number> = { dev: 0, scholar: 1, basic: 2, free: 3 };
+    switch (userSort) {
+      case "email_az": arr.sort((a, b) => cmpStr(a.email, b.email)); break;
+      case "email_za": arr.sort((a, b) => cmpStr(b.email, a.email)); break;
+      case "tier":     arr.sort((a, b) => (TIER_RANK[a.tier] ?? 99) - (TIER_RANK[b.tier] ?? 99)); break;
+      case "quick":    arr.sort((a, b) => b.today.quick_search_count - a.today.quick_search_count); break;
+      case "deep":     arr.sort((a, b) => b.today.deep_search_count  - a.today.deep_search_count);  break;
+      case "synth":    arr.sort((a, b) => b.today.synthesis_count    - a.today.synthesis_count);    break;
+      case "chain":    arr.sort((a, b) => b.today.deep_read_count    - a.today.deep_read_count);    break;
+      case "cost":     arr.sort((a, b) => b.today.llm_cost_usd       - a.today.llm_cost_usd);       break;
+      case "first_new":arr.sort((a, b) => cmpDate(a.first_seen_at, b.first_seen_at)); break;
+      case "first_old":arr.sort((a, b) => -cmpDate(a.first_seen_at, b.first_seen_at)); break;
+      case "active":
+      default:         arr.sort((a, b) => cmpDate(a.last_active_at, b.last_active_at)); break;
+    }
+    return arr;
+  }, [rawUserList, userSort]);
 
   // Pinned to Morning Mint (day-mint, emerald accents). The admin console
   // is a daytime tool — dev eyes spend hours reading numbers, so we
@@ -1434,11 +1498,34 @@ export default function AdminPage() {
                 All users
               </h3>
               <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                All signed-up accounts, sorted by <span className="font-semibold">most-recent activity</span> (active users on top, stale signups at the bottom). Showing {userList.length}
+                All signed-up accounts, sorted by <span className="font-semibold">{USER_SORT_LABEL[userSort]}</span>. Showing {userList.length}
                 {userList.length >= 2000 && " (capped at 2000 — paginate if you need older)"}.
               </p>
             </div>
             <div className="flex items-center gap-1.5">
+              <select
+                value={userSort}
+                onChange={(e) => setUserSort(e.target.value as UserSort)}
+                title="Sort the all-users list"
+                className="text-[10px] rounded border px-1.5 py-0.5 transition-colors"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  color:           "var(--ats-fg-secondary)",
+                }}
+              >
+                <option value="active">Most-recent activity</option>
+                <option value="email_az">Email (A → Z)</option>
+                <option value="email_za">Email (Z → A)</option>
+                <option value="tier">Tier (dev first)</option>
+                <option value="quick">Quick today (high → low)</option>
+                <option value="deep">Deep today (high → low)</option>
+                <option value="synth">Synth today (high → low)</option>
+                <option value="chain">Chain today (high → low)</option>
+                <option value="cost">Cost today (high → low)</option>
+                <option value="first_new">First seen (newest)</option>
+                <option value="first_old">First seen (oldest)</option>
+              </select>
               <button
                 onClick={() => users.refresh()}
                 className="text-[10px] inline-flex items-center gap-1 transition-colors"

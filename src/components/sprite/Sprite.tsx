@@ -1,7 +1,7 @@
 "use client";
 
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { FlaskConical, PenLine, Star, Zap } from "lucide-react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { FlaskConical, Star, Zap } from "lucide-react";
 import { looksLikeNewContent } from "./spriteUtils";
 
 /** Imperative handle exposed to parent so the textarea's onKeyDown can
@@ -264,28 +264,21 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
   // the focused item stays put as new directions trickle in.
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   useEffect(() => {
-    // Reset focus to a sensible default when the bubble set changes shape.
     if (actionables.length === 0) {
       setFocusedKey(null);
       return;
     }
-    const recIdx = directionData?.recommended_direction;
-    const recKey = (typeof recIdx === "number" && recIdx >= 0 && recIdx < directions.length)
-      ? `dir-${recIdx}-${directions[recIdx]?.label}`
-      : null;
-    const recAvailable = recKey !== null && actionables.some(a => a.key === recKey);
-    // Two cases shift focus automatically:
-    //   1. No focus yet, or stale focus that no longer matches any bubble.
-    //   2. Focus is currently parked on a "mode-*" bubble because mode
-    //      bubbles arrived FIRST (Find Angles streaming) — once a real
-    //      direction appears (recommended one preferred), shift to it
-    //      so the user's first ArrowRight/Enter targets that direction.
-    const focusInvalid    = focusedKey === null || !actionables.some(a => a.key === focusedKey);
-    const focusOnModeOnly = focusedKey?.startsWith("mode-") && recAvailable;
-    if (focusInvalid || focusOnModeOnly) {
-      setFocusedKey(recAvailable ? recKey : actionables[0].key);
+    // Default focus is ALWAYS the Quick Search mode bubble when it's
+    // available — Enter from the textarea should immediately fire a
+    // search via the default mode, not pick a direction. The user can
+    // arrow over to a direction or to Curated if they want to refine.
+    const quickKey = "mode-quick";
+    const quickAvailable = actionables.some(a => a.key === quickKey);
+    const focusInvalid   = focusedKey === null || !actionables.some(a => a.key === focusedKey);
+    if (focusInvalid) {
+      setFocusedKey(quickAvailable ? quickKey : actionables[0].key);
     }
-  }, [actionables, directionData?.recommended_direction, directions, focusedKey]);
+  }, [actionables, focusedKey]);
 
   const focusedIdx = useMemo(
     () => actionables.findIndex(a => a.key === focusedKey),
@@ -364,6 +357,12 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               regular running line. The directions / bubbles below
               continue to render so the user doesn't lose their place
               while reading the help. */}
+          {/* Sprite VOICE SLOT — fixed-height reservation so this row's
+              vertical position never shifts. The streaming-thinking
+              panel (READING / EXPANDING / FOUND) lives BELOW this slot,
+              not inside it, so the voice line stays at the same y as
+              the user expects. */}
+          <div className="w-full min-h-[2.4rem] flex items-center justify-center">
           {hoverHelp ? (
             <p
               key={`help-${hoverHelp}`}
@@ -391,14 +390,22 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               thinking…
             </p>
           )}
-          {!hoverHelp && showFindingAngles && !showMessage && (
-            // Streamed progress message (e.g. "scanning literature…",
-            // "narrowing direction…") replaces the canned line so the user
-            // sees real motion. Falls back to the original wording when the
-            // stream hasn't yielded a status yet.
+          {!hoverHelp && showFindingAngles && (
+            // Sprite-voice streaming line — folds the old READING /
+            // EXPANDING / FOUND panel into the voice slot so the layout
+            // below (Quick / Curated buttons) never gets pushed by a
+            // separate streaming card. PRIORITISED over `showMessage`:
+            // when the user presses Enter, page.tsx fires both
+            // `setAssessmentMessage("looking for angles…")` AND flips
+            // isUnderstanding=true. Without this priority, both branches
+            // would gate each other off (`showFindingAngles && !showMessage`
+            // vs `showMessage && !showFindingAngles`) and the slot would
+            // collapse to nothing — making the sprite feel like it had
+            // disappeared. The composed line surfaces the most recent
+            // decompose / expand / direction-count payloads in sprite
+            // tone, then truncates to a single line with an ellipsis.
             <p
-              key={understandStatus || "looking-for-angles"}
-              className="sprite-voice stage-reveal inline-flex items-center gap-2 italic"
+              className="sprite-voice stage-reveal inline-flex items-center gap-2 italic max-w-full"
               style={{ color: "var(--ats-fg-muted)" }}
             >
               <span
@@ -406,71 +413,70 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
                 style={{ backgroundColor: "var(--ats-fg-accent)" }}
                 aria-hidden
               />
-              {understandStatus || "looking for angles…"}
+              <span
+                style={{
+                  whiteSpace:   "nowrap",
+                  overflow:     "hidden",
+                  textOverflow: "ellipsis",
+                  maxWidth:     "min(48rem, calc(100vw - 4rem))",
+                  display:      "inline-block",
+                }}
+              >
+                {(() => {
+                  const parts: string[] = [];
+                  const decTerms = understandDecompose
+                    ? ((understandDecompose.core_terms as string[] | undefined) ?? []).slice(0, 3)
+                    : [];
+                  if (decTerms.length) parts.push(`peeking at ${decTerms.join(", ")}…`);
+                  const expClusters = understandExpand
+                    ? ((understandExpand.clusters as Array<Record<string, unknown>> | undefined) ?? [])
+                    : [];
+                  const expTerms: string[] = [];
+                  for (const c of expClusters.slice(0, 1)) {
+                    const ts = (c?.terms as string[] | undefined) ?? [];
+                    expTerms.push(...ts.slice(0, 2));
+                  }
+                  if (expTerms.length) parts.push(`pulling in ${expTerms.join(", ")}…`);
+                  const dirCount = directionData?.directions?.length ?? 0;
+                  if (dirCount > 0) parts.push(`found ${dirCount} angles so far (◕‿◕)`);
+                  if (parts.length === 0) {
+                    return understandStatus
+                      ? `${understandStatus} (˙ᵕ˙)`
+                      : "scouting angles for you… (˙ᵕ˙)";
+                  }
+                  return parts.join(" · ");
+                })()}
+              </span>
+              {/* Tiny Esc-to-cancel hint pinned to the streaming line so
+                  users have a non-mouse escape from a long find-angles
+                  call without abandoning their typed query. */}
+              <span
+                aria-hidden
+                className="ml-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-px text-[10px] not-italic font-medium tracking-wide"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  color:           "var(--ats-fg-muted)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  opacity:         0.85,
+                }}
+              >
+                <kbd className="font-mono">Esc</kbd>
+                <span>to cancel</span>
+              </span>
             </p>
           )}
-          {/* Streaming "what I'm seeing" panel — always rendered while
-              find-angles is in flight. Each row keeps its label even
-              when its data hasn't arrived yet, showing a pulsing dot in
-              place of tags so the user sees the SCAFFOLD of what's
-              about to happen ("reading", "expanding", "found") instead
-              of a blank slot followed by a sudden pop. */}
-          {showFindingAngles && (
-            <div
-              className="stage-reveal w-full max-w-lg flex flex-col gap-1.5 rounded-xl px-3 py-2"
-              style={{ backgroundColor: "var(--ats-bg-card-muted)" }}
-            >
-              <SpriteThinkingRow
-                label="reading"
-                items={understandDecompose ? [
-                  ...((understandDecompose.core_terms as string[] | undefined) ?? []).slice(0, 6),
-                  ...((understandDecompose.contexts as string[] | undefined) ?? []).slice(0, 3),
-                ] : []}
-                placeholder="scanning your query…"
-              />
-              <SpriteThinkingRow
-                label="expanding"
-                items={understandExpand ? (() => {
-                  const clusters = understandExpand.clusters as Array<Record<string, unknown>> | undefined;
-                  const out: string[] = [];
-                  if (Array.isArray(clusters)) {
-                    for (const c of clusters.slice(0, 3)) {
-                      const terms = (c?.terms as string[] | undefined) ?? [];
-                      out.push(...terms.slice(0, 3));
-                    }
-                  }
-                  return out.slice(0, 9);
-                })() : []}
-                placeholder={understandDecompose ? "pulling in related terms…" : "waiting on stage 1…"}
-              />
-              <SpriteThinkingRow
-                label="found"
-                items={(directionData?.directions ?? []).map(d => d.label).slice(0, 6)}
-                placeholder={understandExpand ? "building direction tree…" : "waiting on stage 2…"}
-                emphasis
-              />
-            </div>
-          )}
           {!hoverHelp && showMessage && !showFindingAngles && (
-            // key on the message text so a fresh verdict re-fires the
-            // stage-reveal fade — feels like the sprite is "saying" each new
-            // line rather than silently swapping the text.
             <p
               key={currentMessage}
               className="sprite-voice stage-reveal inline-flex items-center gap-2 italic leading-snug"
               style={{ color: "var(--ats-fg-secondary)" }}
             >
-              {/* THINK tempo while waiting on instant-reaction fade or AI verdict;
-                  IDLE once a settled verdict is on screen. Subtle breathing
-                  cue separates "sprite is working" from "sprite is resting". */}
               <span
                 className={`${(activeInstant || assessing) ? "sprite-dot-think" : "sprite-dot-idle"} inline-block h-2.5 w-2.5 rounded-full shrink-0`}
                 style={{ backgroundColor: "var(--ats-fg-accent)" }}
                 aria-hidden
               />
               <span>{currentMessage}</span>
-              {/* Enter badge only with a fresh AI verdict — during the instant-
-                  reaction layer the sprite hasn't actually judged yet. */}
               {freshMessage && introStage === "blank" && !showChoiceBubbles && !showDirectionBubbles && (
                 <span
                   aria-hidden
@@ -486,10 +492,6 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               )}
             </p>
           )}
-          {/* Fallback voice — kicks in for the post-Run / post-results
-              states where the regular thinking / message / default
-              voices don't apply. Keeps the sprite slot live so the
-              user always feels in conversation, even mid-search. */}
           {!hoverHelp && !showThinking && !showMessage && !showDefault && !showFindingAngles && fallbackVoice && (
             <p
               key={fallbackVoice}
@@ -523,28 +525,23 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               </span>
             </p>
           )}
-
-          {/* Quick / Curated bubbles — the actual SEARCH trigger. Replaces
-              the legacy in-action-bar mode toggle + "Start" button.
-              Quick = fast smart-ranked retrieval; Curated = multi-agent
-              deep dive. Either commits the user's current direction
-              picks (or raw query if no direction picked) and fires the
-              search in one click. Visible throughout the directions
-              stream so the user can either pick a direction first or
-              jump straight to a mode. */}
+          </div>
+          {/* Quick / Curated bubbles — pinned in their OWN row, fully
+              decoupled from the directions list below. Their y is now
+              determined only by the workspace + voice slot (both fixed
+              height) so they never shift when angles arrive / depart or
+              when the streaming line updates. The streaming progress
+              has been folded into the voice slot above (single line
+              with ellipsis), so no separate streaming panel pushes
+              this row down. */}
           {showSearchModeBubbles && (
-            <div className="stage-reveal flex flex-wrap items-center justify-center gap-2">
-              {/* Both action bubbles share IDENTICAL neutral styling so
-                  neither one looks like the recommended default — the
-                  user picks based on intent, not visual nudging. The
-                  only contextual feedback is hover (brightness bump) +
-                  keyboard focus ring (data-[focused]). */}
+            <div className="stage-reveal flex flex-row items-center justify-center gap-2">
               <button
                 onClick={() => onStartSearch("quick")}
                 title="Fast smart-ranked search — seconds to results"
                 {...hh("Quick Search — fast smart-ranked retrieval, results in seconds")}
                 data-focused={isFocused("mode-quick") || undefined}
-                className="sprite-bubble inline-flex items-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+                className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
                 style={{
                   borderColor:     "var(--ats-border-subtle)",
                   backgroundColor: "var(--ats-bg-panel)",
@@ -557,9 +554,9 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               <button
                 onClick={() => onStartSearch("curated")}
                 title="Multi-agent deep dive — slower, more careful"
-                {...hh("Curated Analysis — multi-agent deep dive (3-5 min), much more careful evidence chains")}
+                {...hh("Curated Analysis — multi-agent deep dive (in minutes), much more careful evidence chains")}
                 data-focused={isFocused("mode-curated") || undefined}
-                className="sprite-bubble inline-flex items-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+                className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
                 style={{
                   borderColor:     "var(--ats-border-subtle)",
                   backgroundColor: "var(--ats-bg-panel)",
@@ -572,95 +569,188 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
             </div>
           )}
 
-          {/* Direction bubbles — once the directions stream completes, the
-              big-direction options surface as a TIDY 2-column grid so they
-              never overflow the workspace column. Each bubble fades in
-              with a staggered delay (~90 ms apart) so the user perceives
-              the result as "streamed" even though the SSE result event is
-              a single payload. The currently-picked / recommended bubble
-              gets accent styling so the choice stays visible. */}
-          {showDirectionBubbles && !showFindingAngles && (
-            // Direction tree, two-column layout: 6 big directions split
-            // into a left column (0,2,4) and a right column (1,3,5) so
-            // they stay above the fold even on shorter viewports. Each
-            // direction's sub-options nest UNDER it (border-l indent)
-            // when picked, so the parent-child relationship stays
-            // visually grouped INSIDE its column.
-            <div className="stage-reveal w-full max-w-3xl grid grid-cols-2 gap-x-4 gap-y-0.5 px-1">
-              {directions.slice(0, 6).map((dir, di) => {
-                const isRecommended = di === (directionData?.recommended_direction ?? -1);
-                const isPicked      = di === selectedDirIndex;
-                const dirSubs       = dir.sub_options ?? [];
-                return (
-                  <div
-                    key={`dir-${di}-${dir.label}`}
-                    className="stage-reveal flex flex-col"
-                    style={{ animationDelay: `${di * 80}ms` }}
-                  >
-                    <button
-                      onClick={() => onPickDirection(di)}
-                      title={dir.description || dir.label}
-                      data-focused={isFocused(`dir-${di}-${dir.label}`) || undefined}
-                      className="sprite-bubble-soft self-start inline-flex items-center gap-1.5 rounded-md px-2 py-1 transition-all hover:brightness-110 hover:bg-[var(--ats-bg-accent-soft)] hover:text-[var(--ats-fg-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
-                      style={{
-                        backgroundColor: isPicked ? "var(--ats-bg-accent-soft)" : "transparent",
-                        color:           isPicked ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
-                        fontWeight:      isPicked ? 600 : 400,
-                        opacity:         isPicked ? 1 : (isRecommended ? 0.95 : 0.78),
-                      }}
-                    >
-                      {isRecommended && <Star size={11} className="shrink-0 opacity-70" />}
-                      <span className="text-left">{dir.label}</span>
-                      {dirSubs.length > 0 && (
+          {/* Directions row — rendered BELOW the buttons so the buttons'
+              y stays fixed regardless of whether angles are present.
+              Layout: [left-sub-slot | left-flank | right-flank | right-sub-slot].
+              The two sub-slots are ALWAYS rendered with a fixed width so
+              picking a direction never shifts the flanks horizontally
+              (issue: layout was jumping when subs appeared). Subs render
+              into the LEFT slot when an even-index direction (0/2/4 on
+              the left flank) is picked, and into the RIGHT slot when an
+              odd-index direction (1/3/5 on the right flank) is picked —
+              so the sub column always appears on the same side as its
+              parent direction (issue: subs always going to the right). */}
+          {showDirectionBubbles && !showFindingAngles && (() => {
+            const SUB_SLOT_WIDTH = "12rem";
+            const picked = selectedDirIndex !== null ? directions[selectedDirIndex] : null;
+            const pickedSubs = picked?.sub_options ?? [];
+            const subsOnLeft  = selectedDirIndex !== null && selectedDirIndex % 2 === 0 && pickedSubs.length > 0;
+            const subsOnRight = selectedDirIndex !== null && selectedDirIndex % 2 === 1 && pickedSubs.length > 0;
+            // Aesthetic pyramid ordering — within a flank, place the
+            // SHORTEST labels at the top + bottom and the LONGEST in the
+            // middle. Reads as a soft diamond shape, much easier on the
+            // eye than a ragged left/right edge. Only reorders the visual
+            // slots; the underlying direction index passed to onClick is
+            // preserved so picks still resolve to the right entry.
+            const arrangeFlank = (slotIndices: number[]): number[] => {
+              const valid = slotIndices.filter(i => directions[i]);
+              if (valid.length < 3) return valid;
+              const labelLen = (i: number) => directions[i]?.label?.length ?? 0;
+              const sorted = [...valid].sort((a, b) => labelLen(a) - labelLen(b));
+              // For 3 items [shortest, medium, longest]: render as
+              //   [shortest, longest, medium]
+              // → top: shortest, middle: longest, bottom: medium.
+              if (sorted.length === 3) return [sorted[0], sorted[2], sorted[1]];
+              // General case (more than 3 items per flank — not used today
+              // but future-proof): place the longest in the centre and
+              // alternate shorter items outward.
+              const result: number[] = new Array(sorted.length);
+              const mid = Math.floor((sorted.length - 1) / 2);
+              const slots: number[] = [];
+              let off = 0;
+              while (slots.length < sorted.length) {
+                if (off === 0) slots.push(mid);
+                else {
+                  const up = mid - off;
+                  const down = mid + off;
+                  if (up >= 0) slots.push(up);
+                  if (down < sorted.length) slots.push(down);
+                }
+                off += 1;
+              }
+              for (let i = 0; i < sorted.length; i += 1) {
+                result[slots[i]] = sorted[sorted.length - 1 - i];
+              }
+              return result;
+            };
+            const leftFlankOrder  = arrangeFlank([0, 2, 4]);
+            const rightFlankOrder = arrangeFlank([1, 3, 5]);
+            const renderSubButton = (sub: SpriteSubOption, si: number, align: "start" | "end") => {
+              const isPickedSub = si === selectedSubIndex;
+              const isRecSub    = si === (directionData?.recommended_sub ?? -1);
+              return (
+                // Sub buttons now share the EXACT same className /
+                // padding / typography as the parent direction buttons
+                // (sprite-bubble-soft + px-2 py-1) so they read at the
+                // same visible size — they only differ in colour + a
+                // softer default opacity so the hierarchy is "directions
+                // primary, subs secondary". The full hover surface (bg
+                // tint + accent text + opacity bump) matches direction
+                // hover so every option has the same affordance.
+                <button
+                  key={`sub-${si}-${sub.label}`}
+                  onClick={() => onPickSubDirection(si)}
+                  title={sub.reason || sub.label}
+                  data-focused={isFocused(`sub-${si}-${sub.label}`) || undefined}
+                  className="sprite-bubble-soft inline-flex items-baseline gap-1.5 rounded-md px-2 py-1 transition-all hover:brightness-110 hover:bg-[var(--ats-bg-accent-soft)] hover:text-[var(--ats-fg-accent)] hover:opacity-100 data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+                  style={{
+                    backgroundColor: isPickedSub ? "var(--ats-bg-accent-soft)" : "transparent",
+                    color:           isPickedSub
+                      ? "var(--ats-fg-accent)"
+                      : (isRecSub ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)"),
+                    fontWeight:      500,
+                    // Lighter default than directions so the visual
+                    // hierarchy still reads "main angles primary, subs
+                    // secondary". Hover snaps to full opacity (see
+                    // hover:opacity-100 above) so the option lights up
+                    // when the cursor lands on it.
+                    opacity:         isPickedSub ? 1 : 0.65,
+                    animationDelay:  `${si * 60}ms`,
+                    // Keep sub labels on a single line — wrapping was
+                    // visually noisy. The slot width is fixed (12rem) but
+                    // the button itself can extend beyond it; subs sit on
+                    // the OUTER edge of the row so any overflow goes into
+                    // empty page margin, not into the flank columns.
+                    whiteSpace:      "nowrap",
+                    textAlign:       align === "end" ? "right" : "left",
+                  }}
+                >
+                  {isRecSub && (
+                    <Star
+                      size={11}
+                      className="shrink-0"
+                      fill="currentColor"
+                      style={{ color: "var(--ats-fg-accent)" }}
+                      aria-label="recommended"
+                    />
+                  )}
+                  <span>{sub.label}</span>
+                </button>
+              );
+            };
+            return (
+              <div className="stage-reveal w-full flex items-start justify-center gap-4 px-2">
+                {/* LEFT sub-slot — fixed width so the flanks never shift
+                    horizontally when subs appear. Filled only when an
+                    even-index (left-flank) direction is picked. */}
+                <div
+                  className="shrink-0 flex flex-col items-end gap-0.5"
+                  style={{
+                    width:        SUB_SLOT_WIDTH,
+                    paddingRight: subsOnLeft ? "0.75rem" : 0,
+                    borderRight:  subsOnLeft ? "2px solid var(--ats-border-accent)" : "none",
+                  }}
+                >
+                  {subsOnLeft && (
+                    <>
+                      {pickedSubs.slice(0, 5).map((sub, si) => renderSubButton(sub, si, "end"))}
+                      {pickedSubs.length > 5 && (
                         <span
-                          className="ml-1 text-[10px]"
-                          style={{ color: "var(--ats-fg-muted)" }}
+                          className="self-end px-1.5 italic"
+                          style={{ fontSize: "11px", color: "var(--ats-fg-muted)", opacity: 0.7 }}
                           aria-hidden
                         >
-                          {isPicked ? "▾" : "▸"}
+                          + {pickedSubs.length - 5} more
                         </span>
                       )}
-                    </button>
-                    {/* Inline sub-options — only render when THIS row is
-                        picked. The left border + indent visually anchor
-                        the children to the parent row above so the user
-                        can't confuse which sub-option came from which
-                        direction. */}
-                    {isPicked && dirSubs.length > 0 && (
-                      <div
-                        className="stage-reveal ml-3 mt-0.5 flex flex-wrap items-center gap-1 pl-2 py-0.5"
-                        style={{ borderLeft: "2px solid var(--ats-border-accent)" }}
-                      >
-                        {dirSubs.slice(0, 8).map((sub, si) => {
-                          const isPickedSub  = si === selectedSubIndex;
-                          const isRecSub     = si === (directionData?.recommended_sub ?? -1);
-                          return (
-                            <button
-                              key={`sub-${si}-${sub.label}`}
-                              onClick={() => onPickSubDirection(si)}
-                              title={sub.reason || sub.label}
-                              data-focused={isFocused(`sub-${si}-${sub.label}`) || undefined}
-                              className="sprite-bubble-soft inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-all hover:brightness-110 hover:bg-[var(--ats-bg-accent-soft)] hover:text-[var(--ats-fg-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
-                              style={{
-                                backgroundColor: isPickedSub ? "var(--ats-bg-accent-soft)" : "transparent",
-                                color:           isPickedSub ? "var(--ats-fg-accent)" : (isRecSub ? "var(--ats-fg-accent)" : "var(--ats-fg-secondary)"),
-                                fontWeight:      isPickedSub ? 600 : 400,
-                                opacity:         isPickedSub ? 1 : 0.85,
-                                animationDelay:  `${si * 60}ms`,
-                              }}
-                            >
-                              {isRecSub && <Star size={9} className="shrink-0 opacity-70" />}
-                              <span className="text-left">{sub.label}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                    </>
+                  )}
+                </div>
+                {/* Left flank — directions 0, 2, 4 in pyramid order. */}
+                <div className="shrink-0 flex flex-col items-end gap-0.5">
+                  {leftFlankOrder.map(di => renderDirection({
+                    di, dir: directions[di], align: "end",
+                    directionData, selectedDirIndex, selectedSubIndex,
+                    onPickDirection, onPickSubDirection, isFocused,
+                  }))}
+                </div>
+                {/* Right flank — directions 1, 3, 5 in pyramid order. */}
+                <div className="shrink-0 flex flex-col items-start gap-0.5">
+                  {rightFlankOrder.map(di => renderDirection({
+                    di, dir: directions[di], align: "start",
+                    directionData, selectedDirIndex, selectedSubIndex,
+                    onPickDirection, onPickSubDirection, isFocused,
+                  }))}
+                </div>
+                {/* RIGHT sub-slot — mirror of the left sub-slot. Filled
+                    only when an odd-index (right-flank) direction is
+                    picked. */}
+                <div
+                  className="shrink-0 flex flex-col items-start gap-0.5"
+                  style={{
+                    width:       SUB_SLOT_WIDTH,
+                    paddingLeft: subsOnRight ? "0.75rem" : 0,
+                    borderLeft:  subsOnRight ? "2px solid var(--ats-border-accent)" : "none",
+                  }}
+                >
+                  {subsOnRight && (
+                    <>
+                      {pickedSubs.slice(0, 5).map((sub, si) => renderSubButton(sub, si, "start"))}
+                      {pickedSubs.length > 5 && (
+                        <span
+                          className="self-start px-1.5 italic"
+                          style={{ fontSize: "11px", color: "var(--ats-fg-muted)", opacity: 0.7 }}
+                          aria-hidden
+                        >
+                          + {pickedSubs.length - 5} more
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Custom-query input — appears in place of the "type my own…"
               bubble once the user opens it. Submit-on-Enter so the user
@@ -698,56 +788,112 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
 Sprite.displayName = "Sprite";
 
 /**
- * SpriteThinkingRow — single labelled row of "what the AI is currently
- * looking at" tags. Used by the streaming-thinking panel to surface
- * decompose / expand / found payloads with a uniform shape so the user
- * can read them at a glance during the directions stream.
+ * renderDirection — one big-direction button + its inline sub-options.
+ * Lives outside the Sprite body so the same JSX can be reused for the
+ * left-flank and right-flank columns of the action+directions row.
+ * `align` controls whether the button hugs the column's right ("end")
+ * or left ("start") edge — the sub-option strip nests on the same side.
  */
-function SpriteThinkingRow({
-  label,
-  items,
-  placeholder,
-  emphasis,
-}: {
-  label: string;
-  items: string[];
-  placeholder?: string;
-  emphasis?: boolean;
+function renderDirection(args: {
+  di: number;
+  dir: SpriteDirection | undefined;
+  align: "start" | "end";
+  directionData: SpriteDirectionData;
+  selectedDirIndex: number | null;
+  selectedSubIndex: number | null;
+  onPickDirection: (i: number) => void;
+  onPickSubDirection: (i: number) => void;
+  isFocused: (key: string) => boolean;
 }) {
-  const hasItems = items && items.length > 0;
+  const { di, dir, align, directionData, selectedDirIndex,
+          onPickDirection, isFocused } = args;
+  if (!dir) return null;
+  const isRecommended = di === (directionData?.recommended_direction ?? -1);
+  const isPicked      = di === selectedDirIndex;
+  const dirSubs       = dir.sub_options ?? [];
+  const selfClass     = align === "end" ? "self-end" : "self-start";
+  // selectedSubIndex / onPickSubDirection live on args.* — they're
+  // consumed by the inlined sub-options strip (rendered below the
+  // directions row inside the Sprite body) instead of here. Kept on
+  // the args type so both callsites can pass through without branching.
+  void args.selectedSubIndex; void args.onPickSubDirection;
   return (
-    <div className="stage-reveal flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-      <span
-        className="sprite-bubble-soft uppercase tracking-wider shrink-0"
-        style={{ color: "var(--ats-fg-muted)", fontSize: "calc(11px * var(--sprite-zoom-comp))" }}
+    <div
+      key={`dir-${di}-${dir.label}`}
+      className={`stage-reveal flex flex-col w-full ${align === "end" ? "items-end" : "items-start"}`}
+      style={{ animationDelay: `${di * 80}ms` }}
+    >
+      <button
+        onClick={() => onPickDirection(di)}
+        title={isRecommended
+          ? `${dir.description || dir.label} — recommended for your query`
+          : (dir.description || dir.label)}
+        data-focused={isFocused(`dir-${di}-${dir.label}`) || undefined}
+        className={`sprite-bubble-soft ${selfClass} inline-flex items-baseline gap-1.5 rounded-md px-2 py-1 transition-all hover:brightness-110 hover:bg-[var(--ats-bg-accent-soft)] hover:text-[var(--ats-fg-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]`}
+        style={{
+          // Recommended direction now gets a soft accent-tinted background
+          // EVEN WHEN UNPICKED, plus a brighter star, so users don't have
+          // to scan for the small icon to figure out where the AI suggests
+          // they start. Picked still wins visually via full accent fill.
+          backgroundColor: isPicked
+            ? "var(--ats-bg-accent-soft)"
+            : (isRecommended ? "var(--ats-bg-card-muted)" : "transparent"),
+          color: isPicked
+            ? "var(--ats-fg-accent)"
+            : (isRecommended ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)"),
+          // Constant font-weight across picked/unpicked states. Switching
+          // between 400 and 600 made the label render slightly wider when
+          // selected, which visibly nudged sibling directions in the same
+          // flank — the "shake" the user reported when picking a direction.
+          // Visual emphasis still comes from the background + colour swap.
+          fontWeight:      500,
+          opacity:         isPicked ? 1 : (isRecommended ? 1 : 0.78),
+          textAlign:       align === "end" ? "right" : "left",
+          // Keep direction labels on a single line so the angle list reads
+          // as a clean horizontal arrangement. Wrapping made the columns
+          // look ragged and uneven; users prefer everything inline even
+          // if the row gets a bit wider.
+          whiteSpace:      "nowrap",
+        }}
       >
-        {label}
-      </span>
-      {hasItems ? items.map((it, i) => (
-        <span
-          key={`${label}-${i}-${it}`}
-          className="sprite-bubble-soft stage-reveal"
-          style={{
-            color:           emphasis ? "var(--ats-fg-accent)" : "var(--ats-fg-secondary)",
-            fontWeight:      emphasis ? 600 : 400,
-            animationDelay:  `${i * 40}ms`,
-          }}
-        >
-          {it}{i < items.length - 1 ? "," : ""}
-        </span>
-      )) : (
-        <span
-          className="sprite-bubble-soft inline-flex items-center gap-1.5 italic"
-          style={{ color: "var(--ats-fg-muted)" }}
-        >
-          <span
-            className="sprite-dot-think inline-block h-2 w-2 rounded-full shrink-0"
-            style={{ backgroundColor: "var(--ats-fg-muted)" }}
-            aria-hidden
+        {isRecommended && (
+          <Star
+            size={12}
+            className="shrink-0"
+            fill="currentColor"
+            style={{ color: "var(--ats-fg-accent)" }}
+            aria-label="recommended"
           />
-          {placeholder ?? "thinking…"}
-        </span>
-      )}
+        )}
+        <span>{dir.label}</span>
+        {/* Tiny "rec" badge for the recommended angle — the star icon
+            alone was easy to miss in scanning, especially on dense
+            flanks. The label keeps the badge compact, the muted styling
+            keeps it from competing with the direction text. */}
+        {isRecommended && !isPicked && (
+          <span
+            className="ml-1 text-[10px] uppercase tracking-wider font-semibold rounded-full px-1.5 py-px"
+            style={{
+              color:           "var(--ats-fg-accent)",
+              backgroundColor: "var(--ats-bg-accent-soft)",
+              opacity:         0.85,
+            }}
+            aria-hidden
+          >
+            rec
+          </span>
+        )}
+        {dirSubs.length > 0 && (
+          <span
+            className="ml-1 text-[10px]"
+            style={{ color: "var(--ats-fg-muted)" }}
+            aria-hidden
+          >
+            {isPicked ? "▾" : "▸"}
+          </span>
+        )}
+      </button>
     </div>
   );
 }
+

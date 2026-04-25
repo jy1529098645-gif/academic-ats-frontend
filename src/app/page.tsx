@@ -12,7 +12,23 @@ import {
   MODE_SWITCH_LINES_QUICK,
   MODE_SWITCH_LINES_CURATED,
 } from "@/components/sprite/spriteConstants";
-import { looksLikeNewContent, pickNewContentPrompt } from "@/components/sprite/spriteUtils";
+import { looksLikeNewContent, pickNewContentPrompt, swapKaomoji } from "@/components/sprite/spriteUtils";
+
+// stripPaperCount — the LLM mode-recommendation message bakes in
+// "+ N papers" / "with N papers" phrases as if the count were a
+// commitment, but the user can change it freely in Search Settings.
+// Drop those fragments before showing the line so the sprite's voice
+// stays loose ("quick mode looks right, hit start when set") instead
+// of dictating ("quick mode + 9 papers, press Start to scan…").
+function stripPaperCount(msg: string): string {
+  if (!msg) return msg;
+  return msg
+    .replace(/\s*[+,]?\s*\b\d+\s*papers?\b/gi, "")
+    .replace(/\s*\bwith\s+\d+\s*papers?\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+,/g, ",")
+    .trim();
+}
 import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
@@ -1051,8 +1067,21 @@ export default function HomePage() {
   // so this is mostly a safety net + prevents layout reflows during composition.)
   const _composingRef = useRef(false);
   useEffect(() => {
-    // Randomise on first mount (client-only, avoids hydration mismatch).
-    setPlaceholderIdx(Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length));
+    // Persist the picked slogan across reloads via sessionStorage so
+    // a quick refresh (e.g. user accidentally hits F5) doesn't shuffle
+    // to a different greeting and feel jarring. Randomise on first
+    // session-mount only; subsequent mounts re-use the same index.
+    try {
+      const stored = window.sessionStorage.getItem("ats:workspace_placeholder_idx");
+      const parsed = stored != null ? Number(stored) : NaN;
+      if (Number.isFinite(parsed) && parsed >= 0 && parsed < WORKSPACE_PLACEHOLDERS.length) {
+        setPlaceholderIdx(parsed);
+        return;
+      }
+    } catch { /* sessionStorage may be unavailable in private mode — fall through */ }
+    const next = Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length);
+    setPlaceholderIdx(next);
+    try { window.sessionStorage.setItem("ats:workspace_placeholder_idx", String(next)); } catch {}
   }, []);
   // NOTE: previously this effect ran on every `[query]` change (every
   // keystroke) which added one extra render cycle per character. We now
@@ -1254,13 +1283,32 @@ export default function HomePage() {
   // first mounts. Plain functions (not useCallback) so each render closes
   // over the latest `handleUnderstand` + the fresh `directionData` snapshot.
   function handleFindAnglesFromSprite() {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    // Remember the query find-angles last fired with so the auto-refire
+    // effect (below) knows when the textarea has actually drifted to a
+    // new question vs. been edited back to the same content.
+    lastFindAnglesQueryRef.current = trimmed;
     setSpriteChoiceMade(true);
     setAssessmentMessage("looking for angles…");
+    // When auto-refiring after a content change, sync committedQuery so
+    // the "different path?" askNewContent prompt in Sprite.tsx doesn't
+    // also trigger on top of the auto-refire — they'd compete for the
+    // same slot and the prompt would block the streaming line.
+    if (committedQuery && committedQuery !== trimmed) {
+      setCommittedQuery(trimmed);
+    }
     // handleUnderstand (defined much further down) fetches directions, sets
     // directionData, and advances introStage to "full" on success — which
     // makes the direction chat bubbles appear here.
     void handleUnderstand();
   }
+
+  // Ref tracking the last query find-angles fired with — consumed by the
+  // auto-refire useEffect placed AFTER the isSubmitting / isUnderstanding
+  // state declarations (down at the bottom of the component) so the deps
+  // array doesn't TDZ-trip on those bindings.
+  const lastFindAnglesQueryRef = useRef<string>("");
 
   function handleSearchAsIsFromSprite() {
     setSpriteChoiceMade(true);
@@ -1299,6 +1347,7 @@ export default function HomePage() {
     setAssessmentVerdict(null);
     setInstantReaction("");
     lastAssessedTextRef.current = "";
+    lastFindAnglesQueryRef.current = "";
     // Drop any queued Enter from a previous in-flight assessment — user
     // explicitly chose to restart, so the old Enter intent is stale.
     pendingEnterRef.current = false;
@@ -1335,10 +1384,17 @@ export default function HomePage() {
   // doesn't open until the user either picks a sub-option (or commits via
   // a sub-less direction) — keeps the conversation feel intact.
   function handleDirectionPickFromSprite(di: number) {
-    // Toggle off if re-clicking the same direction.
+    // Toggle off if re-clicking the same direction. Snap the sprite voice
+    // back to the post-stream "what next" line so the user isn't stranded
+    // with a stale "nice pick" message after deselecting.
     if (di === selectedDirIndex) {
       setSelectedDirIndex(null);
       setSelectedSubIndex(null);
+      if ((directionData?.directions?.length ?? 0) > 0) {
+        setAssessmentMessage(
+          "pick a direction · tweak Search Settings if you'd like · or hit Quick / Curated (◕‿◕)",
+        );
+      }
       return;
     }
     setSelectedDirIndex(di);
@@ -1346,14 +1402,29 @@ export default function HomePage() {
     setCustomQueryEnabled(false);
     setInstantReaction("");
     const dir = directionData?.directions?.[di];
-    if (dir?.label) setAssessmentMessage(`nice pick — ${dir.label.toLowerCase()} (◕‿◕)`);
+    if (dir?.label) {
+      // When the picked direction HAS sub-options, surface the next step
+      // immediately so the user doesn't get stranded staring at "nice
+      // pick — X" wondering whether they need to drill in further or can
+      // commit. Mention both paths so the choice stays theirs.
+      const hasSubs = (dir.sub_options?.length ?? 0) > 0;
+      setAssessmentMessage(
+        hasSubs
+          ? `nice pick — ${dir.label.toLowerCase()} · pick a sub-angle or just hit Quick / Curated (◕‿◕)`
+          : `nice pick — ${dir.label.toLowerCase()} (◕‿◕)`,
+      );
+    }
     // If this direction has NO sub-options, commit straight to the action
     // bar so the user isn't stranded with a picked direction and nowhere
     // to go. With sub-options, wait for them to pick one (or skip).
     if (!dir?.sub_options || dir.sub_options.length === 0) {
       setIntroStage("full");
       setCommittedQuery(query.trim());
-      setTimeout(() => { void requestModeRecommendation(query.trim(), dir?.label || ""); }, 700);
+      // Delayed (1.8 s) so the user has time to read the "nice pick"
+      // line before the mode-recommendation overwrites it. 700 ms felt
+      // jumpy — readers barely caught the first message before it was
+      // gone.
+      setTimeout(() => { void requestModeRecommendation(query.trim(), dir?.label || ""); }, 1800);
     }
   }
 
@@ -1373,7 +1444,10 @@ export default function HomePage() {
     const dir = directionData?.directions?.[selectedDirIndex ?? 0];
     const sub = dir?.sub_options?.[si];
     if (sub?.label) setAssessmentMessage(`got it — ${sub.label.toLowerCase()} (◕‿◕)`);
-    setTimeout(() => { void requestModeRecommendation(query.trim(), sub?.label || dir?.label || ""); }, 700);
+    // Same 700 → 1800 ms bump as handleDirectionPick: leaves time for
+    // the user to actually read "got it — X" before the mode pitch
+    // overwrites it.
+    setTimeout(() => { void requestModeRecommendation(query.trim(), sub?.label || dir?.label || ""); }, 1800);
   }
 
   // "Type my own…" bubble — opens the inline input.
@@ -1434,7 +1508,12 @@ export default function HomePage() {
       if (typeof data.paper_count === "number" && data.paper_count > 0) {
         setPaperCount(data.paper_count);
       }
-      if (data.message) setAssessmentMessage(data.message);
+      // Swap the trailing kaomoji to a fresh one — the LLM tends to
+      // fall back to the same face on consecutive replies, and the
+      // backend message also bakes in a fixed paper count that the
+      // user is free to override in Search Settings. Strip both for
+      // a more conversational sprite voice.
+      if (data.message) setAssessmentMessage(swapKaomoji(stripPaperCount(data.message)));
     } catch { /* best-effort — the user can still pick mode manually */ }
   }
 
@@ -1498,6 +1577,45 @@ export default function HomePage() {
   const [understandDecompose, setUnderstandDecompose] = useState<Record<string, unknown> | null>(null);
   const [understandExpand,    setUnderstandExpand]    = useState<Record<string, unknown> | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Auto-refire find-angles when the textarea content changes after the
+  // first manual Enter. Debounced (1.5 s) so we don't fire on every
+  // keystroke. Two paths:
+  //   * Pre-search drift (hasRunSearch=false): just rerun find-angles
+  //     for the new query, replacing the stale directions list.
+  //   * Post-search material drift (hasRunSearch=true + 50%+ of the
+  //     previous query's words have vanished): treat it as the user
+  //     asking a different question. Selectively reset the search
+  //     state (without dumping the textarea via handleStartOver) and
+  //     restart the conversation. Refresh on minor edits is suppressed
+  //     post-search so the result panel doesn't get blown away just
+  //     because the user is tweaking wording.
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    if (isSubmitting || isUnderstanding) return;
+    if (!lastFindAnglesQueryRef.current) return;
+    if (trimmed === lastFindAnglesQueryRef.current) return;
+    if (hasRunSearch && !looksLikeNewContent(lastFindAnglesQueryRef.current, trimmed)) return;
+    const timer = window.setTimeout(() => {
+      if (hasRunSearch) {
+        // Post-search material drift — reset the result-side state so
+        // the new directions stream lands on a clean canvas.
+        abortRef.current?.abort();
+        abortRef.current = null;
+        setHasRunSearch(false);
+        setIsSubmitting(false);
+        setSelectedDirIndex(null);
+        setSelectedSubIndex(null);
+        setDirectionData(null);
+        setIntroStage("blank");
+      }
+      handleFindAnglesFromSprite();
+    }, 1500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, hasRunSearch, isSubmitting, isUnderstanding]);
+
   // Textarea geometry + type scale. Before a search has run the textarea
   // is a tall "greeting" box; once a search runs (hasRunSearch) or a
   // search is in-flight (isSubmitting) it snaps down to a compact 2-line
@@ -3228,6 +3346,21 @@ ${html}
       setSelectedSubIndex(null);
       setCustomQueryEnabled(false);
       setCustomQueryValue("");
+      // Refresh the sprite voice — without this, the "looking for angles…"
+      // line set on Enter would linger after the stream completed and read
+      // as if the search was still in progress. A short prompt nudges the
+      // user toward the next step (pick a direction OR jump to Quick /
+      // Curated) AND also points out Search Settings for users who want
+      // to tweak paper count / year range / sources before searching —
+      // those settings are otherwise easy to overlook because the panel
+      // sits collapsed by default at the bottom of the workspace card.
+      // Only fires when angles actually landed; the error path keeps the
+      // error voice visible.
+      if (Array.isArray(data?.directions) && data.directions.length > 0) {
+        setAssessmentMessage(
+          "pick a direction · tweak Search Settings if you'd like · or hit Quick / Curated (◕‿◕)",
+        );
+      }
       // Persist the understand-only entry to the cloud (history is cloud-authoritative).
       // Optimistically insert a provisional row so the timeline updates immediately,
       // then swap in the real server id once the POST returns.
@@ -3369,6 +3502,12 @@ ${html}
       // Silent abort when the user stops mid-analysis
       if ((error as { name?: string })?.name !== "AbortError") {
         setUiError(explainFetchError(error));
+        // Surface a friendly fallback in the sprite voice — without it
+        // the slot would just keep showing "looking for angles…" while
+        // the user has no idea why the directions never arrived. Lets
+        // them try a different wording without staring at a stalled
+        // line. Only set when not already replaced by applyResult.
+        setAssessmentMessage("hmm, couldn't pull angles — try refining the wording? (˙ᵕ˙)");
       }
     } finally {
       setIsUnderstanding(false);
@@ -3727,6 +3866,7 @@ ${html}
     setAssessmentVerdict(null);
     setInstantReaction("");
     lastAssessedTextRef.current = "";
+    lastFindAnglesQueryRef.current = "";
     pendingEnterRef.current = false;
     setIntroStage("blank");
     setHasRunSearch(false);
@@ -4767,23 +4907,26 @@ ${html}
               <LayoutGrid size={18} /><span>Workspace</span>
               {/* Start over — clears query, sprite results, layout, and
                   any in-flight search to drop the user back at the
-                  pristine landing. Lives in the workspace title row so
-                  it's always reachable but visually small enough not to
-                  compete with the search action bubbles. */}
-              <button
-                onClick={handleStartOver}
-                title="Start over — clear query, directions, and any in-flight search"
-                {...helpProps("clears your query, directions, and any in-flight search — full reset to the landing")}
-                className="ml-auto inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-all hover:brightness-110"
-                style={{
-                  borderColor:     "var(--ats-border-subtle)",
-                  backgroundColor: "var(--ats-bg-panel)",
-                  color:           "var(--ats-fg-muted)",
-                }}
-              >
-                <RotateCcw size={12} />
-                <span>Start over</span>
-              </button>
+                  pristine landing. Hidden on the initial landing so it
+                  doesn't clutter the empty workspace; only surfaces once
+                  the user has actually run a search and might want a way
+                  back to the start. Fades in when it appears. */}
+              {(hasRunSearch || isSubmitting) && (
+                <button
+                  onClick={handleStartOver}
+                  title="Start over — clear query, directions, and any in-flight search"
+                  {...helpProps("clears your query, directions, and any in-flight search — full reset to the landing")}
+                  className="stage-reveal ml-auto inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-all hover:brightness-110"
+                  style={{
+                    borderColor:     "var(--ats-border-subtle)",
+                    backgroundColor: "var(--ats-bg-panel)",
+                    color:           "var(--ats-fg-muted)",
+                  }}
+                >
+                  <RotateCcw size={12} />
+                  <span>Start over</span>
+                </button>
+              )}
             </div>
 
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
@@ -4825,16 +4968,29 @@ ${html}
                   // Enter is ignored so CJK candidate confirmations don't
                   // submit.
                   onKeyDown={(e) => {
+                    // Esc — cancel the in-flight find-angles stream so the
+                    // user has a non-mouse way out of "scouting angles…"
+                    // without losing their typed query. Discoverable via
+                    // the small "Esc to cancel" hint in the streaming
+                    // voice line.
+                    if (e.key === "Escape" && isUnderstanding) {
+                      e.preventDefault();
+                      cancelUnderstand();
+                      setAssessmentMessage("ok, paused — keep editing whenever (˙ᵕ˙)");
+                      return;
+                    }
                     // Bubble navigation (Arrow keys) — when the sprite has
                     // any actionable bubble on screen, ArrowLeft/Right
                     // cycle the focused bubble instead of moving the
                     // textarea cursor. Suppressed during IME composition
                     // so CJK candidate selection still works.
-                    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+                    if ((e.key === "ArrowLeft" || e.key === "ArrowRight" ||
+                         e.key === "ArrowUp"   || e.key === "ArrowDown") &&
                         !e.nativeEvent.isComposing && !_composingRef.current &&
                         spriteRef.current?.hasBubbles()) {
                       e.preventDefault();
-                      spriteRef.current.moveFocus(e.key === "ArrowLeft" ? -1 : 1);
+                      const delta = (e.key === "ArrowLeft" || e.key === "ArrowUp") ? -1 : 1;
+                      spriteRef.current.moveFocus(delta);
                       return;
                     }
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
@@ -4895,6 +5051,7 @@ ${html}
                       setPlaceholderIdx(i => {
                         let next = i;
                         while (next === i) next = Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length);
+                        try { window.sessionStorage.setItem("ats:workspace_placeholder_idx", String(next)); } catch {}
                         return next;
                       });
                     }
@@ -4926,6 +5083,28 @@ ${html}
                     The fake cursor sits at the END of the second line so it reads
                     as "ready to append" rather than "type from the start".
                     `animate-pulse` gives both the text and the bar the same breathing rhythm. */}
+                {/* Char-limit counter — only surfaces when the user is
+                    within 10 % of the cap, so it never pesters short
+                    queries. Goes amber at 90 % and red at the cap. The
+                    textarea already enforces the cap via `maxLength`,
+                    so this is just user-visible feedback. */}
+                {(() => {
+                  const lim = workspaceCharLimit;
+                  if (!lim || query.length < Math.floor(lim * 0.9)) return null;
+                  const atCap = query.length >= lim;
+                  return (
+                    <div
+                      aria-live="polite"
+                      className="pointer-events-none absolute bottom-1.5 right-3 z-20 select-none rounded-md px-1.5 py-0.5 text-[10px] font-mono tabular-nums"
+                      style={{
+                        color:           atCap ? "#dc2626" : "#d97706",
+                        backgroundColor: "rgba(15, 23, 42, 0.55)",
+                      }}
+                    >
+                      {query.length}/{lim}
+                    </div>
+                  );
+                })()}
                 {query.length === 0 && !taFocused && (
                   <div
                     className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center px-6 text-center font-bold leading-[1.2] text-[var(--ats-placeholder-fg)] select-none animate-pulse"
@@ -4954,20 +5133,43 @@ ${html}
                   Visible after the user has chosen a direction from the
                   blank landing. Which controls appear depends on
                   introStage:
-                    explore → Search Controls + Explore Angles only
-                    full    → Search Controls + Explore Angles + Quick /
+                    explore → Search Settings + Explore Angles only
+                    full    → Search Settings + Explore Angles + Quick /
                               Curated toggle + Start button
                   Everything uses the same layout / classes so the row
-                  visually grows as the stage unlocks. */}
-              {introStage !== "blank" && (
-              <div className="stage-reveal flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden">
+                  visually grows as the stage unlocks.
+
+                  The wrapper is rendered AT ALL TIMES once the user has
+                  engaged (typed something or advanced past blank) so the
+                  action bar's vertical space is reserved up-front and
+                  doesn't suddenly pop in after the angle stream finishes
+                  — that pop-in was pushing the sprite + bubbles below
+                  the textarea down by a row-height every search. On the
+                  truly empty landing we use `visibility: hidden` instead
+                  of unmounting so the textarea card height stays
+                  identical between empty and engaged states. */}
+              {(() => {
+                const showActionBar = introStage !== "blank" || isUnderstanding || query.trim().length > 0;
+                return (
+              <div
+                className="flex flex-nowrap items-center gap-2 border-t border-slate-700/40 px-3 py-2 overflow-hidden"
+                style={{
+                  // Always reserve space (visibility hidden when not engaged
+                  // yet) so the bar doesn't pop in and shove content. When
+                  // showActionBar flips on we fade opacity 0 → 1 to give
+                  // the row a soft fade-in instead of a hard appear.
+                  visibility: showActionBar ? "visible" : "hidden",
+                  opacity:    showActionBar ? 1 : 0,
+                  transition: "opacity 360ms ease-out",
+                }}
+              >
                 <button
                   onClick={() => setSettingsOpen(o => !o)}
                   {...helpProps("open per-search settings — paper count, sort mode, year range, source filters…")}
                   className="shrink min-w-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm font-semibold text-slate-200 hover:border-blue-500/40 transition-colors"
                 >
                   <SlidersHorizontal size={14} className="shrink-0" />
-                  <span className="truncate">Search Controls</span>
+                  <span className="truncate">Search Settings</span>
                   <ChevronDown size={12} className={`shrink-0 ${settingsOpen ? "rotate-180 transition-transform duration-200" : "transition-transform duration-200"}`} />
                 </button>
 
@@ -4989,7 +5191,7 @@ ${html}
                       removed — those are now sprite chat bubbles (see
                       handleStartSearchFromSprite + Sprite.tsx
                       showSearchModeBubbles). The action bar keeps only
-                      Search Controls + Cancel/Stop affordances. */}
+                      Search Settings + Cancel/Stop affordances. */}
                   {introStage === "full" && isSubmitting && (
                     <button
                       onClick={handleStop}
@@ -5001,9 +5203,47 @@ ${html}
                       <Square size={13} fill="currentColor" />
                     </button>
                   )}
+
+                  {/* Re-run mode toggle — appears once a search has run
+                      so the user can swap modes and re-fire without
+                      hitting Start over. The currently-active mode gets
+                      the accent border; clicking the OTHER mode flips
+                      fastMode and re-invokes handleSearch. Hidden while
+                      a search is mid-flight (the Stop button is the
+                      affordance there). */}
+                  {introStage === "full" && hasRunSearch && !isSubmitting && (
+                    <div className="stage-reveal inline-flex items-center rounded-xl border p-0.5 text-xs font-semibold"
+                         style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}>
+                      <button
+                        onClick={() => { setFastMode(true); setTimeout(() => { void handleSearch(); }, 50); }}
+                        {...helpProps("re-run as Quick Search — fast smart-ranked retrieval")}
+                        title="Re-run as Quick Search"
+                        className="flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors"
+                        style={{
+                          backgroundColor: fastMode ? "var(--ats-bg-accent-soft)" : "transparent",
+                          color:           fastMode ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                        }}
+                      >
+                        <Zap size={12} className="shrink-0" /><span>Quick</span>
+                      </button>
+                      <button
+                        onClick={() => { setFastMode(false); setTimeout(() => { void handleSearch(); }, 50); }}
+                        {...helpProps("re-run as Curated Analysis — multi-agent deep dive")}
+                        title="Re-run as Curated Analysis"
+                        className="flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors"
+                        style={{
+                          backgroundColor: !fastMode ? "var(--ats-bg-accent-soft)" : "transparent",
+                          color:           !fastMode ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                        }}
+                      >
+                        <FlaskConical size={12} className="shrink-0" /><span>Curated</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* ── Sprite commentary — lives below the textarea card at every
@@ -5022,15 +5262,16 @@ ${html}
                 The whole row uses `stage-reveal` on first mount so it fades
                 in with the rest of the landing rather than popping.
 
-                The wrapper sets a generous min-height + flex-center so the
-                sprite floats vertically AND horizontally centred in the
-                empty band below the textarea on the landing. Once the
-                sprite has rich content (direction or sub-direction bubbles
-                streamed in), we DROP the min-height so the bubbles snap
-                upward toward the textarea — otherwise sub-bubbles would
-                land below the fold on smaller viewports and force the
-                user to scroll. The horizontal centering stays. */}
-            <div className={`flex flex-col items-center justify-center w-full ${directionData?.directions?.length ? "" : "min-h-[14rem]"}`}>
+                The wrapper anchors the sprite at the TOP of the area
+                directly under the textarea (justify-start instead of
+                justify-center, no min-height). Earlier we centred the
+                sprite inside a 14rem reserved band on the landing so it
+                floated mid-page; users found that confusing because the
+                sprite then jumped UP toward the textarea once angles
+                arrived. Pinning it near the textarea bottom from the
+                first frame keeps its position consistent across every
+                state — empty landing, mid-stream, post-stream. */}
+            <div className="flex flex-col items-center w-full">
             <Sprite
               ref={spriteRef}
               query={query}
