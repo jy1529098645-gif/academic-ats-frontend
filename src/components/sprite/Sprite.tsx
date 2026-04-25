@@ -171,31 +171,51 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
   // the user starts typing past the chip's text, it deselects.
   const selectedTerm = trimmedQuery;
 
+  // Voice-slot sizing — split between two regimes:
+  //   · Pre-search (hasRunSearch=false): FIXED 3 rem height + 2-line
+  //     clamp. The user is hovering chips, typing, advancing the
+  //     3-Enter ritual; if the slot resized on every hover-help text
+  //     change the buttons + chips below would jitter up and down.
+  //     Sticking to a fixed slot is the proven cure.
+  //   · Post-search (hasRunSearch=true): drop the fixed height,
+  //     shrink the font, and let the line wrap up to 3 lines. The
+  //     guidance lines that fire here ("Synthesis Lab — write a draft
+  //     using the papers you've collected as references") are longer
+  //     than the landing copy and were getting clipped at 3 rem.
+  //     There are no hover bubbles below to be pushed by a growing
+  //     slot, so growth is fine.
+  const voiceSlotStyle: React.CSSProperties = hasRunSearch
+    ? {}                                            // grows naturally
+    : { height: "3rem" };
+  const voiceLineStyle: React.CSSProperties = hasRunSearch
+    ? {                                             // smaller, up to 3 lines
+        display:         "-webkit-box",
+        WebkitLineClamp: 3,
+        WebkitBoxOrient: "vertical",
+        overflow:        "hidden",
+        fontSize:        "calc(13px * var(--sprite-zoom-comp, 1))",
+        lineHeight:      1.4,
+      }
+    : {                                             // bigger, 2-line clamp
+        display:         "-webkit-box",
+        WebkitLineClamp: 2,
+        WebkitBoxOrient: "vertical",
+        overflow:        "hidden",
+      };
+
   return (
     <div className="stage-reveal mt-3 flex flex-col items-center gap-2.5 w-full">
-      {/* Sprite VOICE SLOT — FIXED-height reservation so the slot's
-          height never changes when the voice line swaps. Earlier we
-          used min-h-[2.4rem] which let the slot grow when a longer
-          hover-help message wrapped to a second line, pushing the
-          buttons + chips below it down by a row and back up again on
-          mouse-out — the visible "shake" the user reported. Locking
-          the height + line-clamping at 2 lines keeps the row's
-          baseline pinned across every voice transition. */}
+      {/* Sprite VOICE SLOT — see voiceSlotStyle / voiceLineStyle above
+          for the pre-search vs post-search sizing rationale. */}
       <div
         className="w-full flex items-center justify-center px-3 text-center overflow-hidden"
-        style={{ height: "3rem" }}
+        style={voiceSlotStyle}
       >
         {hoverHelp ? (
           <p
             key={`help-${hoverHelp}`}
             className="sprite-voice voice-fade inline-flex items-center gap-2 italic leading-snug max-w-full"
-            style={{
-              color:           "var(--ats-fg-accent)",
-              display:         "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical",
-              overflow:        "hidden",
-            }}
+            style={{ color: "var(--ats-fg-accent)", ...voiceLineStyle }}
           >
             <span
               className="sprite-dot-idle inline-block h-2.5 w-2.5 rounded-full shrink-0"
@@ -209,13 +229,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           <p
             key={message}
             className="sprite-voice voice-fade inline-flex items-center gap-2 italic leading-snug max-w-full"
-            style={{
-              color:           "var(--ats-fg-secondary)",
-              display:         "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical",
-              overflow:        "hidden",
-            }}
+            style={{ color: "var(--ats-fg-secondary)", ...voiceLineStyle }}
           >
             <span
               className="sprite-dot-idle inline-block h-2.5 w-2.5 rounded-full shrink-0"
@@ -229,13 +243,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           <p
             key={fallbackVoice}
             className="sprite-voice voice-fade inline-flex items-center gap-2 italic leading-snug max-w-full"
-            style={{
-              color:           "var(--ats-fg-secondary)",
-              display:         "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical",
-              overflow:        "hidden",
-            }}
+            style={{ color: "var(--ats-fg-secondary)", ...voiceLineStyle }}
           >
             <span
               className="sprite-dot-idle inline-block h-2.5 w-2.5 rounded-full shrink-0"
