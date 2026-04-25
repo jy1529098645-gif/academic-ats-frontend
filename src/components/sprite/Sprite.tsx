@@ -1,7 +1,7 @@
 "use client";
 
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from "react";
-import { FlaskConical, Sparkles, Zap } from "lucide-react";
+import { FlaskConical, Zap } from "lucide-react";
 
 /** Imperative handle exposed to parent so the textarea's onKeyDown can
  * drive bubble focus + Enter commit without each side knowing the other's
@@ -249,35 +249,31 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           Clicking a chip replaces the textarea contents wholesale, so the
           user can scan a few suggested topics and pick one without typing.
           Also keyboard-navigable via the same arrow-key flow that walks
-          the mode buttons. */}
+          the mode buttons.
+          Visual: borderless, lightweight ghost chips. They use the same
+          tight vertical rhythm (gap-x-3, leading-tight) so the whole
+          row collapses to the minimum height the wrapped labels need —
+          centered + auto-fits, never reserves empty space. */}
       {showRecommendedTerms && (
-        <div className="stage-reveal flex flex-col items-center gap-1.5 w-full max-w-3xl">
-          <div
-            className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em]"
-            style={{ color: "var(--ats-fg-muted)" }}
-          >
-            <Sparkles size={11} aria-hidden />
-            <span>Try one of these</span>
-          </div>
-          <div className="flex flex-wrap items-center justify-center gap-1.5 px-2">
-            {recommendedTerms.map((term, i) => (
-              <button
-                key={`term-${i}`}
-                onClick={() => onPickRecommendedTerm(term)}
-                title={`Use "${term}" as your search`}
-                {...hh(`Replace your input with "${term}" — click to set, then pick Quick or Curated`)}
-                data-focused={isFocused(`term-${i}`) || undefined}
-                className="sprite-bubble inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] hover:text-[var(--ats-fg-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
-                style={{
-                  borderColor:     "var(--ats-border-subtle)",
-                  backgroundColor: "var(--ats-bg-panel)",
-                  color:           "var(--ats-fg-muted)",
-                }}
-              >
-                {term}
-              </button>
-            ))}
-          </div>
+        <div className="stage-reveal flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight">
+          {recommendedTerms.map((term, i) => (
+            <button
+              key={`term-${i}`}
+              onClick={() => onPickRecommendedTerm(term)}
+              title={`Use "${term}" as your search`}
+              {...hh(`Replace your input with "${term}" — click to set, then pick Quick or Curated`)}
+              data-focused={isFocused(`term-${i}`) || undefined}
+              className="inline-flex items-center rounded-md px-1.5 py-0.5 font-normal transition-colors hover:text-[var(--ats-fg-secondary)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-1 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+              style={{
+                color:    "var(--ats-fg-muted)",
+                opacity:  0.6,
+                fontSize: "11px",
+                lineHeight: 1.25,
+              }}
+            >
+              {term}
+            </button>
+          ))}
         </div>
       )}
     </div>
