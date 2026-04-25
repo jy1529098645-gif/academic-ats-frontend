@@ -1332,6 +1332,24 @@ export default function HomePage() {
   // Daily-rotated recommended-term chips from the admin pool. See
   // src/lib/hooks/use-recommended-terms.ts for the fetch + fallback.
   const recommendedTerms = useRecommendedTerms();
+
+  // Three-step Quick / Curated reveal flow (driven by Enter on the textarea):
+  //   0 → user has typed but the action buttons are still hidden
+  //   1 → buttons are visible (no focus ring on either)
+  //   2 → buttons are visible AND the active mode shows a focus ring;
+  //       the next Enter actually fires the search.
+  // Resets to 0 whenever the textarea empties or after a search runs so
+  // the next session starts clean.
+  const [buttonStep, setButtonStep] = useState<0 | 1 | 2>(0);
+  useEffect(() => {
+    if (!query.trim() || hasRunSearch) {
+      // Empty input → drop the buttons back into the hidden state so the
+      // next typed query starts the 3-Enter ritual fresh. Mid-search we
+      // also collapse since the buttons are out of scope while the search
+      // is running.
+      setButtonStep(0);
+    }
+  }, [query, hasRunSearch]);
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
   // Announcement banner is OFF by default now — a megaphone button next to
   // the mascot toggles it. Users who never need the banner get a cleaner
@@ -3236,6 +3254,7 @@ ${html}
     setCustomQueryEnabled(false);
     setCustomQueryValue("");
     setAssessmentMessage("");
+    setButtonStep(0);
     setIntroStage("blank");
     setHasRunSearch(false);
     setJob(null);
@@ -4354,19 +4373,26 @@ ${html}
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !_composingRef.current) {
                       e.preventDefault();
                       const trimmed = query.trim();
-                      if (isSubmitting) return;
-                      // First priority: if a sprite bubble is focused,
-                      // commit it. Bubbles ARE the action surface — Enter
-                      // here is "click the highlighted bubble" (a
-                      // recommended-term chip OR Quick / Curated).
-                      if (spriteRef.current?.hasBubbles() && spriteRef.current.commitFocused()) {
+                      if (isSubmitting || !trimmed) return;
+                      // Three-step Quick / Curated reveal flow:
+                      //   1st Enter → buttonStep 0 → 1 (buttons appear, no ring)
+                      //   2nd Enter → buttonStep 1 → 2 (focus ring on default mode)
+                      //   3rd Enter → commit the focused mode (fire search)
+                      // EXCEPT when the user has explicitly arrowed onto a
+                      // recommended-term chip — in that case Enter commits
+                      // the chip (fills the input) regardless of buttonStep,
+                      // since the chip IS the focus target.
+                      const focusedKind = spriteRef.current?.getFocusedKind?.() ?? null;
+                      if (focusedKind === "term") {
+                        spriteRef.current?.commitFocused();
                         return;
                       }
-                      // Fallback — there's typed content but no actionable
-                      // bubble in scope (e.g. mid-search). Fire Quick on
-                      // Enter so a single keystroke still launches the
-                      // search.
-                      if (trimmed) handleStartSearchFromSprite(fastMode ? "quick" : "curated");
+                      if (buttonStep === 0) { setButtonStep(1); return; }
+                      if (buttonStep === 1) { setButtonStep(2); return; }
+                      // buttonStep === 2 — commit whatever mode currently
+                      // owns the focus ring (Quick by default, or Curated
+                      // if the user arrowed across).
+                      spriteRef.current?.commitFocused();
                     }
                   }}
                   onFocus={() => setTaFocused(true)}
@@ -4674,6 +4700,7 @@ ${html}
               hoverHelp={hoverHelpText}
               onHoverHelp={setHoverHelpText}
               recommendedTerms={recommendedTerms}
+              buttonStep={buttonStep}
               onPickRecommendedTerm={handlePickRecommendedTerm}
               onStartSearch={handleStartSearchFromSprite}
             />

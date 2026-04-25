@@ -14,6 +14,10 @@ export type SpriteHandle = {
   /** Click whatever bubble is currently focused. Returns true if a bubble
    * was triggered (so the parent knows to suppress its own Enter logic). */
   commitFocused: () => boolean;
+  /** What kind of bubble currently has focus — lets the parent route
+   * Enter differently for chips (commit input fill) vs mode buttons
+   * (drive the 3-step reveal flow). Returns null when nothing is focused. */
+  getFocusedKind: () => "term" | "mode" | null;
 };
 
 export type AssessVerdict = "brief" | "balanced" | "detailed";
@@ -38,6 +42,13 @@ export type SpriteProps = {
   /** Curated suggestion chips shown under the mode buttons. Clicking a
    * chip replaces the textarea contents with the chip's text. */
   recommendedTerms: string[];
+  /** Three-step Quick / Curated reveal flow:
+   *   0 → buttons hidden (user has typed but not yet pressed Enter)
+   *   1 → buttons visible, no focus ring on either
+   *   2 → buttons visible AND focus ring on the active mode (next Enter fires it)
+   * Driven by the parent's textarea Enter handler. Resets to 0 whenever
+   * the input empties or after a search runs. */
+  buttonStep: 0 | 1 | 2;
   /** Quick / Curated chat bubble click — picks the mode and fires the
    * search in one step. */
   onStartSearch: (mode: "quick" | "curated") => void;
@@ -61,7 +72,7 @@ export type SpriteProps = {
 export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props, ref) {
   const {
     query, introStage, hasRunSearch, message,
-    hoverHelp, recommendedTerms,
+    hoverHelp, recommendedTerms, buttonStep,
     onStartSearch, onPickRecommendedTerm, onHoverHelp,
   } = props;
   const hh = (msg: string) => ({
@@ -72,7 +83,11 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
   });
 
   const trimmedQuery = query.trim();
-  const showSearchModeButtons = !hasRunSearch && trimmedQuery.length > 0;
+  // Buttons stay hidden at step 0 (user typed but hasn't pressed Enter yet),
+  // appear at step 1 (1st Enter — visible but no ring), and pick up the
+  // visible focus ring at step 2 (2nd Enter — armed; 3rd Enter fires).
+  const showSearchModeButtons = !hasRunSearch && trimmedQuery.length > 0 && buttonStep >= 1;
+  const showButtonFocusRing   = buttonStep >= 2;
   const showRecommendedTerms  = !hasRunSearch && recommendedTerms.length > 0;
 
   // Fallback line for the post-Run / post-results states — keeps the
@@ -103,19 +118,24 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showSearchModeButtons, showRecommendedTerms, recommendedTerms.join("|")]);
 
-  // Default focus = first mode button when present, else first chip.
-  // Persists across re-renders so the focused item stays put as state changes.
+  // Focus state — null until the parent drives it via a real arrow key
+  // or until the mode buttons appear (we then auto-default to mode-quick
+  // so the 2nd Enter has something to arm). Chips only get focus when
+  // the user explicitly arrows onto them; we DON'T auto-focus a chip
+  // because that would make the textarea Enter accidentally fill the
+  // input every time, instead of advancing the 3-step button flow.
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   useEffect(() => {
     if (actionables.length === 0) {
       setFocusedKey(null);
       return;
     }
-    const focusInvalid = focusedKey === null || !actionables.some(a => a.key === focusedKey);
-    if (focusInvalid) {
-      const quickAvailable = actionables.some(a => a.key === "mode-quick");
-      setFocusedKey(quickAvailable ? "mode-quick" : actionables[0].key);
-    }
+    const stillValid = focusedKey !== null && actionables.some(a => a.key === focusedKey);
+    if (stillValid) return;
+    const quickAvailable = actionables.some(a => a.key === "mode-quick");
+    // Auto-focus mode-quick once the buttons render so the 2nd Enter
+    // has a default target. Otherwise leave focus null.
+    setFocusedKey(quickAvailable ? "mode-quick" : null);
   }, [actionables, focusedKey]);
 
   const focusedIdx = useMemo(
@@ -137,6 +157,10 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
       if (!target) return false;
       target.onClick();
       return true;
+    },
+    getFocusedKind: () => {
+      const target = actionables.find(a => a.key === focusedKey);
+      return target?.kind ?? null;
     },
   }), [actionables, focusedIdx, focusedKey]);
 
@@ -243,18 +267,22 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
       </div>
 
       {/* Quick / Curated buttons — ALWAYS mounted so the row reserves
-          its vertical space at all times. We cross-fade in/out via
-          opacity + pointer-events instead of mount/unmount, which (a)
-          keeps the chips below pinned at the same y when the user
-          starts typing and (b) gives a smooth fade-out when search
-          fires. `aria-hidden` and pointer-events:none keep AT and
-          mouse interactions consistent with the visual state. */}
+          its vertical space at all times. We swap visibility via
+          opacity + pointer-events instead of mount/unmount, which keeps
+          the chips below pinned at the same y when the user starts
+          typing and through the 3-step Enter reveal. We DON'T use a
+          CSS opacity transition here: React's strict-mode re-renders
+          (driven by hover-help + the buttonStep state machine) kept
+          resetting the in-flight transition to currentTime=0, leaving
+          the row stuck at opacity:0 even though inline style was
+          opacity:1. The reveal reads fine as an instant flip. */}
       <div
-        className="flex flex-row items-center justify-center gap-2 transition-opacity duration-300 ease-out"
+        className="flex flex-row items-center justify-center gap-2"
         style={{
           minHeight:     "2.5rem",
           opacity:       showSearchModeButtons ? 1 : 0,
           pointerEvents: showSearchModeButtons ? "auto" : "none",
+          transition:    "none",
         }}
         aria-hidden={!showSearchModeButtons}
       >
@@ -262,7 +290,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           onClick={() => onStartSearch("quick")}
           title="Fast smart-ranked search — seconds to results"
           {...hh("Quick Search — fast smart-ranked retrieval, results in seconds")}
-          data-focused={isFocused("mode-quick") || undefined}
+          data-focused={(showButtonFocusRing && isFocused("mode-quick")) || undefined}
           tabIndex={showSearchModeButtons ? 0 : -1}
           className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
           style={{
@@ -278,7 +306,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           onClick={() => onStartSearch("curated")}
           title="Multi-agent deep dive — slower, more careful"
           {...hh("Curated Analysis — multi-agent deep dive (in minutes), much more careful evidence chains")}
-          data-focused={isFocused("mode-curated") || undefined}
+          data-focused={(showButtonFocusRing && isFocused("mode-curated")) || undefined}
           tabIndex={showSearchModeButtons ? 0 : -1}
           className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
           style={{
@@ -301,10 +329,11 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           font-size changes anywhere — every visual emphasis is done
           off the layout flow so neighbouring chips stay put. */}
       <div
-        className="flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight transition-opacity duration-300 ease-out"
+        className="flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight"
         style={{
           opacity:       showRecommendedTerms ? 1 : 0,
           pointerEvents: showRecommendedTerms ? "auto" : "none",
+          transition:    "none",
         }}
         aria-hidden={!showRecommendedTerms}
       >
