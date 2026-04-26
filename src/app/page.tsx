@@ -7506,7 +7506,15 @@ ${html}
                         >
                           {/* Dot — ring masks the line behind it */}
                           <div className={`h-2.5 w-2.5 rounded-full border-2 ring-[3px] ring-slate-950 transition-colors group-hover:border-blue-400 group-hover:bg-blue-400/30 ${dotCls}`} />
-                          <p className="max-w-[100px] text-[11px] text-slate-300 group-hover:text-blue-300 transition-colors leading-snug line-clamp-2 text-center mt-0.5">{item.title}</p>
+                          {/* Title clamp — width widened 100 → 140 px to
+                              compensate for the 1.375x rem rescale: the
+                              text-[11px] class is coerced to the 16.5 px
+                              floor (~50 % wider glyphs than the original
+                              11 px), so the previous 100 px box truncated
+                              mid-word on most queries. line-clamp also
+                              bumped 2 → 3 to give one extra row of slack
+                              before any truncation kicks in. */}
+                          <p className="max-w-[140px] text-[11px] text-slate-300 group-hover:text-blue-300 transition-colors leading-snug line-clamp-3 text-center mt-0.5 break-words">{item.title}</p>
                           <p className="text-[9px] text-slate-600 whitespace-nowrap leading-[1.1]">{timeStr}</p>
                           <p className="text-[9px] text-slate-700 whitespace-nowrap leading-[1.1]">{dateStr}</p>
                         </button>
