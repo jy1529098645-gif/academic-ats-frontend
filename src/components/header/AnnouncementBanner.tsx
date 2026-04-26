@@ -460,7 +460,7 @@ export function AnnouncementBanner({
           parent flex row (mascot + banner) stays anchored and nothing
           around the banner reflows.
 
-          HARD-LOCKED height: h-[4.25rem] pins the card's vertical
+          HARD-LOCKED height: h-[5.25rem] pins the card's vertical
           size regardless of what changes inside (vote icon swaps,
           counter ticks between 0↔1, danmu ↔ board mode, composer
           focus border additions, etc). Without this lock, any
@@ -470,20 +470,30 @@ export function AnnouncementBanner({
           fix. Fixing the outer box's dimensions is the bulletproof
           option.
 
-          Why rem (4.25rem = 68 px at the original 16 px root) and
-          not a literal `h-[68px]`: when we bumped the global font
-          scale (html { font-size: 22px } in globals.css), the row
-          contents (rem-based padding + text-xs which is coerced to
-          a proportional floor) grew accordingly but a hard-coded
-          68 px shell DID NOT — the bottom row started getting
-          clipped (the user reported "公告栏里的内容显示不全").
-          Switching to a rem unit means the banner height tracks
-          the root size automatically: at 16 px root → 68 px (same
-          as before), at 22 px root → 93.5 px (gives the bigger
-          text room to breathe), at any future scale → still
-          right. Padding/border/text inside are already rem so
-          they all move together. */}
-      <div className="relative h-[4.25rem] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
+          Sizing math (at the current 22 px root):
+            row 1: py-2 (22 px) + text-xs leading-snug (~22.7 px)
+                                                     = ~44.7 px
+            row 2: py-1.5 (16.5 px) + Send button height
+                   (px-2.5 py-1 + text-xs + 2 px border = ~30 px)
+                                                     = ~46.5 px
+            border between rows                      =     1 px
+            ─────────────────────────────────────────────────────
+            content total                            ≈   92.2 px
+
+          h-[5.25rem] = 5.25 × 22 = 115.5 px → ~23 px slack so any
+          browser sub-pixel rounding or theme-induced font metric
+          drift never clips the bottom row's Send button (the
+          regression we kept hitting at h-[4.25rem]).
+
+          Why rem (5.25rem = 84 px at the original 16 px root)
+          rather than a literal `h-[N px]`: when we bumped the
+          global font scale to 22 px, the row contents (rem-based
+          padding + text-xs coerced to a proportional floor) grew
+          but a hardcoded shell DID NOT — bottom row got clipped.
+          rem unit means the banner height tracks root size
+          automatically: at 16 px root → 84 px, at 22 px root →
+          115.5 px, at any future scale → right by construction. */}
+      <div className="relative h-[5.25rem] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
         {/* Theme toggle moved out to the title row in page.tsx so it stays
             visible even when the announcement banner is hidden. The
             ThemeToggleButton helper below + props (themeMode/onToggleTheme)

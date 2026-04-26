@@ -2241,7 +2241,17 @@ export default function HomePage() {
       window.removeEventListener("unhandledrejection", onRejection);
     };
   }, []);
-  const [historyPanelHeight, setHistoryPanelHeight] = useState(150);
+  // Default panel height — bumped 150 → 210 to accommodate the post-
+  // type-rescale entry layout. After html { font-size: 22px } each
+  // history-entry block (star + dot + 4-line title clamp + time + date)
+  // works out to ~210 px tall; the previous 150 px default + the
+  // panel's `overflow-y-hidden` was clipping the bottom (date row +
+  // partial line of title) on every entry. Min remains 120 (still
+  // user-resizable down via drag), max stays 85% of viewport. The
+  // value is kept in CSS px because the panel-height drag handler
+  // also operates in CSS px (getVisualVH); switching this single
+  // anchor to rem would force a refactor of the drag math too.
+  const [historyPanelHeight, setHistoryPanelHeight] = useState(210);
   type HistoryEntry = { id: string; title: string; updated_at: string; result?: SearchResponse | null; directionData?: QueryDirectionsResponse | null; entryType?: "understand" | "search"; usedUnderstand?: boolean; isFast?: boolean };
   const [historyList, setHistoryList] = useState<HistoryEntry[]>([]);
   const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
@@ -7506,15 +7516,20 @@ ${html}
                         >
                           {/* Dot — ring masks the line behind it */}
                           <div className={`h-2.5 w-2.5 rounded-full border-2 ring-[3px] ring-slate-950 transition-colors group-hover:border-blue-400 group-hover:bg-blue-400/30 ${dotCls}`} />
-                          {/* Title clamp — width widened 100 → 140 px to
-                              compensate for the 1.375x rem rescale: the
-                              text-[11px] class is coerced to the 16.5 px
-                              floor (~50 % wider glyphs than the original
-                              11 px), so the previous 100 px box truncated
-                              mid-word on most queries. line-clamp also
-                              bumped 2 → 3 to give one extra row of slack
-                              before any truncation kicks in. */}
-                          <p className="max-w-[140px] text-[11px] text-slate-300 group-hover:text-blue-300 transition-colors leading-snug line-clamp-3 text-center mt-0.5 break-words">{item.title}</p>
+                          {/* Title clamp tuned for the 22 px global root
+                              font-size:
+                                · max-w 140 → 220 px so ~14 chars fit per
+                                  line at the new 16.5 px x-height (was
+                                  ~9 chars at 140 px → forced truncation
+                                  on every multi-word query)
+                                · line-clamp 3 → 4 to absorb the long-tail
+                                  of >40-char queries before the ellipsis
+                                  shows up
+                                · break-words handles any individual
+                                  over-long token that wouldn't otherwise
+                                  wrap (e.g. a glued URL slug pasted as a
+                                  query) */}
+                          <p className="max-w-[220px] text-[11px] text-slate-300 group-hover:text-blue-300 transition-colors leading-snug line-clamp-4 text-center mt-0.5 break-words">{item.title}</p>
                           <p className="text-[9px] text-slate-600 whitespace-nowrap leading-[1.1]">{timeStr}</p>
                           <p className="text-[9px] text-slate-700 whitespace-nowrap leading-[1.1]">{dateStr}</p>
                         </button>
