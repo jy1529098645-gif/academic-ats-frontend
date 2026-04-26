@@ -460,17 +460,30 @@ export function AnnouncementBanner({
           parent flex row (mascot + banner) stays anchored and nothing
           around the banner reflows.
 
-          HARD-LOCKED height: h-[68px] pins the card's vertical size
-          regardless of what changes inside (vote icon swaps, counter
-          ticks between 0↔1, danmu ↔ board mode, composer focus border
-          additions, etc). Without this lock, any inner-element size
-          flux cascades back up through flex-1 and pushes the header
-          row around — the user reported "slight jitter during vote"
-          even after the width-counter fix. Fixing the outer box's
-          dimensions is the bulletproof option. 68px fits rotator row
-          (~40px) + composer row (~28px) with no slack; tweak this
-          number as a pair with the row paddings below. */}
-      <div className="relative h-[68px] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
+          HARD-LOCKED height: h-[4.25rem] pins the card's vertical
+          size regardless of what changes inside (vote icon swaps,
+          counter ticks between 0↔1, danmu ↔ board mode, composer
+          focus border additions, etc). Without this lock, any
+          inner-element size flux cascades back up through flex-1
+          and pushes the header row around — the user reported
+          "slight jitter during vote" even after the width-counter
+          fix. Fixing the outer box's dimensions is the bulletproof
+          option.
+
+          Why rem (4.25rem = 68 px at the original 16 px root) and
+          not a literal `h-[68px]`: when we bumped the global font
+          scale (html { font-size: 22px } in globals.css), the row
+          contents (rem-based padding + text-xs which is coerced to
+          a proportional floor) grew accordingly but a hard-coded
+          68 px shell DID NOT — the bottom row started getting
+          clipped (the user reported "公告栏里的内容显示不全").
+          Switching to a rem unit means the banner height tracks
+          the root size automatically: at 16 px root → 68 px (same
+          as before), at 22 px root → 93.5 px (gives the bigger
+          text room to breathe), at any future scale → still
+          right. Padding/border/text inside are already rem so
+          they all move together. */}
+      <div className="relative h-[4.25rem] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
         {/* Theme toggle moved out to the title row in page.tsx so it stays
             visible even when the announcement banner is hidden. The
             ThemeToggleButton helper below + props (themeMode/onToggleTheme)
