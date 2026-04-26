@@ -43,6 +43,39 @@ import { usePrefsStore } from "@/lib/stores/prefs-store";
 
 const DOT_LIMIT = 10;
 
+// Emails in announcement text become clickable mailto: links. The dev's
+// own contact email shows up in the public ticker pretty often
+// ("ping me at jy1529098645@gmail.com if you hit a bug…") and rendering
+// it as inert text was forcing users to copy/paste by hand. The regex is
+// deliberately conservative — RFC 5322 is too permissive to be useful in
+// a UI ticker, but the common shape (alphanumerics + dot-dash-underscore
+// + plus, an @, a dotted domain with a 2+-letter TLD) covers every real
+// email a user is likely to drop in here. Click is stopPropagation-d so
+// the click doesn't also bubble up to the banner's collapse handler.
+function linkifyEmails(text: string): React.ReactNode[] {
+  const re = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > lastIdx) parts.push(text.slice(lastIdx, m.index));
+    const email = m[0];
+    parts.push(
+      <a
+        key={`mail-${m.index}-${email}`}
+        href={`mailto:${email}`}
+        onClick={(e) => e.stopPropagation()}
+        className="underline decoration-current decoration-1 underline-offset-2 hover:opacity-80"
+      >
+        {email}
+      </a>,
+    );
+    lastIdx = m.index + email.length;
+  }
+  if (lastIdx < text.length) parts.push(text.slice(lastIdx));
+  return parts.length > 0 ? parts : [text];
+}
+
 function formatAuthor(a: Announcement): string | null {
   const email = (a.author_email || "").toLowerCase();
   // Anonymous posts land with author_email="" from the backend (see the
@@ -165,15 +198,18 @@ function AnnouncementText({ text, paused }: { text: string; paused: boolean }) {
               single inline-flex strip. Because -50% of the strip's
               width is exactly one [text + bullet] unit, translating by
               -50% lands the second copy where the first copy started →
-              visually seamless loop. */}
-          <span>{text}</span>
+              visually seamless loop. linkifyEmails wraps any email
+              substring in a mailto: link so contact addresses in
+              announcements are one click away instead of needing
+              copy/paste. */}
+          <span>{linkifyEmails(text)}</span>
           <span className="px-8 opacity-40" aria-hidden>•</span>
-          <span aria-hidden>{text}</span>
+          <span aria-hidden>{linkifyEmails(text)}</span>
           <span className="px-8 opacity-40" aria-hidden>•</span>
         </div>
       ) : (
         <span className="block text-xs leading-snug text-slate-300 truncate">
-          {text}
+          {linkifyEmails(text)}
         </span>
       )}
     </div>
@@ -526,7 +562,7 @@ export function AnnouncementBanner({
                   }}
                 >
                   {msg.author && <span className="mr-1 opacity-80">{msg.author}:</span>}
-                  {msg.text}
+                  {linkifyEmails(msg.text)}
                 </span>
               ))
             )}

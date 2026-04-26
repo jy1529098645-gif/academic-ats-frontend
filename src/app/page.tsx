@@ -6712,6 +6712,29 @@ ${html}
                       {feedbackMsg.text}
                     </p>
                   )}
+                  {/* Survey escape hatch. The textarea above is great for a
+                      drive-by note, but research-grade feedback (rating
+                      individual features, comparing modes, demographic
+                      context) needs structured fields. We point users at
+                      a Google Form for that — opens in a new tab so they
+                      don't lose their in-progress textarea draft. */}
+                  <a
+                    href="https://docs.google.com/forms/d/e/1FAIpQLScnQgLQm4TupGcGZ2OYkTZlnUwUFRyFMaIyLnp_sgPupGVXdg/viewform?usp=sharing&ouid=114591091179601722519"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs transition-colors hover:brightness-110"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-accent-soft)",
+                      color:           "var(--ats-fg-accent)",
+                    }}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <ClipboardList size={14} className="shrink-0" />
+                      <span className="font-medium">Got more to share? Fill out our short survey</span>
+                    </span>
+                    <ExternalLink size={12} className="shrink-0 opacity-70" />
+                  </a>
                   <div className="flex items-center justify-between gap-3 pt-1">
                     <span className="text-xs tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
                       {feedbackText.length} / 4000
