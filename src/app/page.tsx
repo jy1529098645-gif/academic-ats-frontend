@@ -1222,7 +1222,12 @@ export default function HomePage() {
   // of this section.
 
   const [fastMode, setFastMode] = useState(true);
-  const [paperCount, setPaperCount] = useState(15);
+  // 50 is the Quick-mode sweet spot — wide enough to spot trends and
+  // research gaps across a field, narrow enough to ship in seconds.
+  // Curated users typically tune this down in Search Settings (10–20)
+  // because each paper costs a multi-agent pass; the localStorage
+  // hydration below preserves whatever they last picked.
+  const [paperCount, setPaperCount] = useState(50);
   const [sortMode, setSortMode] = useState("Relevance score");
   const [preferAbstracts, setPreferAbstracts] = useState(true);
   const [strictCoreOnly, setStrictCoreOnly] = useState(false);
