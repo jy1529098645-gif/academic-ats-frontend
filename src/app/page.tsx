@@ -87,12 +87,12 @@ type LabModelOption = {
   tagline: string;   // short one-line description shown in the picker
 };
 const LAB_MODEL_OPTIONS: LabModelOption[] = [
-  { id: "gpt-4o-mini",        label: "Swift Writer",   tagline: "Fastest · default" },
-  { id: "gpt-4o",             label: "Deep Writer",    tagline: "Broader reasoning · slower" },
+  { id: "gpt-4o",             label: "Deep Writer",    tagline: "Broader reasoning · default" },
+  { id: "gpt-4o-mini",        label: "Swift Writer",   tagline: "Fastest · cheapest" },
   { id: "claude-sonnet-4-6",  label: "Scholar Writer", tagline: "Citation-careful long form" },
 ];
 const labModelLabel = (id: string): string =>
-  LAB_MODEL_OPTIONS.find(m => m.id === id)?.label ?? "Swift Writer";
+  LAB_MODEL_OPTIONS.find(m => m.id === id)?.label ?? "Deep Writer";
 
 const DEFAULT_SOURCES = [
   "Semantic Scholar",
@@ -1472,10 +1472,13 @@ export default function HomePage() {
     setLeftPct(20);
     setCenterPct(60);
   }, []);
-  // Default collapsed — first click anywhere expands both panels to the initial
-  // 1:5:1 layout (see firstInteractionDone below). Retrieved Papers stays
-  // hidden until the same first interaction, then slides up from the bottom.
-  const [analyticsVisible, setAnalyticsVisible] = useState(false);
+  // Right panel (Synthesis Lab + Paper Review) is open by default so users
+  // can start drafting / pasting a draft for review BEFORE running a search
+  // — Synthesis Lab can pull papers from a search later, but Paper Review
+  // is fully usable on its own. Left panel (Research Brief / Charts) stays
+  // hidden until a search produces something to show; opening it pre-search
+  // would just expose an empty placeholder.
+  const [analyticsVisible, setAnalyticsVisible] = useState(true);
   const [leftVisible, setLeftVisible] = useState(false);
   const [gridLeftCollapsed, setGridLeftCollapsed] = useState(true);
   // Kept as a compatibility shim: one downstream component (the retrieved-
@@ -1744,7 +1747,7 @@ export default function HomePage() {
   // Stored as the real backend model id so the payload always carries a
   // whitelisted value; the UI maps these ids to user-facing descriptive
   // labels via LAB_MODEL_OPTIONS below so the vendor is never exposed.
-  const [labWritingModel,   setLabWritingModel]   = useState("gpt-4o-mini");
+  const [labWritingModel,   setLabWritingModel]   = useState("gpt-4o");
   const [labModelOpen,      setLabModelOpen]      = useState(false);
 
   const [deepReadResults, setDeepReadResults] = useState<Record<string, DeepReadResult>>({});
@@ -3651,10 +3654,14 @@ ${html}
     setCandidateLimit(null);
     setBriefStreamText("");
     setBriefStatus(null);
-    // Layout snap back to the freshly-opened landing.
+    // Layout snap back to the freshly-opened landing — left panel hidden
+    // (no search results yet), but right panel STAYS open since the Lab
+    // (Synthesis + Paper Review) is now usable from the empty state and
+    // collapsing it would feel like the workspace lost something on
+    // Start Over. Matches the new default analyticsVisible=true above.
     setGridTransitioning(true);
     setLeftVisible(false);
-    setAnalyticsVisible(false);
+    setAnalyticsVisible(true);
     setLeftPct(14.3);
     setCenterPct(71.4);
     window.setTimeout(() => setGridTransitioning(false), 950);
@@ -3674,7 +3681,7 @@ ${html}
     // re-typing or re-running Find Angles.
     setGridTransitioning(true);
     setLeftVisible(false);
-    setAnalyticsVisible(false);
+    setAnalyticsVisible(true);  // keep Lab open — same rule as handleStartOver
     setLeftPct(14.3);
     setCenterPct(71.4);
     window.setTimeout(() => setGridTransitioning(false), 950);
