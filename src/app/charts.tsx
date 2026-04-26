@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 
 // ── Minimal paper shape needed by charts ─────────────────────────────────────
 export type ChartPaper = {
@@ -653,7 +653,14 @@ export function SourceDonutChart({ papers }: { papers: ChartPaper[] }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Composite export
 // ─────────────────────────────────────────────────────────────────────────────
-export function PaperCharts({ papers, wide = false }: { papers: ChartPaper[]; wide?: boolean }) {
+// memo'd because the parent (page.tsx) re-renders on every keystroke,
+// hover, panel toggle, etc. Without this wrapper PaperCharts re-walks
+// its three SVG sub-charts on every parent render, even though the
+// `papers` array only actually changes once per search. The default
+// shallow comparison is sufficient — page.tsx already memoises the
+// `displayedPapers` array via useMemo, so its reference is stable
+// across unrelated re-renders.
+function PaperChartsImpl({ papers, wide = false }: { papers: ChartPaper[]; wide?: boolean }) {
   if (papers.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-14 text-center text-slate-600">
@@ -673,3 +680,4 @@ export function PaperCharts({ papers, wide = false }: { papers: ChartPaper[]; wi
     </div>
   );
 }
+export const PaperCharts = memo(PaperChartsImpl);

@@ -11,7 +11,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { UserNotification } from "@/lib/hooks/use-user-notifications";
 
 type Props = {
@@ -19,7 +19,14 @@ type Props = {
   ack:   (id: string) => Promise<void>;
 };
 
-export default function UserNotificationPopup({ queue, ack }: Props) {
+// memo'd because the parent page re-renders on every keystroke / panel
+// toggle / search progress chunk, but this popup only actually changes
+// when the queue array reference changes (new notification arrives or
+// the user dismisses one). `ack` from useUserNotifications is wrapped
+// in useCallback so its reference is stable. Default shallow compare
+// is enough — saves a re-render of the modal's JSX on every parent
+// churn even when the popup isn't displayed.
+function UserNotificationPopupImpl({ queue, ack }: Props) {
   const [closing, setClosing] = useState(false);
 
   // ESC dismiss.
@@ -142,3 +149,6 @@ export default function UserNotificationPopup({ queue, ack }: Props) {
     </div>
   );
 }
+
+const UserNotificationPopup = memo(UserNotificationPopupImpl);
+export default UserNotificationPopup;
