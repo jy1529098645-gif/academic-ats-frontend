@@ -1277,6 +1277,22 @@ export default function HomePage() {
         if (Number.isFinite(p.yearStart))             setYearStart(p.yearStart);
         if (Number.isFinite(p.yearEnd))               setYearEnd(p.yearEnd);
       }
+
+      // One-time defaults reset (Quick=50, Curated=20). Users from before
+      // the rebalancing carried legacy values forward (a single tuned
+      // `paperCount` migrated into BOTH new fields, e.g. Curated stuck
+      // at 30 or 50 even though the new sweet spot is 20). We force-
+      // override once per device, then write a flag so the override
+      // doesn't keep stomping users who have since tuned the values
+      // themselves. Bump the flag's date suffix if the defaults change
+      // again — a different key triggers a fresh one-time reset for
+      // every existing device.
+      const RESET_FLAG = "ats-paper-count-defaults-reset-2026-04-quick50-curated20";
+      if (!localStorage.getItem(RESET_FLAG)) {
+        setPaperCountQuick(50);
+        setPaperCountCurated(20);
+        try { localStorage.setItem(RESET_FLAG, "1"); } catch { /* quota — ignore */ }
+      }
     } catch {}
     _prefsHydratedRef.current = true;
   }, []);
@@ -6731,7 +6747,7 @@ ${html}
                   >
                     <span className="flex items-center gap-2 min-w-0">
                       <ClipboardList size={14} className="shrink-0" />
-                      <span className="font-medium">Got more to share? Fill out our short survey</span>
+                      <span className="font-medium">1-minute survey · helps us improve faster</span>
                     </span>
                     <ExternalLink size={12} className="shrink-0 opacity-70" />
                   </a>
