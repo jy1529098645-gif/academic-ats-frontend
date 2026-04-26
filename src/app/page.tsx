@@ -88,7 +88,7 @@ type LabModelOption = {
 };
 const LAB_MODEL_OPTIONS: LabModelOption[] = [
   { id: "gpt-4o",             label: "Deep Writer",    tagline: "Broader reasoning · default" },
-  { id: "gpt-4o-mini",        label: "Swift Writer",   tagline: "Fastest · cheapest" },
+  { id: "gpt-5.3",            label: "Swift Writer",   tagline: "Fastest · cheapest" },
   { id: "claude-sonnet-4-6",  label: "Scholar Writer", tagline: "Citation-careful long form" },
 ];
 const labModelLabel = (id: string): string =>
@@ -1472,13 +1472,17 @@ export default function HomePage() {
     setLeftPct(20);
     setCenterPct(60);
   }, []);
-  // Right panel (Synthesis Lab + Paper Review) is open by default so users
-  // can start drafting / pasting a draft for review BEFORE running a search
-  // — Synthesis Lab can pull papers from a search later, but Paper Review
-  // is fully usable on its own. Left panel (Research Brief / Charts) stays
-  // hidden until a search produces something to show; opening it pre-search
-  // would just expose an empty placeholder.
-  const [analyticsVisible, setAnalyticsVisible] = useState(true);
+  // Both panels start collapsed — preserves the "clean landing" first
+  // impression. The Lab's INNER content (Paper Review draft pad,
+  // Synthesis Lab fields) is fully usable as soon as the user expands
+  // the panel; nothing inside the Lab gates on hasRunSearch, so the
+  // user can open it anytime without first running a search. After a
+  // search fires, applyLayoutMode() opens the panel automatically based
+  // on the user's chosen layout mode (Default / Scholar / Student /
+  // Writing). Left panel (Brief / Charts) stays hidden by default and
+  // only opens once a search has actually produced something to show
+  // there.
+  const [analyticsVisible, setAnalyticsVisible] = useState(false);
   const [leftVisible, setLeftVisible] = useState(false);
   const [gridLeftCollapsed, setGridLeftCollapsed] = useState(true);
   // Kept as a compatibility shim: one downstream component (the retrieved-
@@ -3654,14 +3658,15 @@ ${html}
     setCandidateLimit(null);
     setBriefStreamText("");
     setBriefStatus(null);
-    // Layout snap back to the freshly-opened landing — left panel hidden
-    // (no search results yet), but right panel STAYS open since the Lab
-    // (Synthesis + Paper Review) is now usable from the empty state and
-    // collapsing it would feel like the workspace lost something on
-    // Start Over. Matches the new default analyticsVisible=true above.
+    // Layout snap back to the freshly-opened landing — both side
+    // panels collapsed, default column ratios. The Lab's inner content
+    // is still usable the moment the user re-expands the right panel
+    // (no `hasRunSearch` gate inside the Lab body), so collapsing on
+    // Start Over doesn't lose any draft state — it just restores the
+    // clean landing chrome the user expects.
     setGridTransitioning(true);
     setLeftVisible(false);
-    setAnalyticsVisible(true);
+    setAnalyticsVisible(false);
     setLeftPct(14.3);
     setCenterPct(71.4);
     window.setTimeout(() => setGridTransitioning(false), 950);
@@ -3681,7 +3686,7 @@ ${html}
     // re-typing or re-running Find Angles.
     setGridTransitioning(true);
     setLeftVisible(false);
-    setAnalyticsVisible(true);  // keep Lab open — same rule as handleStartOver
+    setAnalyticsVisible(false);
     setLeftPct(14.3);
     setCenterPct(71.4);
     window.setTimeout(() => setGridTransitioning(false), 950);
