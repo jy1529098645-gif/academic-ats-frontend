@@ -2154,7 +2154,15 @@ export default function HomePage() {
   }, [authUser?.email]);
 
   const restoreHistory = useCallback((item: HistoryEntry) => {
+    // Cancel any in-flight search FIRST. Without this, a user who clicks
+    // an old history entry mid-stream would have their newly-restored
+    // result polluted by leftover SSE updates from the running request.
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsSubmitting(false);
+
     setQuery(item.title);
+    setCommittedQuery(item.title);   // so a Run-again click re-runs the same query
     setActiveHistoryId(item.id);
     // Restore understand directions if present
     if (item.directionData) {
@@ -2170,8 +2178,23 @@ export default function HomePage() {
       briefTextRef.current = item.result.brief || "";
       setBriefStreamText(item.result.brief || "");
       setStreamPapers(item.result.papers || []);
-      setIsSubmitting(false);
       setJob({ status: "done", progress: 100, result: item.result, finished_at: Date.now() / 1000, message: "Finished.", workflow: [] } as any);
+      // Move the workspace OUT of the landing so the restored brief +
+      // papers are actually visible. Without these flips, a user clicking
+      // a history entry from the landing screen would silently load the
+      // result into state but the UI would still show the chips + Quick /
+      // Curated buttons because hasRunSearch was false. Snap to a
+      // default-style 1:3:1 layout with both side panels open — same shape
+      // the user would have seen at the END of the original search.
+      setHasRunSearch(true);
+      setIntroStage("full");
+      setButtonStep(0);
+      setAssessmentMessage("");
+      setGridTransitioning(true);
+      setLeftVisible(true); setAnalyticsVisible(true);
+      setLeftPct(20); setCenterPct(60);
+      setLeftTab("brief");
+      window.setTimeout(() => setGridTransitioning(false), 950);
     }
   }, []);
   const authTokenRef = useRef<string | null>(null);
