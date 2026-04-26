@@ -1170,8 +1170,8 @@ export default function HomePage() {
     setIntroStage("full");
     setCommittedQuery(trimmed);
     setAssessmentMessage(mode === "quick"
-      ? "going quick, fast smart ranking (◕‿◕)"
-      : "curated mode — deep dive, sit tight (˙ᵕ˙)"
+      ? "scanning at scale (◕‿◕)"
+      : "selecting high-quality papers (˙ᵕ˙)"
     );
     // Defer one tick so the introStage / fastMode state settles into the
     // closure handleSearch reads.
@@ -1471,13 +1471,13 @@ export default function HomePage() {
 
   // Sprite typing-reaction loop — gives the sprite a voice while the
   // user is composing a query, so the surface never feels dead. Tiers:
-  //   · empty input → blank message, the "Type any key words…" default
-  //                   invite owns the slot.
-  //   · short input (< 4 chars) → "thinking…" — feels like the sprite
-  //                               is reading along.
-  //   · medium input (4–25 chars) → encouraging mid-typing line.
-  //   · longer input (≥ 25 chars) → "got plenty to work with — Enter"
-  //                                 nudge so the user knows to commit.
+  //   · empty input → blank message, the "Tell me what to explore"
+  //                   default invite owns the slot.
+  //   · short input (< 4 chars) → "keep going…" — feels like the
+  //                               sprite is reading along.
+  //   · medium input (4–25 chars) → "add a bit more or press Enter".
+  //   · longer input (≥ 25 chars) → "ready — press Enter" nudge so
+  //                                 the user knows to commit.
   // Only fires when buttonStep === 0 (the user hasn't started the
   // 3-Enter ritual yet); the step-aware effect below owns the slot
   // once they have. Debounced 350 ms so steady typing doesn't churn.
@@ -1495,9 +1495,9 @@ export default function HomePage() {
     const trimmed = deferredQuery.trim();
     const id = window.setTimeout(() => {
       if (trimmed.length === 0)        setAssessmentMessage("");
-      else if (trimmed.length < 4)     setAssessmentMessage("hmm, keep going…");
-      else if (trimmed.length < 25)    setAssessmentMessage("nice — add a bit more or hit Enter (˙ᵕ˙)");
-      else                             setAssessmentMessage("got plenty to work with — Enter when ready (◕‿◕)");
+      else if (trimmed.length < 4)     setAssessmentMessage("keep going…");
+      else if (trimmed.length < 25)    setAssessmentMessage("add a bit more or press Enter");
+      else                             setAssessmentMessage("ready — press Enter");
     }, 350);
     return () => window.clearTimeout(id);
   }, [deferredQuery, buttonStep, hasRunSearch, isSubmitting]);
@@ -1508,8 +1508,8 @@ export default function HomePage() {
   // sync if the step flips via any other path.
   useEffect(() => {
     if (hasRunSearch || isSubmitting) return;
-    if (buttonStep === 1) setAssessmentMessage("Quick or Curated? Enter again to pick (◕‿◕)");
-    if (buttonStep === 2) setAssessmentMessage("Enter to fire · ← → to switch · Esc to back out");
+    if (buttonStep === 1) setAssessmentMessage("Quick or Curated? Press Enter");
+    if (buttonStep === 2) setAssessmentMessage("Enter to go · ← → switch · Esc back");
   }, [buttonStep, hasRunSearch, isSubmitting]);
 
   const [announcementCollapsed, setAnnouncementCollapsed] = useState(false);
@@ -3936,7 +3936,7 @@ ${html}
                   title={announcementsVisible ? "Hide announcements" : "Show announcements"}
                   aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
                   aria-pressed={announcementsVisible}
-                  {...helpProps(announcementsVisible ? "this hides the public ticker (◕‿◕)" : "click me to show the public announcement ticker")}
+                  {...helpProps(announcementsVisible ? "hide public ticker" : "show public ticker")}
                   className={`flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
                   style={{
                     height: "26px",
@@ -3956,7 +3956,7 @@ ${html}
                   onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
                   title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
                   aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
-                  {...helpProps(themeMode === "night" ? "click to swap to a Day palette ☀" : "click to swap to a Night palette 🌙")}
+                  {...helpProps(themeMode === "night" ? "switch to Day mode ☀" : "switch to Night mode 🌙")}
                   className="flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
                   style={{
                     height: "26px",
@@ -3997,19 +3997,19 @@ ${html}
             <div className="absolute -top-[10px] right-0 z-30 flex items-center gap-1">
             {([
               { mode: "default" as const, label: "Default", icon: <LayoutGrid size={13} />,        desc: "Balanced 3-pane layout" },
-              { mode: "scholar" as const, label: "Scholar", icon: <BookOpen size={13} />,         desc: "Big left for charts + brief; right hidden" },
-              { mode: "student" as const, label: "Student", icon: <FlaskConical size={13} />,     desc: "Right Lab panel takes more room" },
-              { mode: "writing" as const, label: "Writing", icon: <PenLine size={13} />,          desc: "Left hidden; right wide for the Lab" },
+              { mode: "scholar" as const, label: "Scholar", icon: <BookOpen size={13} />,         desc: "Charts + brief focus" },
+              { mode: "student" as const, label: "Student", icon: <FlaskConical size={13} />,     desc: "Right panel expanded" },
+              { mode: "writing" as const, label: "Writing", icon: <PenLine size={13} />,          desc: "Writing focus" },
             ]).map(({ mode, label, icon, desc }) => {
                 const active = layoutMode === mode;
                 return (
                   <button
                     key={mode}
                     onClick={() => applyLayoutMode(mode)}
-                    title={`${label} mode — ${desc}`}
+                    title={desc}
                     aria-label={`${label} layout`}
                     aria-pressed={active}
-                    {...helpProps(`${label} layout — ${desc}`)}
+                    {...helpProps(desc)}
                     className="flex h-[22px] w-[22px] items-center justify-center rounded-md border transition-all hover:brightness-110"
                     style={{
                       borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
@@ -4177,7 +4177,7 @@ ${html}
               <div className="shrink-0 flex items-center gap-1.5 pl-12 pr-3 py-2.5 border-b border-slate-800/60">
                 <button
                   onClick={() => setLeftTab("brief")}
-                  {...helpProps("Research Brief — synthesised summary of what the retrieved papers are saying")}
+                  {...helpProps("Synthesised paper summary")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     leftTab === "brief"
                       ? "bg-slate-900/70 text-slate-100"
@@ -4186,7 +4186,7 @@ ${html}
                 ><ClipboardList size={14} /><span>Research Brief</span></button>
                 <button
                   onClick={() => setLeftTab("analytics")}
-                  {...helpProps("Charts — year / venue / citation distribution of the retrieved papers")}
+                  {...helpProps("Year / venue / citation stats")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     leftTab === "analytics"
                       ? "bg-slate-900/70 text-slate-100"
@@ -4520,7 +4520,7 @@ ${html}
                 <button
                   onClick={handleStartOver}
                   title="Start over — clear query, directions, and any in-flight search"
-                  {...helpProps("clears your query, directions, and any in-flight search — full reset to the landing")}
+                  {...helpProps("clear — start fresh")}
                   className="stage-reveal ml-auto inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-all hover:brightness-110"
                   style={{
                     borderColor:     "var(--ats-border-subtle)",
@@ -4745,7 +4745,7 @@ ${html}
               >
                 <button
                   onClick={() => setSettingsOpen(o => !o)}
-                  {...helpProps("open per-search settings — paper count, sort mode, year range, source filters…")}
+                  {...helpProps("search settings")}
                   className="shrink min-w-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm font-semibold text-slate-200 hover:border-blue-500/40 transition-colors"
                 >
                   <SlidersHorizontal size={14} className="shrink-0" />
@@ -4777,7 +4777,7 @@ ${html}
                       onClick={handleStop}
                       title="Stop search"
                       aria-label="Stop search"
-                      {...helpProps("stop the search and restore the layout — your query + directions stay")}
+                      {...helpProps("stop — keep query")}
                       className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
                     >
                       <Square size={13} fill="currentColor" />
@@ -4796,7 +4796,7 @@ ${html}
                          style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}>
                       <button
                         onClick={() => { setFastMode(true); setTimeout(() => { void handleSearch(); }, 50); }}
-                        {...helpProps("re-run as Quick Search — fast smart-ranked retrieval")}
+                        {...helpProps("run Quick search")}
                         title="Re-run as Quick Search"
                         className="flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors"
                         style={{
@@ -4808,7 +4808,7 @@ ${html}
                       </button>
                       <button
                         onClick={() => { setFastMode(false); setTimeout(() => { void handleSearch(); }, 50); }}
-                        {...helpProps("re-run as Curated Analysis — multi-agent deep dive")}
+                        {...helpProps("run Curated analysis")}
                         title="Re-run as Curated Analysis"
                         className="flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors"
                         style={{
@@ -5670,7 +5670,7 @@ ${html}
                     flow. */}
                 <button
                   onClick={() => setLabModule("review")}
-                  {...helpProps("Paper Review — paste your draft and get adversarial multi-agent peer review")}
+                  {...helpProps("Multi-agent draft review")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     labModule === "review"
                       ? "bg-slate-900/70 text-slate-100"
@@ -5683,7 +5683,7 @@ ${html}
                 </button>
                 <button
                   onClick={() => setLabModule("synthesis")}
-                  {...helpProps("Synthesis Lab — write a draft using the papers you've collected as references")}
+                  {...helpProps("Write with collected papers")}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
                     labModule === "synthesis"
                       ? "bg-slate-900/70 text-slate-100"

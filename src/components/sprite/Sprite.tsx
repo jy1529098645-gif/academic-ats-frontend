@@ -228,11 +228,11 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
   //     Sticking to a fixed slot is the proven cure.
   //   · Post-search (hasRunSearch=true): drop the fixed height,
   //     shrink the font, and let the line wrap up to 3 lines. The
-  //     guidance lines that fire here ("Synthesis Lab — write a draft
-  //     using the papers you've collected as references") are longer
-  //     than the landing copy and were getting clipped at 3 rem.
-  //     There are no hover bubbles below to be pushed by a growing
-  //     slot, so growth is fine.
+  //     hover-help strings here are short now ("Multi-agent draft
+  //     review", "Year / venue / citation stats", etc.), but kept
+  //     the 3-line clamp as a safety margin in case future strings
+  //     grow. There are no hover bubbles below to be pushed by a
+  //     growing slot, so growth is fine.
   const voiceSlotStyle: React.CSSProperties = hasRunSearch
     ? {}                                            // grows naturally
     : { height: "4rem" };                           // 2 lines of 22 px voice + breathing
@@ -312,7 +312,7 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
             className="sprite-voice voice-fade inline-flex items-center gap-2 leading-snug flex-wrap justify-center"
             style={{ color: "var(--ats-fg-muted)" }}
           >
-            <span>Type any key words, topic or theme you want to explore</span>
+            <span>Tell me what to explore</span>
             <span
               aria-hidden
               className="sprite-badge inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-semibold tracking-wide animate-pulse"
@@ -408,7 +408,7 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
               key={`term-${i}`}
               onClick={() => onPickRecommendedTerm(term)}
               title={`Use "${term}" as your search`}
-              {...hh(`Replace your input with "${term}" — click to set, then pick Quick or Curated`)}
+              {...hh(`use "${term}" — then pick Quick or Curated`)}
               data-focused={isFocused(`term-${i}`) || undefined}
               data-selected={isSelected || undefined}
               tabIndex={showRecommendedTerms ? 0 : -1}
