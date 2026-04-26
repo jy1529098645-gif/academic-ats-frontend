@@ -1189,10 +1189,16 @@ export default function HomePage() {
   function handlePickRecommendedTerm(term: string) {
     setQuery(term);
     setButtonStep((s) => (s === 0 ? 1 : s));
-    setAssessmentMessage(`picked “${term}” — Enter to fire, or pick Quick / Curated (◕‿◕)`);
+    // We DON'T setAssessmentMessage here — the step-aware sprite-voice
+    // useEffect (lower in the file) will fire the moment buttonStep
+    // transitions 0 → 1 and set the right line ("Quick or Curated?
+    // Enter again to pick"). Setting a "picked X" message here would
+    // be stomped a render later by that effect, which the user noticed
+    // as a flash of stale text. Visual feedback for the pick is the
+    // data-selected styling on the chip itself + the textarea filling.
     // Defer the focus / caret move one frame so React has committed the
-    // controlled-value update; otherwise setSelectionRange writes to the
-    // pre-update value and ends up in the wrong place.
+    // controlled-value update; otherwise setSelectionRange writes to
+    // the pre-update value and ends up in the wrong place.
     requestAnimationFrame(() => {
       const ta = taRef.current;
       if (!ta) return;
