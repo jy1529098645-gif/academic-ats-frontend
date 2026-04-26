@@ -6599,23 +6599,40 @@ ${html}
                           </button>
                         </div>
                       </div>
-                      {/* Lab article is now Google-Translate-eligible.
-                          We mirror the Research Brief's stance (see the
-                          comment on the brief container above): we
-                          previously guarded this with `translate="no"`
-                          + `notranslate` because of streaming-DOM
-                          concerns, but in practice readers in non-English
-                          locales benefit from a free auto-translation
-                          and the in-app LLM Translate button below still
-                          handles the higher-quality path. The user has
-                          accepted that Google's DOM rewrite MAY collide
-                          with an in-flight SSE stream and crash this
-                          panel — the rest of the workspace stays up,
-                          and a refresh recovers the article from the
-                          most recent run snapshot in labRuns. Same
-                          deal as the brief. */}
-                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
-                        {displayedLabResult}
+                      {/* Lab article — Google-Translate-eligible AND rendered
+                          through ReactMarkdown so format survives the
+                          translation. The previous plain-text render
+                          (whitespace-pre-wrap on a single text node)
+                          collapsed to ONE big text node in the DOM;
+                          when Google Translate processed it, the
+                          translator chunked / re-flowed text and the
+                          `\n` paragraph breaks were lost — section
+                          headings ran into body paragraphs and the
+                          article looked like a wall of prose. Switching
+                          to ReactMarkdown gives every heading, paragraph,
+                          list item, and emphasis its own DOM block, so
+                          Google translates within each block and the
+                          structure stays intact (same trick the brief
+                          container uses one screen up). The synthesis
+                          backend already emits markdown (`## Heading`,
+                          blank-line paragraphs, **bold**), so no input
+                          shape change is needed. The streaming cursor
+                          stays as a sibling so it can mount/unmount
+                          without forcing a markdown re-parse on every
+                          token. */}
+                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 prose prose-invert max-w-none break-words
+                        prose-p:text-sm prose-p:leading-7 prose-p:my-2 prose-p:text-slate-200
+                        prose-headings:text-slate-100 prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2
+                        prose-h1:text-lg prose-h2:text-base prose-h3:text-sm
+                        prose-strong:text-slate-100 prose-strong:font-semibold
+                        prose-em:text-slate-200
+                        prose-ul:my-2 prose-ol:my-2 prose-ul:pl-5 prose-ol:pl-5
+                        prose-li:text-sm prose-li:leading-6 prose-li:text-slate-200 prose-li:my-0.5
+                        prose-code:text-slate-200 prose-code:bg-slate-800 prose-code:px-1 prose-code:rounded
+                        prose-blockquote:border-slate-600 prose-blockquote:text-slate-300">
+                        <ReactMarkdown components={mdComponents}>
+                          {displayedLabResult || " "}
+                        </ReactMarkdown>
                         {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
 
