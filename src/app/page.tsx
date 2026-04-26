@@ -3956,7 +3956,7 @@ ${html}
                   onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
                   title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
                   aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
-                  {...helpProps(themeMode === "night" ? "switch to Day mode ☀" : "switch to Night mode 🌙")}
+                  {...helpProps(themeMode === "night" ? "switch to Day mode" : "switch to Night mode")}
                   className="flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
                   style={{
                     height: "26px",
