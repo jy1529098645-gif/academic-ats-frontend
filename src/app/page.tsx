@@ -2396,8 +2396,15 @@ export default function HomePage() {
       setLeftVisible(true); setAnalyticsVisible(true);
       setLeftPct(20); setCenterPct(60);
     } else if (mode === "scholar") {
+      // Scholar = focus on the Research Brief — right panel hidden so
+      // the left can stretch wide, AND default the left tab to "brief"
+      // (rather than charts) since the brief is the primary surface
+      // a scholar reads. Without this the leftTab would inherit
+      // whatever the user last picked, which could land them on the
+      // Analytics tab and bury the brief behind a click.
       setLeftVisible(true); setAnalyticsVisible(false);
       setLeftPct(32); setCenterPct(68);
+      setLeftTab("brief");
     } else if (mode === "student") {
       // Student = focus on data → left big AND default to the Charts /
       // Analytics tab so the user lands in the visualization, not the
