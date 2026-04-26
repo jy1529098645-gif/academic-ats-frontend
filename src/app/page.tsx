@@ -15,6 +15,13 @@ import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
 import { useHoverHelpStore } from "@/lib/stores/hover-help-store";
 import {
+  useGuestQuotaStore,
+  GUEST_QUICK_MAX,
+  GUEST_CURATED_MAX,
+  selectGuestQuickRemaining,
+  selectGuestCuratedRemaining,
+} from "@/lib/stores/guest-quota-store";
+import {
   usePrefsStore, hydratePrefsStore, applyServerWorkspaceCharLimit,
   ROTATOR_INTERVAL_MIN, ROTATOR_INTERVAL_MAX,
   THEME_TRANSITION_MIN, THEME_TRANSITION_MAX,
@@ -1715,7 +1722,28 @@ export default function HomePage() {
   const [translationLanguages, setTranslationLanguages] = useState<Record<string, string[]>>({});
 
   // ── Auth state ─────────────────────────────────────────────────────────────
-  const [authUser, setAuthUser] = useState<{ email?: string } | null>(null);
+  // `is_anonymous` is set by Supabase when the session was created via
+  // signInAnonymously() — used downstream to derive `isGuest` and gate
+  // search firing on the per-device guest quota.
+  const [authUser, setAuthUser] = useState<{ email?: string; is_anonymous?: boolean } | null>(null);
+  // ── Anonymous-guest mode ────────────────────────────────────────────────
+  // Anonymous (Supabase `is_anonymous`) sessions get a strictly bounded
+  // trial: GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
+  // device. The store mirrors counters into localStorage; the auth
+  // gate offers a "try without signing in" path that calls
+  // supabase.auth.signInAnonymously().
+  const isGuest               = !!authUser?.is_anonymous;
+  const guestQuickRemaining   = useGuestQuotaStore(selectGuestQuickRemaining);
+  const guestCuratedRemaining = useGuestQuotaStore(selectGuestCuratedRemaining);
+  // Sign-in popup that takes over once a guest exhausts their cap.
+  const [guestExhaustedOpen,  setGuestExhaustedOpen]  = useState(false);
+  const [guestSignInBusy,     setGuestSignInBusy]     = useState(false);
+  const [guestSignInError,    setGuestSignInError]    = useState<string>("");
+  // Hydrate the guest counters once on mount — same pattern as the
+  // theme store. Done in its own effect so it runs even when there
+  // is no Supabase session yet (the auth gate needs the counters
+  // to know whether the "try as guest" pitch is still relevant).
+  useEffect(() => { useGuestQuotaStore.getState().hydrate(); }, []);
   const [authLoading, setAuthLoading] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | "usage" | "dev" | null>(null);
@@ -1853,6 +1881,44 @@ export default function HomePage() {
   const handleGoogleLogin = async () => {
     const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/` : 'https://academic-ats-frontend.vercel.app/';
     await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } });
+  };
+
+  // ── Anonymous "try without signing in" flow ────────────────────────────
+  // Creates a real Supabase session with `is_anonymous = true` so every
+  // existing piece of infrastructure (Authorization header, RLS policies,
+  // history endpoints) keeps working unchanged. The frontend layers a
+  // tighter cap on top via the guest-quota store. If the Supabase project
+  // has anonymous sign-in disabled (Auth → Providers → Anonymous), the
+  // call returns an error — we surface it in the gate's inline error
+  // strip so the user knows to use Google / email instead.
+  const handleGuestSignIn = async () => {
+    if (guestSignInBusy) return;
+    setGuestSignInBusy(true);
+    setGuestSignInError("");
+    try {
+      // The supabase client's auth proxy doesn't yet expose
+      // signInAnonymously() in its TypeScript surface (added later than
+      // our pinned @supabase/supabase-js minor); cast to the underlying
+      // GoTrueClient type so the call type-checks. Behaviour is exactly
+      // the same — Supabase has supported it server-side since v2.43.
+      const auth = supabase.auth as unknown as {
+        signInAnonymously: () => Promise<{ data: unknown; error: { message: string } | null }>;
+      };
+      const { error } = await auth.signInAnonymously();
+      if (error) throw new Error(error.message);
+      // onAuthStateChange will land the new session into authUser.
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Most common cause is the project hasn't enabled the anonymous
+      // provider. Surface a user-friendly hint above the raw API error.
+      setGuestSignInError(
+        /anonymous|disabled|provider/i.test(msg)
+          ? "Guest mode isn't available right now — please sign in to continue."
+          : msg,
+      );
+    } finally {
+      setGuestSignInBusy(false);
+    }
   };
 
   // ── Multi-session session-cache ─────────────────────────────────────────
@@ -3144,6 +3210,18 @@ ${html}
       setUiError("Please select at least one source.");
       return;
     }
+    // Guest-mode hard cap. Anonymous (Supabase is_anonymous) sessions
+    // get GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
+    // device before this branch swaps the search for a sign-in prompt.
+    // We check BEFORE ensureQuota / layout snap so the popup lands
+    // cleanly without stranding the workspace mid-transition.
+    if (isGuest) {
+      const remaining = fastMode ? guestQuickRemaining : guestCuratedRemaining;
+      if (remaining <= 0) {
+        setGuestExhaustedOpen(true);
+        return;
+      }
+    }
     // Client-side quota preflight. Server is still the source of truth
     // (HTTP 429 backstop) but a local short-circuit gives the user an
     // immediate, in-modal explanation instead of a network round-trip.
@@ -3168,6 +3246,13 @@ ${html}
     const _usedUnderstand = directionData !== null;
     abortRef.current = new AbortController();
     setIsSubmitting(true);
+    // Burn one guest credit at the moment the search actually fires —
+    // not on click, so abandoned-mid-search doesn't waste a credit.
+    // The quota check above already guaranteed remaining > 0 for guests.
+    if (isGuest) {
+      if (fastMode) useGuestQuotaStore.getState().incrementQuick();
+      else          useGuestQuotaStore.getState().incrementCurated();
+    }
     // First search of this session flips the textarea into its compact
     // layout. Before this point, focusing / typing leaves the textarea at
     // its tall "greeting" height so users have room to draft a long
@@ -3812,6 +3897,40 @@ ${html}
               Continue with Google
             </button>
 
+            {/* Guest-mode escape hatch. A subtler "or" divider + a
+                ghost-button-styled link to keep the Google CTA as the
+                primary affordance — guest mode is the fallback for
+                people kicking the tyres, not the recommended path. */}
+            <div className="mt-3 flex items-center gap-2" style={{ color: "var(--ats-fg-muted)" }}>
+              <div className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+              <span className="text-[10px] uppercase tracking-wider">or</span>
+              <div className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+            </div>
+            <button
+              onClick={() => void handleGuestSignIn()}
+              disabled={guestSignInBusy}
+              className="mt-3 w-full rounded-lg border px-4 py-2 text-xs font-medium transition-colors hover:brightness-110 disabled:opacity-50 disabled:cursor-wait"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "transparent",
+                color:           "var(--ats-fg-secondary)",
+              }}
+            >
+              {guestSignInBusy
+                ? "Starting guest session…"
+                : `Try without signing in · ${GUEST_QUICK_MAX} Quick + ${GUEST_CURATED_MAX} Curated`}
+            </button>
+            {guestSignInError && (
+              <p
+                className="mt-2 text-[11px] rounded-md px-2 py-1.5 border"
+                style={{
+                  borderColor:     "#ef444455",
+                  backgroundColor: "#ef44441a",
+                  color:           "#ef4444",
+                }}
+              >{guestSignInError}</p>
+            )}
+
             {/* Developer-account sign-in — hidden by default so regular
                 users aren't confused, revealed by a small "Developer
                 sign-in" link. Uses the MAIN supabase client so the
@@ -3905,6 +4024,79 @@ ${html}
         </div>
       )}
 
+      {/* Guest-quota-exhausted popup. Triggered when an anonymous
+          (is_anonymous) session tries to fire a search after spending
+          its 2 Quick + 1 Curated credits. Same modal shell as the auth
+          gate so the visual transition feels coherent — the user is
+          essentially being upgraded from "guest" to "real account". */}
+      {guestExhaustedOpen && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center p-6 backdrop-blur-sm"
+          style={{ backgroundColor: "rgba(0,0,0,0.45)" }}
+          onClick={() => setGuestExhaustedOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border shadow-2xl p-6 text-center"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-panel)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/Cats_01.png" alt="" className="h-14 w-14 mx-auto mb-3 select-none pointer-events-none" draggable={false} />
+            <h2 className="text-lg font-bold mb-1" style={{ color: "var(--ats-fg-primary)" }}>
+              You&apos;ve used your guest trial
+            </h2>
+            <p className="text-xs leading-relaxed mb-4" style={{ color: "var(--ats-fg-secondary)" }}>
+              Sign in to keep searching. Your account also stores history,
+              Lab outputs, and subscription state across devices — none of
+              which is kept for guests.
+            </p>
+            <div className="mb-4 rounded-lg border p-2 text-[11px]" style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-base)",
+              color:           "var(--ats-fg-muted)",
+            }}>
+              <div className="flex items-center justify-between">
+                <span>Quick searches</span>
+                <span className="tabular-nums">{GUEST_QUICK_MAX - guestQuickRemaining} / {GUEST_QUICK_MAX}</span>
+              </div>
+              <div className="flex items-center justify-between mt-0.5">
+                <span>Curated</span>
+                <span className="tabular-nums">{GUEST_CURATED_MAX - guestCuratedRemaining} / {GUEST_CURATED_MAX}</span>
+              </div>
+            </div>
+            <button
+              onClick={handleGoogleLogin}
+              className="w-full flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:brightness-105 transition-all"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-base)",
+                color:           "var(--ats-fg-primary)",
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
+                <path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/>
+                <path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/>
+                <path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/>
+                <path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/>
+              </svg>
+              Continue with Google
+            </button>
+            <button
+              onClick={() => setGuestExhaustedOpen(false)}
+              className="mt-3 text-[11px] underline hover:opacity-80 transition-opacity"
+              style={{ color: "var(--ats-fg-muted)" }}
+            >
+              Not now
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Day / Night category toggle — rendered as a sibling of the
           announcement banner so it sits in the top-right of that wrapper
           and feels like part of the banner chrome. See the top-bar
@@ -3989,7 +4181,30 @@ ${html}
             {/* Tagline is sized so the whole line (descriptor + version)
                 fits within the wordmark + mascot row width above — no
                 overflow past the mascot's right edge. */}
-            <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">{APP_VERSION}</span></p>
+            <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">
+              An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">{APP_VERSION}</span>
+              {/* Guest-mode pill — only shown for anonymous (Supabase
+                  is_anonymous) sessions. Numbers count REMAINING credits
+                  rather than used so the user reads it as "what I have
+                  left", not "what I've spent". Clicking the pill jumps
+                  straight to the sign-in popup so the user can convert
+                  without waiting until the cap is hit. */}
+              {isGuest && (
+                <button
+                  onClick={() => setGuestExhaustedOpen(true)}
+                  className="ml-2 align-middle rounded-full border px-2 py-0.5 text-[10px] font-semibold tabular-nums hover:brightness-110 transition-colors"
+                  style={{
+                    borderColor:     "var(--ats-border-accent)",
+                    backgroundColor: "var(--ats-bg-accent-soft)",
+                    color:           "var(--ats-fg-accent)",
+                  }}
+                  title="Sign in for unlimited access"
+                  {...helpProps(`Guest mode · ${guestQuickRemaining} Quick + ${guestCuratedRemaining} Curated left · click to sign in`)}
+                >
+                  Guest · {guestQuickRemaining}Q / {guestCuratedRemaining}C left
+                </button>
+              )}
+            </p>
           </div>
           {/* Announcement banner — ALWAYS mounted so its height is
               always part of the top-bar flex row, preventing any pixel
