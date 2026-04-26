@@ -7530,8 +7530,16 @@ ${html}
                                   wrap (e.g. a glued URL slug pasted as a
                                   query) */}
                           <p className="max-w-[220px] text-[11px] text-slate-300 group-hover:text-blue-300 transition-colors leading-snug line-clamp-4 text-center mt-0.5 break-words">{item.title}</p>
-                          <p className="text-[9px] text-slate-600 whitespace-nowrap leading-[1.1]">{timeStr}</p>
-                          <p className="text-[9px] text-slate-700 whitespace-nowrap leading-[1.1]">{dateStr}</p>
+                          {/* Time / date metadata uses the .text-tiny escape
+                              hatch (defined in globals.css) so it opts out
+                              of the px-based floor that pins everything else
+                              to text-xs. The 0.5 rem = 11 px size matches
+                              the original visual intent (the dev wrote
+                              text-[9px] which used to render at 12 px under
+                              the old 16 px root) and reads as clearly
+                              "secondary info" against the title above. */}
+                          <p className="text-tiny text-slate-600 whitespace-nowrap mt-0.5">{timeStr}</p>
+                          <p className="text-tiny text-slate-700 whitespace-nowrap">{dateStr}</p>
                         </button>
                       </div>
                     );

@@ -176,6 +176,19 @@
   font-size: 16.5px !important;
 }
 
+/* Escape hatch from the floor above. 0.5 rem = 11 px at the current
+   22 px root and scales with any future global rescale, so labels that
+   carry this class stay proportionally small no matter how the root
+   moves. Use sparingly — only for genuinely-low-priority labels where
+   compactness > the a11y baseline (e.g. ISO-8601 timestamps next to a
+   highlighted title, build-version stamps, dev-only annotations).
+   Defined AFTER the floor coercion so source order + matching
+   `!important` flips the cascade in this rule's favour. */
+.text-tiny {
+  font-size: 0.5rem !important;
+  line-height: 1.1 !important;
+}
+
 /* ── Zoom canvas fill ───────────────────────────────────────────────────────
    When `zoom` shrinks the <html> element to <100 %, the rendered canvas
    can leave a strip of uncovered area at the bottom (or right) that shows
