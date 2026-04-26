@@ -1270,12 +1270,14 @@ export default function HomePage() {
       // with html zoom < 1, which is why the chip strip kept
       // overflowing the page edge. Convert top to CSS first.
       //
-      // The 465 px reserved (CSS) was MEASURED, not estimated: at
+      // The 445 px reserved (CSS) was MEASURED, not estimated: at
       // zoom 0.66 the actual distance from textarea-bottom to the
       // last chip is 435 CSS (action bar + mt-3 + 4 rem voice slot
       // + gap-2.5 + buttons row + gap-2.5 + 3-line chip wrap + bottom
-      // padding) and we add ~30 CSS so the chip strip ends ~30 phys
-      // px above the workspace section's bottom edge.
+      // padding) and we add ~10 CSS so the chip strip ends ~10 phys
+      // px above the workspace section's bottom edge — tight enough
+      // to feel like the chips are anchored at the page edge without
+      // actually clipping the bottom row.
       //
       // The 800 px cap only kicks in on tall (1440+ phys, no zoom)
       // viewports so the textarea doesn't grow into a monolith on 4K
@@ -1285,7 +1287,7 @@ export default function HomePage() {
       const zoom = getDocumentZoom();
       const visualVH = getVisualVH();
       const topCss = top / zoom;
-      const headroom = Math.max(visualVH - topCss - 465, 220);
+      const headroom = Math.max(visualVH - topCss - 445, 220);
       const target = Math.min(headroom, 800);
       ta.style.height = `${target}px`;
       // 38% top padding visually centres a 1-3 line question. Minimum
