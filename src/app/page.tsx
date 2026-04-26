@@ -1259,17 +1259,34 @@ export default function HomePage() {
       // post-search; the new numbers let the bottom strip sit ~20 px
       // above the workspace section's bottom edge on a 1080–1440 px
       // viewport.
-      // 280 px reserved (CSS) below the textarea covers: action bar
-      // (~50) + sprite voice slot 4 rem / 64 px + Quick / Curated row
-      // 40 px + chips row ~55 px (14 px chips × 3 wrap lines) + gap-2.5
-      // gutters between sprite elements. Cap at 700 CSS lets the
-      // textarea grow tall enough on 1080+ viewports that the chip
-      // strip ends up only ~30 px above the bottom of the workspace
-      // section — the user wanted the chips "near the page edge with
-      // a small gap" rather than floating high in the middle.
+      // Textarea height — clamped to leave just enough room below
+      // for the action bar + sprite voice slot + Quick/Curated row +
+      // chip strip + a ~30 px gap above the page edge.
+      //
+      // CRITICAL unit hygiene: getBoundingClientRect().top returns
+      // PHYSICAL px (post-html-zoom), but visualVH and ta.style.height
+      // both speak CSS px. An earlier version mixed the two and
+      // overshot the textarea height by zoom⁻¹ on every breakpoint
+      // with html zoom < 1, which is why the chip strip kept
+      // overflowing the page edge. Convert top to CSS first.
+      //
+      // The 465 px reserved (CSS) was MEASURED, not estimated: at
+      // zoom 0.66 the actual distance from textarea-bottom to the
+      // last chip is 435 CSS (action bar + mt-3 + 4 rem voice slot
+      // + gap-2.5 + buttons row + gap-2.5 + 3-line chip wrap + bottom
+      // padding) and we add ~30 CSS so the chip strip ends ~30 phys
+      // px above the workspace section's bottom edge.
+      //
+      // The 800 px cap only kicks in on tall (1440+ phys, no zoom)
+      // viewports so the textarea doesn't grow into a monolith on 4K
+      // monitors. The 220 px floor keeps the box usable on freak
+      // short viewports.
       const top = ta.getBoundingClientRect().top;
-      const headroom = Math.max(getVisualVH() - top - 280, 220);
-      const target = Math.min(headroom, 700);
+      const zoom = getDocumentZoom();
+      const visualVH = getVisualVH();
+      const topCss = top / zoom;
+      const headroom = Math.max(visualVH - topCss - 465, 220);
+      const target = Math.min(headroom, 800);
       ta.style.height = `${target}px`;
       // 38% top padding visually centres a 1-3 line question. Minimum
       // 28px so a short viewport (rare) never collapses it entirely.
