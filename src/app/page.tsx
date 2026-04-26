@@ -1250,15 +1250,26 @@ export default function HomePage() {
     } else {
       // Expanded greeting box — compute height, then derive a padding
       // that pushes the caret + typed text into the vertical centre.
-      // We CAP the box at 420 px so the chrome below it (action bar +
-      // sprite voice + Quick / Curated buttons + recommended-term
-      // chips + optional Settings panel) always fits on a single
-      // 1080–1440 px viewport without forcing the user to scroll. The
-      // earlier 2/3-of-viewport math grew unbounded on 2K monitors and
-      // pushed the action surfaces below the fold.
+      // We reserve 260 px below the textarea (action bar ~50 + sprite
+      // voice slot ~52 + Quick / Curated row ~44 + chips ~60 + a tiny
+      // bottom margin so the chips don't kiss the page edge) and cap
+      // the box at 540 px so the textarea uses every spare pixel
+      // without pushing the chips below the fold. Reserved was 380
+      // and capped at 420 — too conservative once the chips collapse
+      // post-search; the new numbers let the bottom strip sit ~20 px
+      // above the workspace section's bottom edge on a 1080–1440 px
+      // viewport.
+      // 280 px reserved (CSS) below the textarea covers: action bar
+      // (~50) + sprite voice slot 4 rem / 64 px + Quick / Curated row
+      // 40 px + chips row ~55 px (14 px chips × 3 wrap lines) + gap-2.5
+      // gutters between sprite elements. Cap at 700 CSS lets the
+      // textarea grow tall enough on 1080+ viewports that the chip
+      // strip ends up only ~30 px above the bottom of the workspace
+      // section — the user wanted the chips "near the page edge with
+      // a small gap" rather than floating high in the middle.
       const top = ta.getBoundingClientRect().top;
-      const headroom = Math.max(getVisualVH() - top - 380, 200);
-      const target = Math.min(headroom, 420);
+      const headroom = Math.max(getVisualVH() - top - 280, 220);
+      const target = Math.min(headroom, 700);
       ta.style.height = `${target}px`;
       // 38% top padding visually centres a 1-3 line question. Minimum
       // 28px so a short viewport (rare) never collapses it entirely.

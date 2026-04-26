@@ -186,17 +186,22 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
   //     slot, so growth is fine.
   const voiceSlotStyle: React.CSSProperties = hasRunSearch
     ? {}                                            // grows naturally
-    : { height: "3rem" };
+    : { height: "4rem" };                           // 2 lines of 22 px voice + breathing
   const voiceLineStyle: React.CSSProperties = hasRunSearch
-    ? {                                             // smaller, up to 3 lines
+    ? {                                             // post-search: a touch
+                                                    // smaller than the
+                                                    // landing 22 px voice,
+                                                    // but still readable.
         display:         "-webkit-box",
         WebkitLineClamp: 3,
         WebkitBoxOrient: "vertical",
         overflow:        "hidden",
-        fontSize:        "calc(13px * var(--sprite-zoom-comp, 1))",
+        fontSize:        "calc(17px * var(--sprite-zoom-comp, 1))",
         lineHeight:      1.4,
       }
-    : {                                             // bigger, 2-line clamp
+    : {                                             // landing: full 22 px
+                                                    // (set by .sprite-voice
+                                                    // class), 2-line clamp.
         display:         "-webkit-box",
         WebkitLineClamp: 2,
         WebkitBoxOrient: "vertical",
@@ -358,10 +363,15 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
               data-focused={isFocused(`term-${i}`) || undefined}
               data-selected={isSelected || undefined}
               tabIndex={showRecommendedTerms ? 0 : -1}
-              className="recommended-chip inline-flex items-center rounded-md px-1.5 py-0.5 font-normal"
+              className="recommended-chip inline-flex items-center rounded-md px-2 py-0.5 font-normal"
               style={{
-                fontSize:   "11px",
-                lineHeight: 1.25,
+                // Multiply through --sprite-zoom-comp so the visible
+                // size stays around 14 px regardless of the html zoom
+                // applied at smaller viewports. Without the comp, the
+                // chip rendered at ~7 px on 1440 viewports and was
+                // genuinely hard to read.
+                fontSize:   "calc(14px * var(--sprite-zoom-comp, 1))",
+                lineHeight: 1.3,
               }}
             >
               {term}
