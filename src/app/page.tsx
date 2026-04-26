@@ -1144,9 +1144,15 @@ export default function HomePage() {
   // Recommended-term chip click — wholesale replace whatever the user
   // had typed with the chip's text. We refocus the textarea + move the
   // caret to the end so the user can keep typing if they want to refine.
+  // Clicking a chip is an EXPLICIT commit to a query, so we also fast-
+  // forward the 3-step Enter ritual to step 1 (Quick / Curated buttons
+  // visible, no focus ring yet) — without this the user picks a chip
+  // and then has to press Enter twice to even see the search buttons,
+  // which felt redundant given they already clicked the suggestion.
   function handlePickRecommendedTerm(term: string) {
     setQuery(term);
-    setAssessmentMessage(`picked “${term}” — Enter when you're ready (◕‿◕)`);
+    setButtonStep((s) => (s === 0 ? 1 : s));
+    setAssessmentMessage(`picked “${term}” — Enter to fire, or pick Quick / Curated (◕‿◕)`);
     // Defer the focus / caret move one frame so React has committed the
     // controlled-value update; otherwise setSelectionRange writes to the
     // pre-update value and ends up in the wrong place.
@@ -1270,14 +1276,13 @@ export default function HomePage() {
       // with html zoom < 1, which is why the chip strip kept
       // overflowing the page edge. Convert top to CSS first.
       //
-      // The 445 px reserved (CSS) was MEASURED, not estimated: at
+      // The 438 px reserved (CSS) was MEASURED, not estimated: at
       // zoom 0.66 the actual distance from textarea-bottom to the
       // last chip is 435 CSS (action bar + mt-3 + 4 rem voice slot
       // + gap-2.5 + buttons row + gap-2.5 + 3-line chip wrap + bottom
-      // padding) and we add ~10 CSS so the chip strip ends ~10 phys
-      // px above the workspace section's bottom edge — tight enough
-      // to feel like the chips are anchored at the page edge without
-      // actually clipping the bottom row.
+      // padding) and we add a 3 CSS safety so the chip strip ends
+      // ~2 phys px above the workspace section's bottom edge —
+      // visually anchored at the page edge without clipping.
       //
       // The 800 px cap only kicks in on tall (1440+ phys, no zoom)
       // viewports so the textarea doesn't grow into a monolith on 4K
@@ -1287,7 +1292,7 @@ export default function HomePage() {
       const zoom = getDocumentZoom();
       const visualVH = getVisualVH();
       const topCss = top / zoom;
-      const headroom = Math.max(visualVH - topCss - 445, 220);
+      const headroom = Math.max(visualVH - topCss - 438, 220);
       const target = Math.min(headroom, 800);
       ta.style.height = `${target}px`;
       // 38% top padding visually centres a 1-3 line question. Minimum
