@@ -25,6 +25,12 @@ export type LabExtraField = {
   multi?: boolean;             // if true → list with +Add button, stored as string[]
   addLabel?: string;           // label for the +Add button when multi=true
   rows?: number;               // textarea with N rows; absent = single-line input
+  acceptUpload?: boolean;      // if true → render a "Upload .pdf/.txt/.md" button
+                               //          that extracts the file's text and
+                               //          fills this field. Used for fields
+                               //          where the user is more likely to
+                               //          have an existing document (resume,
+                               //          existing draft) than to retype it.
 };
 
 export type LabFieldSpec = {
@@ -214,6 +220,38 @@ export const LAB_FIELD_SPECS: Record<string, LabFieldSpec> = {
       { key: "future_goals",      label: "Future goals",                          description: "What you want to do during and after this program / role.",                  placeholder: "e.g. Build assistive AI tools at a major tech company; eventually start a non-profit.", required: true, rows: 2 },
       { key: "fit_with_program",  label: "Why this program / role specifically",  description: "Concrete reasons — faculty, courses, team, resources.",                       placeholder: "e.g. Want to work with Prof. X on assistive AI; CMU's HCI lab matches my methodology exactly.", required: false, rows: 2 },
       { key: "word_limit",        label: "Word / page limit",                     description: "What the application asks for. Optional.",                                    placeholder: "e.g. 750 words / 2 pages",                                                       required: false },
+      // Resume reference — optional. Lets the writer agent pull
+      // concrete dates / titles / companies from the user's actual CV
+      // instead of inventing them. The acceptUpload flag turns on a
+      // small file-extract button next to the textarea so the user
+      // can drop a .pdf/.txt/.md instead of pasting.
+      { key: "resume_text",       label: "Your resume (optional reference)",      description: "Paste or upload your resume. The writer will use it for accurate dates, titles, and projects — won't include it verbatim.", placeholder: "Paste your resume here, or click 'Upload' to extract from a .pdf / .txt / .md file…", required: false, rows: 8, acceptUpload: true },
+    ],
+  },
+
+  resume: {
+    id: "resume",
+    blurb: "An ATS-friendly resume / CV tuned for student + early-career applications.",
+    coreLabel: "Target role + level",
+    coreDescription: "The position you're applying for and your stage. Sets the tone of the whole document.",
+    corePlaceholder: "e.g. Software Engineering Internship — undergraduate junior, summer 2026",
+    coreRequired: true,
+    coreRows: 2,
+    pointsLabel: "Top headline qualifications",
+    pointsDescription: "3–5 one-line highlights for the summary statement at the top of the resume.",
+    pointsAddLabel: "+ Add highlight",
+    pointsPlaceholder: (i) => i === 0 ? "e.g. Built a real-time chat app handling 10k concurrent users" : `Highlight ${i + 1}…`,
+    pointsRequired: false,
+    extras: [
+      { key: "contact_info",          label: "Contact info",                          description: "Name, email, phone, LinkedIn, location — one line.",                                placeholder: "Jane Doe · jane@cmu.edu · +1-412-555-0123 · linkedin.com/in/janedoe · Pittsburgh PA",                                                                                                                                  required: true,  rows: 2 },
+      { key: "education",             label: "Education",                             description: "School(s), degree(s), GPA, relevant coursework. One school per block, most recent first.", placeholder: "e.g. Carnegie Mellon University — BS Computer Science — 2024–2027 — GPA 3.8/4.0\nRelevant coursework: Distributed Systems, ML Theory, HCI",                                                                  required: true,  rows: 4 },
+      { key: "work_experience",       label: "Work experience",                       description: "Each role: company · title · dates · 2–3 achievement bullets. Most recent first.",   placeholder: "e.g. Google — SWE Intern — Jun–Aug 2025\n— Reduced p99 latency on Maps autocomplete by 38% via radix-tree refactor\n— Shipped to production used by 50M+ DAU\n\nMeta — Research Assistant — 2024 (semester)\n— Trained transformer for code-completion benchmark; +12% acc over baseline", required: true, rows: 8 },
+      { key: "skills",                label: "Skills",                                description: "Technical + tools. Group by category if you can (Languages / Frameworks / Tools).",   placeholder: "e.g. Languages: Python, Go, TypeScript, Rust\nFrameworks: React, FastAPI, PyTorch\nTools: Git, Docker, AWS, Kubernetes",                                                                                                          required: true,  rows: 3 },
+      { key: "projects",              label: "Projects",                              description: "Personal / academic projects. Each: name · stack · 1–2 outcome bullets.",            placeholder: "e.g. AcademiCats — Multi-agent academic search tool — Next.js + FastAPI\n— 1k+ users in alpha; multi-agent peer-review pipeline for paper drafts\n\nCampus Lost & Found — React + Firebase\n— Used by 200+ classmates; 95%+ recovery rate",                          required: false, rows: 5 },
+      { key: "awards_certifications", label: "Awards / certifications",               description: "Honors, scholarships, certifications. Optional.",                                   placeholder: "e.g. Dean's List (2024, 2025); AWS Certified Solutions Architect; Putnam Honorable Mention",                                                                                                                          required: false, rows: 2 },
+      { key: "extracurriculars",      label: "Extracurriculars / leadership",         description: "Clubs, volunteer, side roles. Optional.",                                          placeholder: "e.g. ACM Student Chapter — VP, 2024–present\nHabitat for Humanity — Volunteer, 100+ hours",                                                                                                                            required: false, rows: 2 },
+      { key: "languages_spoken",      label: "Languages spoken",                      description: "Spoken languages + proficiency. Optional.",                                        placeholder: "e.g. English (native), Mandarin (fluent), Spanish (intermediate)",                                                                                                                                                    required: false },
+      { key: "target_companies",      label: "Target companies (style hint)",         description: "Optional — tells the writer what tone to match (FAANG vs startup vs research).",   placeholder: "e.g. FAANG, top-tier startups, ML research labs",                                                                                                                                                                     required: false },
     ],
   },
 };

@@ -1225,14 +1225,18 @@ export default function AdminPage() {
               kpiWindow === "today" ? "today" :
               kpiWindow === "week"  ? "this week" :
                                       "this month";
-            // 8 cards: 2 even rows of 4 on lg, single row of 8 on xl.
-            // Was lg:grid-cols-6 with 6 cards (single row). Adding
-            // Announcements + Feedback pushed us to 8, and a 6+2 wrap
-            // was uglier than a clean 4-by-2 block. md jumps to 4
-            // columns earlier so the cards stay readable on tablet
-            // width.
+            // 8 cards arranged as 2 rows of 4 on lg+. The xl:grid-cols-8
+            // single-row variant was tested but each card came out too
+            // narrow — labels like "SEARCHES TODAY" / "LAB RUNS TODAY" /
+            // "FEEDBACK RECEIVED" wrapped to 2 lines and the longer
+            // sublabels ("Synthesis + Paper Review") clipped mid-word.
+            // Capping at 4 columns gives every card ~280-320 px which
+            // fits the longest label in our set on a single line and
+            // leaves the sublabel readable. Two clean rows of 4 reads
+            // better than a single row of 8 narrow cards on every
+            // viewport we ship for.
             return (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-8 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-3">
                 <KpiCard
                   icon={<Users size={14} />}
                   label="Total users"

@@ -1616,6 +1616,13 @@ export default function HomePage() {
   const [labCoreArg,    setLabCoreArg]    = useState("");
   const [labPoints,     setLabPoints]     = useState<string[]>([""]);
   // Per-output-type extras — keys match LabExtraField.key from lib/lab-fields.ts.
+  // Per-field upload state — keyed by extra-field key. Only used when the
+  // spec marks a field with `acceptUpload: true` (currently the resume
+  // reference on Personal Statement). Stays empty for everything else, so
+  // the cost is zero on output types that don't use uploads.
+  const [labExtraUploadBusy,  setLabExtraUploadBusy]  = useState<Record<string, boolean>>({});
+  const [labExtraUploadError, setLabExtraUploadError] = useState<Record<string, string>>({});
+
   // Single-value fields live in labExtras; multi-entry fields live in labExtrasMulti
   // as arrays. Both get folded into the `extras` payload when Generate is clicked.
   const [labExtras, setLabExtras] = useState<Record<string, string>>({});
@@ -6172,6 +6179,7 @@ ${html}
                       <option value="abstract">Abstract</option>
                       <option value="argumentative_essay">Academic Essay</option>
                       <option value="personal_statement">Personal Statement</option>
+                      <option value="resume">Resume / CV</option>
                     </select>
                   </div>
 
@@ -6257,6 +6265,68 @@ ${html}
                               {requiredBadge(field.required)}
                             </label>
                             <p className="mt-0.5 text-[11px] leading-snug text-slate-500">{field.description}</p>
+                            {/* Optional upload affordance — only fields that
+                                opt in via acceptUpload (currently the
+                                personal_statement.resume_text reference).
+                                Reuses the existing review-paper extract
+                                endpoint, which accepts pdf / txt / md and
+                                returns structured text. The result is
+                                stuffed into the same labExtras[field.key]
+                                slot so the user can still edit / paste over
+                                it after the auto-fill. */}
+                            {field.acceptUpload && (
+                              <div className="mt-2 flex items-center gap-2">
+                                <label
+                                  className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-slate-700 bg-slate-900/40 px-2.5 py-1.5 text-xs text-slate-300 hover:border-violet-500/60 hover:text-violet-300 transition-colors"
+                                  title="Upload a .pdf / .txt / .md file — the text will be extracted into the box below"
+                                >
+                                  <Upload size={12} />
+                                  <span>{labExtraUploadBusy[field.key] ? "Extracting…" : "Upload .pdf / .txt / .md"}</span>
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+                                    className="hidden"
+                                    onChange={async (e) => {
+                                      const file = e.target.files?.[0];
+                                      if (!file) return;
+                                      e.currentTarget.value = "";  // allow re-upload of the same file
+                                      setLabExtraUploadBusy(prev => ({ ...prev, [field.key]: true }));
+                                      setLabExtraUploadError(prev => ({ ...prev, [field.key]: "" }));
+                                      try {
+                                        const fd = new FormData();
+                                        fd.append("file", file);
+                                        const res = await fetchWithApiFallback("/api/forge/review-paper/extract-text", {
+                                          method: "POST",
+                                          body:   fd,
+                                        });
+                                        if (!res.ok) {
+                                          const body = await res.text();
+                                          throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+                                        }
+                                        const data = await res.json() as { text: string; filename: string };
+                                        setLabExtras(prev => ({ ...prev, [field.key]: data.text }));
+                                      } catch (err) {
+                                        setLabExtraUploadError(prev => ({
+                                          ...prev,
+                                          [field.key]: err instanceof Error ? err.message : String(err),
+                                        }));
+                                      } finally {
+                                        setLabExtraUploadBusy(prev => ({ ...prev, [field.key]: false }));
+                                      }
+                                    }}
+                                  />
+                                </label>
+                                {labExtras[field.key] && (
+                                  <button
+                                    onClick={() => setLabExtras(prev => ({ ...prev, [field.key]: "" }))}
+                                    className="text-[11px] text-slate-500 hover:text-rose-400 transition-colors"
+                                  >Clear</button>
+                                )}
+                                {labExtraUploadError[field.key] && (
+                                  <span className="text-[11px] text-rose-400">{labExtraUploadError[field.key]}</span>
+                                )}
+                              </div>
+                            )}
                             {field.multi ? (
                               <div className="mt-2 space-y-2">
                                 {((labExtrasMulti[field.key] ?? [""]).length === 0 ? [""] : (labExtrasMulti[field.key] ?? [""])).map((val, i) => (
@@ -6621,6 +6691,7 @@ ${html}
                       abstract:              "Abstract",
                       argumentative_essay:   "Academic_Essay",
                       personal_statement:    "Personal_Statement",
+                      resume:                "Resume",
                     };
                     const OUTPUT_LABELS_TITLE: Record<string,string> = {
                       literature_review:     "Literature Review",
@@ -6632,6 +6703,7 @@ ${html}
                       abstract:              "Abstract",
                       argumentative_essay:   "Academic Essay",
                       personal_statement:    "Personal Statement",
+                      resume:                "Resume",
                     };
                     const outputSlug  = OUTPUT_LABELS_SLUG[labOutputType] ?? "Output";
                     const outputTitle = OUTPUT_LABELS_TITLE[labOutputType] ?? "Lab Output";
