@@ -6588,7 +6588,22 @@ ${html}
                           </button>
                         </div>
                       </div>
-                      <div translate="no" className="notranslate rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
+                      {/* Lab article is now Google-Translate-eligible.
+                          We mirror the Research Brief's stance (see the
+                          comment on the brief container above): we
+                          previously guarded this with `translate="no"`
+                          + `notranslate` because of streaming-DOM
+                          concerns, but in practice readers in non-English
+                          locales benefit from a free auto-translation
+                          and the in-app LLM Translate button below still
+                          handles the higher-quality path. The user has
+                          accepted that Google's DOM rewrite MAY collide
+                          with an in-flight SSE stream and crash this
+                          panel — the rest of the workspace stays up,
+                          and a refresh recovers the article from the
+                          most recent run snapshot in labRuns. Same
+                          deal as the brief. */}
+                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 leading-7 whitespace-pre-wrap break-words">
                         {displayedLabResult}
                         {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
