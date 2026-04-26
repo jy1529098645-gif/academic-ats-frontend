@@ -42,6 +42,13 @@ export type SpriteProps = {
   /** Curated suggestion chips shown under the mode buttons. Clicking a
    * chip replaces the textarea contents with the chip's text. */
   recommendedTerms: string[];
+  /** Human-readable label for where today's chips came from
+   * (e.g. "OpenAlex recent publications"). Empty string hides the
+   * attribution line entirely. */
+  recommendedTermsSource?: string;
+  /** Optional click-through URL — when present, the source label
+   * becomes a link the user can open to verify the source. */
+  recommendedTermsSourceUrl?: string;
   /** Three-step Quick / Curated reveal flow:
    *   0 → buttons hidden (user has typed but not yet pressed Enter)
    *   1 → buttons visible, no focus ring on either
@@ -73,6 +80,7 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
   const {
     query, introStage, hasRunSearch, message,
     hoverHelp, recommendedTerms, buttonStep,
+    recommendedTermsSource, recommendedTermsSourceUrl,
     onStartSearch, onPickRecommendedTerm, onHoverHelp,
   } = props;
   const hh = (msg: string) => ({
@@ -379,6 +387,35 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
           );
         })}
       </div>
+      )}
+
+      {/* Source attribution — a small italic line under the chip
+          strip telling the user where today's topics came from
+          ("via OpenAlex recent publications" etc.). Hidden when the
+          backend didn't provide a source (e.g. local FALLBACK_POOL
+          state) or when the chip strip itself isn't visible. The
+          link target opens the upstream source in a new tab so the
+          user can verify the picks aren't fabricated. */}
+      {!hasRunSearch && showRecommendedTerms && recommendedTermsSource && (
+        <p
+          className="text-[10px] italic"
+          style={{ color: "var(--ats-fg-muted)", opacity: 0.6 }}
+        >
+          via{" "}
+          {recommendedTermsSourceUrl ? (
+            <a
+              href={recommendedTermsSourceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline decoration-dotted hover:opacity-100"
+            >
+              {recommendedTermsSource}
+            </a>
+          ) : (
+            <span>{recommendedTermsSource}</span>
+          )}
+          {" "}· refreshed daily
+        </p>
       )}
     </div>
   );

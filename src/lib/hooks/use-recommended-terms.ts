@@ -46,8 +46,21 @@ function dailySeededShuffle(pool: string[]): string[] {
   return out;
 }
 
-export function useRecommendedTerms(): string[] {
-  const [terms, setTerms] = useState<string[]>(() => dailySeededShuffle(FALLBACK_POOL));
+export type RecommendedTermsBundle = {
+  terms:      string[];
+  /** Human-readable source label, e.g. "OpenAlex recent publications".
+   * Empty when the frontend is showing the local FALLBACK_POOL. */
+  source:     string;
+  /** Click-through URL the frontend may render alongside the source. */
+  sourceUrl:  string;
+};
+
+export function useRecommendedTerms(): RecommendedTermsBundle {
+  const [bundle, setBundle] = useState<RecommendedTermsBundle>(() => ({
+    terms:     dailySeededShuffle(FALLBACK_POOL),
+    source:    "",
+    sourceUrl: "",
+  }));
 
   useEffect(() => {
     let alive = true;
@@ -55,10 +68,18 @@ export function useRecommendedTerms(): string[] {
       try {
         const res = await fetchWithApiFallback("/api/workspace/recommended-terms");
         if (!res.ok) return;
-        const data = (await res.json()) as { terms?: string[] };
+        const data = (await res.json()) as {
+          terms?: string[];
+          source?: string;
+          source_url?: string;
+        };
         if (!alive) return;
         if (Array.isArray(data?.terms) && data.terms.length > 0) {
-          setTerms(data.terms);
+          setBundle({
+            terms:     data.terms,
+            source:    data.source ?? "",
+            sourceUrl: data.source_url ?? "",
+          });
         }
       } catch {
         // best-effort — fallback pool is already on screen
@@ -67,5 +88,5 @@ export function useRecommendedTerms(): string[] {
     return () => { alive = false; };
   }, []);
 
-  return terms;
+  return bundle;
 }

@@ -1371,9 +1371,11 @@ export default function HomePage() {
   // was removed when the per-tab localStorage scheme was replaced by the
   // server-backed feed — every open tab now sees the same list.
   const announcementsFeed = useAnnouncements();
-  // Daily-rotated recommended-term chips from the admin pool. See
-  // src/lib/hooks/use-recommended-terms.ts for the fetch + fallback.
-  const recommendedTerms = useRecommendedTerms();
+  // Daily-rotated recommended-term chips. The hook returns both the
+  // chip strings AND a source label ("OpenAlex recent publications"
+  // etc.) the Sprite renders as a small attribution under the strip.
+  // See src/lib/hooks/use-recommended-terms.ts for the fetch + fallback.
+  const { terms: recommendedTerms, source: recommendedTermsSource, sourceUrl: recommendedTermsSourceUrl } = useRecommendedTerms();
 
   // Three-step Quick / Curated reveal flow (driven by Enter on the textarea):
   //   0 → user has typed but the action buttons are still hidden
@@ -4787,6 +4789,8 @@ ${html}
               hoverHelp={hoverHelpText}
               onHoverHelp={setHoverHelpText}
               recommendedTerms={recommendedTerms}
+              recommendedTermsSource={recommendedTermsSource}
+              recommendedTermsSourceUrl={recommendedTermsSourceUrl}
               buttonStep={buttonStep}
               onPickRecommendedTerm={handlePickRecommendedTerm}
               onStartSearch={handleStartSearchFromSprite}
