@@ -636,8 +636,15 @@ export function PaperReviewPanel() {
               )}
             </button>
             {generating && (
+              // Strip the [AgentName] prefix AND the leading status glyph
+              // (✓ / ✗ / ↩ / ↺ / ▶). The glyphs are the wire-protocol
+              // signal the backend uses to mark "done / error / revision /
+              // start" — the agent-log entry render below converts them
+              // into lucide icons, but they were leaking into THIS live
+              // status string and rendering as colored emoji on most
+              // platforms (U+2713 / U+2717 in particular).
               <span className="text-xs animate-pulse ml-1" style={{ color: "var(--ats-fg-muted)" }}>
-                {status.replace(/^\[[^\]]+\]\s*/, "") || "Running…"}
+                {status.replace(/^\[[^\]]+\]\s*/, "").replace(/^[✓✗▶↩↺]\s*/, "") || "Running…"}
               </span>
             )}
           </div>

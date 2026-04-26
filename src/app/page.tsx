@@ -6477,7 +6477,18 @@ ${html}
                           )}
                         </button>
                         {labGenerating && !labViewingId && (
-                          <span className="text-xs text-slate-500 animate-pulse ml-1">{labStatus.replace(/^\[[^\]]+\]\s*/, "") || "Running…"}</span>
+                          // Strip BOTH the [AgentName] prefix AND the
+                          // leading status glyph (✓ / ✗ / ↩ / ↺ / ▶).
+                          // The glyphs are the wire-protocol signal the
+                          // backend uses to mark "done / error / revision /
+                          // start" — we keep them on the wire (they drive
+                          // `done` / `error` / `revision` flags that the
+                          // agent-log entry render below uses to pick a
+                          // lucide icon) but hide them in human-visible
+                          // text. Without this strip, U+2713 / U+2717
+                          // render as colored emoji on most platforms,
+                          // breaking the lucide-only iconography rule.
+                          <span className="text-xs text-slate-500 animate-pulse ml-1">{labStatus.replace(/^\[[^\]]+\]\s*/, "").replace(/^[✓✗▶↩↺]\s*/, "") || "Running…"}</span>
                         )}
                       </div>
                       {labAgentLogOpen && (
