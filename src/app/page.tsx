@@ -1744,8 +1744,12 @@ export default function HomePage() {
   // ── Auth state ─────────────────────────────────────────────────────────────
   // `is_anonymous` is set by Supabase when the session was created via
   // signInAnonymously() — used downstream to derive `isGuest` and gate
-  // search firing on the per-device guest quota.
-  const [authUser, setAuthUser] = useState<{ email?: string; is_anonymous?: boolean } | null>(null);
+  // search firing on the per-device guest quota. `id` is the Supabase
+  // user UUID; for guest sessions we derive a short human-readable form
+  // (`shortGuestId`) so users can quote it when reporting issues — the
+  // full UUID is what the backend logs against every request, so
+  // matching the short form to a real session is a one-step lookup.
+  const [authUser, setAuthUser] = useState<{ id?: string; email?: string; is_anonymous?: boolean } | null>(null);
   // ── Anonymous-guest mode ────────────────────────────────────────────────
   // Anonymous (Supabase `is_anonymous`) sessions get a strictly bounded
   // trial: GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
@@ -1755,6 +1759,19 @@ export default function HomePage() {
   const isGuest               = !!authUser?.is_anonymous;
   const guestQuickRemaining   = useGuestQuotaStore(selectGuestQuickRemaining);
   const guestCuratedRemaining = useGuestQuotaStore(selectGuestCuratedRemaining);
+  // Short human-readable form of the guest's Supabase user UUID. Shown
+  // anywhere a guest might want to quote their identity (title-bar pill,
+  // quota-exhausted popup, feedback modal) so support / admin can map it
+  // back to the full UUID in backend logs without the user copy/pasting
+  // a 36-char hex string. Format: "G-AB12CD34" — the leading "G-"
+  // signals "guest" and the 8 hex chars are deterministic per device
+  // (the first segment of the UUID), so the same browser session always
+  // shows the same code. Empty string for non-guests.
+  const shortGuestId = (() => {
+    if (!isGuest || !authUser?.id) return "";
+    const head = String(authUser.id).split("-")[0] || "";
+    return head ? `G-${head.toUpperCase()}` : "";
+  })();
   // Sign-in popup that takes over once a guest exhausts their cap.
   const [guestExhaustedOpen,  setGuestExhaustedOpen]  = useState(false);
   const [guestSignInBusy,     setGuestSignInBusy]     = useState(false);
@@ -4093,6 +4110,12 @@ ${html}
                 <span>Curated</span>
                 <span className="tabular-nums">{GUEST_CURATED_MAX - guestCuratedRemaining} / {GUEST_CURATED_MAX}</span>
               </div>
+              {shortGuestId && (
+                <div className="mt-1.5 pt-1.5 flex items-center justify-between border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                  <span>Session ID</span>
+                  <span className="font-mono tabular-nums select-all" style={{ color: "var(--ats-fg-secondary)" }}>{shortGuestId}</span>
+                </div>
+              )}
             </div>
             <button
               onClick={handleGoogleLogin}
@@ -4223,10 +4246,10 @@ ${html}
                     backgroundColor: "var(--ats-bg-accent-soft)",
                     color:           "var(--ats-fg-accent)",
                   }}
-                  title="Sign in for unlimited access"
-                  {...helpProps(`Guest mode · ${guestQuickRemaining} Quick + ${guestCuratedRemaining} Curated left · click to sign in`)}
+                  title={`Sign in for unlimited access · session ID: ${shortGuestId}`}
+                  {...helpProps(`${shortGuestId} · ${guestQuickRemaining} Quick + ${guestCuratedRemaining} Curated left · click to sign in`)}
                 >
-                  Guest · {guestQuickRemaining}Q / {guestCuratedRemaining}C left
+                  {shortGuestId || "Guest"} · {guestQuickRemaining}Q / {guestCuratedRemaining}C left
                 </button>
               )}
             </p>
@@ -7003,6 +7026,20 @@ ${html}
                     </span>
                     <ExternalLink size={12} className="shrink-0 opacity-70" />
                   </a>
+                  {/* Guest session ID — shown for anonymous users so they
+                      can quote it in the feedback body for backend lookup.
+                      Click-to-copy via select-all so the user can paste it
+                      into their note without retyping the hex. */}
+                  {isGuest && shortGuestId && (
+                    <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-[11px]" style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-base)",
+                      color:           "var(--ats-fg-muted)",
+                    }}>
+                      <span>Your session ID (for backend lookup)</span>
+                      <span className="font-mono tabular-nums select-all" style={{ color: "var(--ats-fg-secondary)" }}>{shortGuestId}</span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-3 pt-1">
                     <span className="text-xs tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
                       {feedbackText.length} / 4000
