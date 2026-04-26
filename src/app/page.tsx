@@ -86,13 +86,19 @@ type LabModelOption = {
   label:   string;   // user-visible alias (never vendor-specific)
   tagline: string;   // short one-line description shown in the picker
 };
+// Tiering rationale (top-to-bottom = strongest → most utilitarian):
+//   The Writer  (gpt-5.3)            — strongest prose, default for new sessions
+//   The Scholar (claude-sonnet-4-6)  — academic specialist; long-form +
+//                                      careful citation handling
+//   The Drafter (gpt-4o)             — practical everyday workhorse;
+//                                      balanced quality for routine drafts
 const LAB_MODEL_OPTIONS: LabModelOption[] = [
-  { id: "gpt-4o",             label: "Deep Writer",    tagline: "Broader reasoning · default" },
-  { id: "gpt-5.3",            label: "Swift Writer",   tagline: "Fastest · cheapest" },
-  { id: "claude-sonnet-4-6",  label: "Scholar Writer", tagline: "Citation-careful long form" },
+  { id: "gpt-5.3",            label: "The Writer",  tagline: "Top-tier prose · default" },
+  { id: "claude-sonnet-4-6",  label: "The Scholar", tagline: "Citation-careful long form" },
+  { id: "gpt-4o",             label: "The Drafter", tagline: "Balanced everyday drafts" },
 ];
 const labModelLabel = (id: string): string =>
-  LAB_MODEL_OPTIONS.find(m => m.id === id)?.label ?? "Deep Writer";
+  LAB_MODEL_OPTIONS.find(m => m.id === id)?.label ?? "The Writer";
 
 const DEFAULT_SOURCES = [
   "Semantic Scholar",
@@ -1751,7 +1757,7 @@ export default function HomePage() {
   // Stored as the real backend model id so the payload always carries a
   // whitelisted value; the UI maps these ids to user-facing descriptive
   // labels via LAB_MODEL_OPTIONS below so the vendor is never exposed.
-  const [labWritingModel,   setLabWritingModel]   = useState("gpt-4o");
+  const [labWritingModel,   setLabWritingModel]   = useState("gpt-5.3");
   const [labModelOpen,      setLabModelOpen]      = useState(false);
 
   const [deepReadResults, setDeepReadResults] = useState<Record<string, DeepReadResult>>({});
