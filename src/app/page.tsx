@@ -1173,7 +1173,13 @@ export default function HomePage() {
   function handleStartSearchFromSprite(mode: "quick" | "curated") {
     const trimmed = query.trim();
     if (!trimmed || isSubmitting) return;
-    setFastMode(mode === "quick");
+    const newFast = mode === "quick";
+    // Eager ref sync — see fastModeRef rationale on declaration. Without
+    // this, handleSearch (called via setTimeout below) would close over
+    // the OLD fastMode value because the setState hadn't committed yet,
+    // and a user clicking Curated could end up firing a Quick search.
+    fastModeRef.current = newFast;
+    setFastMode(newFast);
     setIntroStage("full");
     setCommittedQuery(trimmed);
     setAssessmentMessage(mode === "quick"
@@ -1235,6 +1241,20 @@ export default function HomePage() {
   // of this section.
 
   const [fastMode, setFastMode] = useState(true);
+  // Closure-stable mirror of `fastMode`. handleSearch is a function
+  // declaration recreated on every render and captures THIS render's
+  // `fastMode` const; any code that calls handleSearch via setTimeout
+  // (the Quick/Curated sprite buttons + the post-search switch button)
+  // ends up running an OLD render's handleSearch closure, which reads
+  // an OLD `fastMode` even though setFastMode has already fired. The
+  // ref is updated both eagerly in the click handlers AND lazily via
+  // useEffect on every fastMode change, so handleSearch's
+  // business-logic branches can read `fastModeRef.current` and always
+  // get the latest mode regardless of which render's closure they run
+  // inside. Render-time reads (UI / hook deps) keep using the state
+  // value so they trigger re-renders correctly.
+  const fastModeRef = useRef(fastMode);
+  useEffect(() => { fastModeRef.current = fastMode; }, [fastMode]);
   // Two paper-count settings — one per mode. Quick defaults to 50 (wide
   // sweep, seconds to ship); Curated defaults to 20 (each paper costs a
   // multi-agent pass, so smaller pools keep latency reasonable). Settings
@@ -3210,13 +3230,18 @@ ${html}
       setUiError("Please select at least one source.");
       return;
     }
+    // Read the LIVE mode via the ref (see fastModeRef rationale on
+    // declaration). Click handlers that update fastMode immediately
+    // before scheduling handleSearch via setTimeout would otherwise
+    // run with the stale closure value and execute the wrong mode.
+    const isFast = fastModeRef.current;
     // Guest-mode hard cap. Anonymous (Supabase is_anonymous) sessions
     // get GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
     // device before this branch swaps the search for a sign-in prompt.
     // We check BEFORE ensureQuota / layout snap so the popup lands
     // cleanly without stranding the workspace mid-transition.
     if (isGuest) {
-      const remaining = fastMode ? guestQuickRemaining : guestCuratedRemaining;
+      const remaining = isFast ? guestQuickRemaining : guestCuratedRemaining;
       if (remaining <= 0) {
         setGuestExhaustedOpen(true);
         return;
@@ -3225,7 +3250,7 @@ ${html}
     // Client-side quota preflight. Server is still the source of truth
     // (HTTP 429 backstop) but a local short-circuit gives the user an
     // immediate, in-modal explanation instead of a network round-trip.
-    if (!ensureQuota(fastMode ? "quick_search" : "deep_search")) return;
+    if (!ensureQuota(isFast ? "quick_search" : "deep_search")) return;
 
     // Snapshot the current layout BEFORE we auto-expand panels + snap
     // the column ratios — Stop uses this to revert the user back to
@@ -3250,8 +3275,8 @@ ${html}
     // not on click, so abandoned-mid-search doesn't waste a credit.
     // The quota check above already guaranteed remaining > 0 for guests.
     if (isGuest) {
-      if (fastMode) useGuestQuotaStore.getState().incrementQuick();
-      else          useGuestQuotaStore.getState().incrementCurated();
+      if (isFast) useGuestQuotaStore.getState().incrementQuick();
+      else        useGuestQuotaStore.getState().incrementCurated();
     }
     // First search of this session flips the textarea into its compact
     // layout. Before this point, focusing / typing leaves the textarea at
@@ -3296,11 +3321,11 @@ ${html}
             intent_profile: selectedOption?.intent_profile || {},
           }
         : selectedOption || null,
-      fast_mode: fastMode,
-      // Pick the per-mode count. fastMode=true → Quick → paperCountQuick;
-      // fastMode=false → Curated → paperCountCurated. Each mode has its
+      fast_mode: isFast,
+      // Pick the per-mode count. isFast=true → Quick → paperCountQuick;
+      // isFast=false → Curated → paperCountCurated. Each mode has its
       // own slider in Settings (defaults 50 / 20).
-      paper_count: fastMode ? paperCountQuick : paperCountCurated,
+      paper_count: isFast ? paperCountQuick : paperCountCurated,
       sort_mode: sortMode,
       prefer_abstracts: preferAbstracts,
       strict_core_only: strictCoreOnly,
@@ -3404,7 +3429,7 @@ ${html}
               setStreamPapers(data.papers);
               setRetrievalCount(data.papers.length);
               setCandidateLimit(data.papers.length);
-              if (!fastMode) {
+              if (!isFast) {
                 setStartedAgents(prev => {
                   const s = new Set(prev);
                   s.add("evidence_mapper"); s.add("scholar");
@@ -3453,7 +3478,7 @@ ${html}
             } : null;
             const _histTitle = _slim?.final_search_query || _slim?.original_query || query.trim();
             const _histId = `pending-${Date.now()}`;
-            const _histEntry: HistoryEntry = { id: _histId, title: _histTitle, updated_at: new Date().toISOString(), entryType: "search", usedUnderstand: _usedUnderstand, isFast: fastMode, result: _slim, directionData: directionData || undefined };
+            const _histEntry: HistoryEntry = { id: _histId, title: _histTitle, updated_at: new Date().toISOString(), entryType: "search", usedUnderstand: _usedUnderstand, isFast, result: _slim, directionData: directionData || undefined };
             setHistoryList(prev => [_histEntry, ...prev.filter(e => !String(e.id).startsWith("pending-"))].slice(0, 50));
             setActiveHistoryId(_histId);
             // Authoritative refetch — backend writes history via `_write_history()`
@@ -3524,7 +3549,7 @@ ${html}
         const baseMsg = explainFetchError(error);
         // Deep mode runs for 3-5 min; connection drops are common on proxies with short idle
         // timeouts.  Surface a helpful message so the user knows to retry rather than reload.
-        const deepHint = !fastMode
+        const deepHint = !isFast
           ? " Deep analysis can take 3-5 min. If the connection was cut by a proxy, please run the search again."
           : "";
         setUiError(baseMsg + deepHint);
@@ -5034,7 +5059,19 @@ ${html}
                     const help  = switchToQuick ? "switch to Quick search" : "switch to Curated analysis";
                     return (
                       <button
-                        onClick={() => { setFastMode(switchToQuick); setTimeout(() => { void handleSearch(); }, 50); }}
+                        onClick={() => {
+                          // Eager ref sync — handleSearch reads
+                          // `fastModeRef.current`, so updating the ref
+                          // here BEFORE setTimeout means the queued
+                          // call runs in the new mode regardless of
+                          // whether React has committed the state
+                          // update yet. setFastMode is still called so
+                          // every render-time UI read flips at the
+                          // same time.
+                          fastModeRef.current = switchToQuick;
+                          setFastMode(switchToQuick);
+                          setTimeout(() => { void handleSearch(); }, 50);
+                        }}
                         {...helpProps(help)}
                         title={help}
                         className="stage-reveal flex items-center gap-1 rounded-xl border px-2.5 py-1 text-xs font-semibold transition-colors hover:brightness-110"
