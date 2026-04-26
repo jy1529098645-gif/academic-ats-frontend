@@ -6056,38 +6056,37 @@ ${html}
 
               {/* ── Paper Review module ─────────────────────────────────
                   Self-contained panel with its own state / streaming /
-                  agent log. Rendered in a scrollable flex child so long
-                  review letters stay inside the Lab column. */}
-              {labModule === "review" && (
-                <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
-                  <PaperReviewPanel />
-                </div>
-              )}
+                  agent log. Rendered as a flex child with display-toggle
+                  visibility instead of conditional mount: PaperReviewPanel
+                  stores draft text, file uploads, agent log, generated
+                  letter, and bundle in LOCAL component state — unmounting
+                  it on tab switch (the previous behaviour) wiped all of
+                  that and the user came back to a blank form. Keeping it
+                  mounted with `display: none` when the other tab is
+                  active preserves every byte they typed. The cost is
+                  cheap: an idle PaperReviewPanel renders a few hundred
+                  DOM nodes and listens to nothing — no streaming, no
+                  intervals — so the always-mounted footprint is
+                  essentially zero. */}
+              <div
+                className="flex-1 min-h-0 overflow-y-auto thin-scrollbar"
+                style={{ display: labModule === "review" ? "block" : "none" }}
+              >
+                <PaperReviewPanel />
+              </div>
 
-              {/* ── Synthesis Lab content — gated only when nothing has happened yet.
-                  Once the user has added papers, typed core argument, added points,
-                  uploaded files, or generated output, the Lab stays open even if
-                  the current search has no results — their in-progress work is preserved. */}
+              {/* ── Synthesis Lab content — always renders the full form.
+                  Earlier revisions hid the editor until the user had run a
+                  search OR accumulated lab state, on the assumption that
+                  the Lab was only useful with papers attached. Reality:
+                  Personal Statement, Resume, and the essay/proposal types
+                  produce excellent output from the user's own
+                  fields alone — papers are an OPTIONAL reference layer.
+                  Removing the gate so the user can land on the Lab and
+                  start writing immediately (matches the user's ask:
+                  "lab展开后显示完整功能而不是必须要先run search"). */}
               {labModule === "synthesis" && (
               <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
-                {(() => {
-                  const hasLabState =
-                    labRefs.length > 0 ||
-                    labUserFiles.length > 0 ||
-                    labCoreArg.trim().length > 0 ||
-                    labPoints.some(p => p.trim().length > 0) ||
-                    !!labResult ||
-                    labRuns.length > 0 ||
-                    labGenerating;
-                  const shouldGate = displayedPapers.length === 0 && !hasLabState;
-                  return shouldGate;
-                })() ? (
-                  <div className="flex min-h-[20rem] h-full items-center justify-center px-6 text-center">
-                    <div className="max-w-[22rem] text-xs leading-relaxed text-slate-500">
-                      Run a search first — writing tools unlock when papers arrive.
-                    </div>
-                  </div>
-                ) : (
                 <div className="px-4 py-4 space-y-4">
 
                   {/* References — compact header + tighter empty state for a denser top of Lab. */}
@@ -6769,6 +6768,65 @@ ${html}
                         {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
 
+                      {/* Resume → Personal Statement chain. Shown only after a
+                          finished Resume run. Clicking re-routes the Lab into
+                          Personal Statement mode and pre-fills the freshly
+                          generated resume markdown into the PS form's
+                          `resume_text` reference field, so the writer agent
+                          can use the user's actual CV (with the current
+                          dates / titles / projects) as a factual anchor
+                          when drafting their personal statement. The user
+                          still has to fill in PS-specific fields
+                          (target_program, future_goals, etc.) — but the
+                          one-click handoff means they don't have to
+                          re-paste their resume. */}
+                      {!labGenerating && labOutputType === "resume" && displayedLabResult && (
+                        <div className="mt-3 rounded-xl border px-3 py-2.5 flex items-center gap-3"
+                          style={{
+                            borderColor:     "var(--ats-border-accent)",
+                            backgroundColor: "var(--ats-bg-accent-soft)",
+                          }}
+                        >
+                          <Sparkles size={14} className="shrink-0" style={{ color: "var(--ats-fg-accent)" }} />
+                          <div className="flex-1 min-w-0 text-xs leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
+                            <span className="font-semibold" style={{ color: "var(--ats-fg-primary)" }}>Next:</span>{" "}
+                            apply for a program with this resume? The writer can use it as a factual reference.
+                          </div>
+                          <button
+                            onClick={() => {
+                              // Hand off to Personal Statement: switch the
+                              // output type and copy the just-generated
+                              // resume into the PS form's resume_text
+                              // reference field. We DON'T clear the user's
+                              // existing PS state if any — pre-filling is
+                              // additive so the user can keep their PS
+                              // drafts. We also leave labResult intact so
+                              // the user can still scroll back / download
+                              // the resume from labRuns history if needed.
+                              setLabExtras(prev => ({ ...prev, resume_text: displayedLabResult }));
+                              setLabOutputType("personal_statement");
+                              // Clear inline result + bring the form back
+                              // into focus so the user lands on the PS
+                              // input fields instead of the old resume
+                              // output (which is still saved in labRuns).
+                              setLabResult("");
+                              setLabAgentLog([]);
+                              setLabReviewerNotes(null);
+                              setLabViewingId(null);
+                            }}
+                            className="shrink-0 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors hover:brightness-110"
+                            style={{
+                              borderColor:     "var(--ats-border-accent)",
+                              backgroundColor: "var(--ats-fg-accent)",
+                              color:           "#ffffff",
+                            }}
+                          >
+                            Write a Personal Statement
+                            <ArrowRight size={12} className="shrink-0" />
+                          </button>
+                        </div>
+                      )}
+
                       {/* ── Consolidated download footer ─────────────────────
                           All download controls live below the article text so
                           the reading flow is: title → article → actions. Two
@@ -7036,7 +7094,6 @@ ${html}
                   })()}
 
                 </div>
-                )}
               </div>
               )}
             </aside>
