@@ -59,9 +59,15 @@
 @media (max-width: 1024px) { :root { --sprite-zoom-comp: 1.923; } }   /* 1 / 0.52 */
 @media (max-width: 820px)  { :root { --sprite-zoom-comp: 2.222; } }   /* 1 / 0.45 */
 
-.sprite-voice  { font-size: calc(22px * var(--sprite-zoom-comp)); line-height: 1.35; }
-.sprite-bubble { font-size: calc(15px * var(--sprite-zoom-comp)); line-height: 1.3; }
-.sprite-badge  { font-size: calc(13px * var(--sprite-zoom-comp)); line-height: 1.3; }
+/* Sprite voice / bubble / badge — px-based with a media-query-driven
+   zoom compensator (see --sprite-zoom-comp). Base values bumped 1.25 ×
+   from the previous 22 / 15 / 13 to match the global rem rescale done
+   below (html { font-size: 20px }). The zoom-comp factor still applies
+   on top, so the responsive shrink-on-narrow-viewport behaviour is
+   preserved exactly — only the comfortable-Mac baseline moves up. */
+.sprite-voice  { font-size: calc(28px * var(--sprite-zoom-comp)); line-height: 1.35; }
+.sprite-bubble { font-size: calc(19px * var(--sprite-zoom-comp)); line-height: 1.3; }
+.sprite-badge  { font-size: calc(16px * var(--sprite-zoom-comp)); line-height: 1.3; }
 
 /* Smaller, lower-emphasis bubble for reference content (Find Angles
    results — directions + sub-options + custom-query suggestion). These
@@ -71,7 +77,7 @@
      · smaller font (~12 px visible)
      · multi-line allowed (no truncation — show full content)
      · muted background tint                                              */
-.sprite-bubble-soft { font-size: calc(12.5px * var(--sprite-zoom-comp)); line-height: 1.35; }
+.sprite-bubble-soft { font-size: calc(15.5px * var(--sprite-zoom-comp)); line-height: 1.35; }
 
 /* ── Recommended-term chips ────────────────────────────────────────────────
    Transform-only emphasis so hover / selection NEVER reflows the row.
@@ -155,11 +161,19 @@
    sub-12px arbitrary class to 12 CSS px so no text renders smaller than the
    `text-xs` baseline. Admin / debug surfaces that genuinely need denser
    labels can opt out by using the explicit `.text-tiny` escape hatch. */
+/* Hi-DPI floor coercion: tiny px-based labels (text-[9px] / text-[10px] /
+   text-[11px], ~360 occurrences) get pinned to a higher floor that
+   matches the new rem-baseline. text-xs at the new 20 px root resolves
+   to 15 px (0.75 × 20), so the floor here lands at the same number —
+   no visual gap between rem-based "tiny" text and arbitrary px-based
+   "tiny" text. Was 12 px under the old 16 px root; bumped to keep the
+   `text-xs` ↔ `text-[10px]` parity intact. */
 .text-\[9px\],
 .text-\[9\.5px\],
 .text-\[10px\],
-.text-\[11px\] {
-  font-size: 12px !important;
+.text-\[11px\],
+.text-\[12px\] {
+  font-size: 15px !important;
 }
 
 /* ── Zoom canvas fill ───────────────────────────────────────────────────────
@@ -174,6 +188,32 @@
    Mint day base so a first-paint before hydration still looks on-theme. */
 html, body {
   background-color: var(--ats-bg-base, #E4F1EA);
+}
+
+/* ── Global font-size baseline ─────────────────────────────────────────────
+   The browser default of 16 px reads small on hi-DPI Mac displays where
+   logical pixels map to physical pixels at a 2x ratio — text that's
+   "comfortable" on a 1080p Windows panel feels cramped on a 14" Retina
+   MacBook. Bumping the root to 20 px scales every rem-based dimension
+   in the app (Tailwind's text-* tier classes, padding/margin/gap utilities,
+   line-heights, gap-X spacing) by 1.25 × in lockstep, which lands the
+   visible type at roughly "+2 Tailwind tiers" — exactly what `两号` reads
+   as in the size scale (text-xs → text-base ≈ 1.33 ×; we round down to
+   1.25 × so layouts breathe without anything overflowing).
+
+   Things this does NOT touch:
+     · Hardcoded `text-[Npx]` arbitrary classes (kept explicit on purpose
+       in dense admin / debug surfaces) — but the floor coercion below
+       was bumped from 12 px → 15 px so any "tiny label" still scales
+       to roughly the same delta as the rem-based classes.
+     · Sprite font sizes (`.sprite-voice` / `.sprite-bubble` / etc.) which
+       use a px × media-query-zoom-comp formula. Those base values were
+       individually bumped to match the 1.25 × scale.
+     · Fixed pixel dimensions like `h-[68px]` (only a handful in the
+       codebase) — these stay at their original size, which keeps icon
+       chrome consistent. */
+html {
+  font-size: 20px;
 }
 
 :root {
