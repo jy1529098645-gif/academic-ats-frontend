@@ -1562,6 +1562,17 @@ export default function HomePage() {
   // mounts / unmounts the banner wrapper so our stage-reveal fade fires
   // on every reveal rather than just the first one.
   const [announcementsVisible, setAnnouncementsVisible] = useState(false);
+  // Auto-sync the announcement banner with the workspace mode: open it
+  // when the user enters search mode (hasRunSearch flips true) and
+  // collapse it again when they Start Over (back to false). Inside
+  // search mode the megaphone toggle still works manually — this only
+  // fires on the boundary transition. Implementation note: declared
+  // here, BEFORE handleStartOver / handleSearch, because the linter
+  // wants the effect's deps + body in scope; the body only writes,
+  // never reads from those handlers, so the order is fine.
+  useEffect(() => {
+    setAnnouncementsVisible(hasRunSearch);
+  }, [hasRunSearch]);
   const [msgInput, setMsgInput] = useState("");
   // Two send modes, both post to the public ticker. SIGNED includes the
   // user's email local-part next to the message; ANONYMOUS hides the
@@ -5982,9 +5993,24 @@ ${html}
                   <PenLine size={14} />
                   <span>Synthesis Lab</span>
                   {labRefs.length > 0 && (
-                    <span className={`ml-0.5 rounded-full px-1.5 text-[10px] font-bold ${
-                      labModule === "synthesis" ? "bg-slate-700/70 text-slate-200" : "bg-slate-800/60 text-slate-400"
-                    }`}>{labRefs.length}</span>
+                    // Badge uses --ats-* tokens so contrast holds across
+                    // every theme. Previous slate-* classes had no day-
+                    // mode override for the /70 alpha variant, which made
+                    // the digit render near-black on a desaturated dark
+                    // green button (the screenshotted bug). The
+                    // bg-accent-soft / fg-accent pair is the same one
+                    // used for chips elsewhere in the app — soft tinted
+                    // bg + saturated accent text reads cleanly on every
+                    // palette (cool blue, warm amber, emerald, pink…)
+                    // and passes WCAG AA on the panel backgrounds we
+                    // ship.
+                    <span
+                      className="ml-0.5 rounded-full px-1.5 text-[10px] font-bold tabular-nums"
+                      style={{
+                        backgroundColor: "var(--ats-bg-accent-soft)",
+                        color:           "var(--ats-fg-accent)",
+                      }}
+                    >{labRefs.length}</span>
                   )}
                 </button>
               </div>
@@ -7391,7 +7417,17 @@ ${html}
               <span className="relative text-sm font-semibold text-slate-200 pr-3">
                 Search History
                 {historyList.length > 0 && (
-                  <span className="absolute -top-1.5 right-0 min-w-[14px] text-center text-[8px] font-normal leading-tight bg-slate-700 text-slate-300 rounded-full px-0.5">
+                  // Theme-aware count badge — see the Synthesis Lab badge
+                  // for the same rationale. bg-slate-700 / text-slate-300
+                  // both end up as light gray under [data-tone="day"]
+                  // overrides, making the digit invisible in day themes.
+                  <span
+                    className="absolute -top-1.5 right-0 min-w-[14px] text-center text-[8px] font-bold leading-tight rounded-full px-0.5 tabular-nums"
+                    style={{
+                      backgroundColor: "var(--ats-bg-accent-soft)",
+                      color:           "var(--ats-fg-accent)",
+                    }}
+                  >
                     {historyList.length}
                   </span>
                 )}
