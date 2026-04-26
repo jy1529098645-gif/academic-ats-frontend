@@ -4784,42 +4784,39 @@ ${html}
                     </button>
                   )}
 
-                  {/* Re-run mode toggle — appears once a search has run
-                      so the user can swap modes and re-fire without
-                      hitting Start over. The currently-active mode gets
-                      the accent border; clicking the OTHER mode flips
-                      fastMode and re-invokes handleSearch. Hidden while
-                      a search is mid-flight (the Stop button is the
-                      affordance there). */}
-                  {introStage === "full" && hasRunSearch && !isSubmitting && (
-                    <div className="stage-reveal inline-flex items-center rounded-xl border p-0.5 text-xs font-semibold"
-                         style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}>
+                  {/* Re-run-in-the-OTHER-mode button. Shown once a search
+                      has run so the user can swap modes and re-fire
+                      without hitting Start over. We render only ONE
+                      button — the inactive mode — because the active
+                      mode is already what the visible result represents:
+                      a "Quick" button next to a Quick result is just
+                      noise. Showing only the affordance the user can act
+                      on (the OTHER mode) keeps the bar lean and makes
+                      the click target unambiguous. Hidden while a search
+                      is mid-flight (Stop button owns that slot). */}
+                  {introStage === "full" && hasRunSearch && !isSubmitting && (() => {
+                    // `fastMode` reflects which mode produced the visible
+                    // result. The button below switches to the OTHER one.
+                    const switchToQuick = !fastMode;
+                    const Icon  = switchToQuick ? Zap : FlaskConical;
+                    const label = switchToQuick ? "Quick" : "Curated";
+                    const help  = switchToQuick ? "switch to Quick search" : "switch to Curated analysis";
+                    return (
                       <button
-                        onClick={() => { setFastMode(true); setTimeout(() => { void handleSearch(); }, 50); }}
-                        {...helpProps("run Quick search")}
-                        title="Re-run as Quick Search"
-                        className="flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors"
+                        onClick={() => { setFastMode(switchToQuick); setTimeout(() => { void handleSearch(); }, 50); }}
+                        {...helpProps(help)}
+                        title={help}
+                        className="stage-reveal flex items-center gap-1 rounded-xl border px-2.5 py-1 text-xs font-semibold transition-colors hover:brightness-110"
                         style={{
-                          backgroundColor: fastMode ? "var(--ats-bg-accent-soft)" : "transparent",
-                          color:           fastMode ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                          borderColor:     "var(--ats-border-subtle)",
+                          backgroundColor: "var(--ats-bg-panel)",
+                          color:           "var(--ats-fg-muted)",
                         }}
                       >
-                        <Zap size={12} className="shrink-0" /><span>Quick</span>
+                        <Icon size={12} className="shrink-0" /><span>{label}</span>
                       </button>
-                      <button
-                        onClick={() => { setFastMode(false); setTimeout(() => { void handleSearch(); }, 50); }}
-                        {...helpProps("run Curated analysis")}
-                        title="Re-run as Curated Analysis"
-                        className="flex items-center gap-1 rounded-lg px-2.5 py-1 transition-colors"
-                        style={{
-                          backgroundColor: !fastMode ? "var(--ats-bg-accent-soft)" : "transparent",
-                          color:           !fastMode ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
-                        }}
-                      >
-                        <FlaskConical size={12} className="shrink-0" /><span>Curated</span>
-                      </button>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               </div>
                 );
