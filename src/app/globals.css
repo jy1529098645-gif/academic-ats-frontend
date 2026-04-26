@@ -436,36 +436,36 @@ body {
    Without a transition, some components (buttons with Tailwind's 150 ms
    transition-colors) animate faster than unstyled surfaces, which makes
    the page look like it "flashes bright then settles". The rule below
-   attaches a uniform 400 ms ease on color / background / border to every
-   element so the whole page interpolates in lockstep — no partial states.
+   attaches a uniform ease on color / background / border to every
+   element ONLY while the theme change is in flight, so the whole page
+   interpolates in lockstep — no partial states, and no always-on
+   per-element transition bookkeeping outside the change window.
 
-   Scope: only the three long properties we actually care about for theme
-   changes. We don't touch `transition-property` globally (that would
-   stomp on hover animations elsewhere); we just *add* durations for
-   these properties via a shorthand. */
+   Performance history: an earlier revision attached a permanent
+   `transition-property: color, background-color, border-color, fill,
+   stroke, box-shadow` rule to `*, *::before, *::after`. Two problems:
+     1. The CSS engine had to maintain six transitions on every element
+        in the DOM (1000+ in the workspace) at all times, even when no
+        theme change was happening.
+     2. When the theme DID flip, every element with a non-trivial
+        box-shadow forced GPU compositor work for the entire 400ms
+        animation — the dominant cost of the perceived "lag".
+   Neither shadow nor fill/stroke is actually tied to a theme token in
+   our palette (verified via grep — no `var(--ats-*)` references in
+   any rendered shadow / fill / stroke), so transitioning them was
+   pure waste. We now scope the rule to the gated `theme-transitioning`
+   window and the three color properties that actually change. */
+
 /* Theme cross-fade duration is a user preference (Settings → Behaviour →
    Theme transition). The prefs store writes `--ats-theme-transition-ms`
    on the <main> element at mount + on slider change. The fallback value
    here matches DEFAULT_THEME_TRANSITION_MS in prefs-store.ts so the
-   first paint (before hydration) uses the same 400ms.
+   first paint (before hydration) uses the same 400ms. */
 
-   Baseline rule: every element gets a color-family transition at the
-   theme duration. This covers plain elements that don't carry any
-   explicit Tailwind `transition-*` class. */
-*,
-*::before,
-*::after {
-  transition-property: color, background-color, border-color, fill, stroke, box-shadow;
-  transition-duration: var(--ats-theme-transition-ms, 400ms);
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-}
-/* Interaction-scoped override: Tailwind's `transition-colors` etc.
-   ship with a 150ms duration so hovers/focuses feel snappy. That's
-   the RIGHT default for interactions but WRONG during a theme flip —
-   a 150ms colour change next to a 400ms neighbour reads as "some
-   elements swap instantly, others fade". We keep the snappy default
-   here, then the theme-transitioning override below forces uniformity
-   ONLY while a theme change is in flight. */
+/* Tailwind's `.transition-colors` etc. default to 150ms. We keep that
+   snappy default for interactions; the gated rule below temporarily
+   overrides it ONLY during a theme flip so buttons don't fade faster
+   than their surrounding panels. */
 .transition,
 .transition-colors,
 .transition-all,
@@ -478,21 +478,16 @@ body {
    `theme-transitioning` class (added by page.tsx on every
    themeMode/dayThemeId/nightThemeId change and removed after the
    duration elapses), FORCE every element to the theme duration for
-   color, bg, border, fill, stroke — overriding Tailwind's 150ms
-   utility. Scoped to color-family properties only so layout / transform
-   hover animations are NOT slowed down. Wrapped in `html.` so the
-   specificity reliably beats Tailwind's class selectors.
-
-   Why this is necessary: universal `*` rule says 400ms but
-   Tailwind-compiled `.transition-colors` says 150ms. Class specificity
-   wins, so the ~200+ buttons in the app change palette in 150ms while
-   the surrounding surfaces change in 400ms, creating the "some parts
-   instantly, others slowly" effect the user reported. This override
-   brings them in lockstep for the duration of the theme swap only. */
+   color / bg / border. This is the ONLY universal-selector
+   transition we ship; outside the change window, only Tailwind-
+   decorated elements transition (at 150ms). Property list trimmed to
+   the three that actually change between themes — dropping
+   box-shadow / fill / stroke cuts the dominant GPU compositor cost
+   that made the theme switch feel laggy on dense pages. */
 html.theme-transitioning *,
 html.theme-transitioning *::before,
 html.theme-transitioning *::after {
-  transition-property: color, background-color, border-color, fill, stroke, box-shadow !important;
+  transition-property: color, background-color, border-color !important;
   transition-duration: var(--ats-theme-transition-ms, 400ms) !important;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1) !important;
 }

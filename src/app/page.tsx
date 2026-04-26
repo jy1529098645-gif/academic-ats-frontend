@@ -1024,9 +1024,13 @@ export default function HomePage() {
       return;
     }
     document.documentElement.classList.add("theme-transitioning");
-    // +60 ms buffer past the configured duration so the class is still
-    // present when the final frame paints.
-    const hold = themeTransitionMs + 60;
+    // +20 ms buffer past the configured duration — just enough headroom
+    // for the final frame to paint before we strip the override class.
+    // Was +60 ms; the reduction tightens the tail so Tailwind's snappy
+    // 150 ms transition-* utilities re-take effect sooner after the
+    // theme settles, and any browser-internal cleanup (rule recalc /
+    // composited-layer eviction) starts ~40 ms earlier.
+    const hold = themeTransitionMs + 20;
     const t = window.setTimeout(() => {
       document.documentElement.classList.remove("theme-transitioning");
     }, hold);
