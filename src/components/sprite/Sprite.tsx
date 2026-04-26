@@ -160,6 +160,39 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
   );
   const isFocused = (key: string) => focusedKey === key;
 
+  // Per-mode descriptions — single source of truth, reused for the
+  // mouse hover-help (`hh()` factory below) AND the keyboard-focus
+  // surface (the useEffect underneath). Keeps the two paths from
+  // drifting out of sync.
+  const MODE_HELP_QUICK   = "Scan at scale for trends";
+  const MODE_HELP_CURATED = "Select for quality and reliability";
+
+  // Keyboard-focus → hover-help bridge. Mouse hover already pipes the
+  // mode description through `hh()` below, but keyboard arrow nav (←/→)
+  // only changed `focusedKey` — the user got a focus ring but no
+  // description in the sprite voice slot. Now: while the focus ring is
+  // visible (buttonStep === 2 → `showButtonFocusRing`), whichever mode
+  // is keyboard-focused pushes its description into the hover-help
+  // store, so the user sees what Enter is about to fire. We only do
+  // this at step 2 because step 1's voice line is already the
+  // "Quick or Curated? Enter again to pick" prompt — overwriting that
+  // at step 1 would lose context; at step 2 the user has committed to
+  // firing one of the modes, so the description is the right thing
+  // to surface.
+  useEffect(() => {
+    if (!showButtonFocusRing) {
+      // Ring cleared (Esc back-out or buttons hidden). Drop our text
+      // ONLY if the store still holds one of the two we wrote, so we
+      // don't fight a different surface (e.g. a layout button hover)
+      // that may have replaced our value in the meantime.
+      useHoverHelpStore.getState().clearIfMatches(MODE_HELP_QUICK);
+      useHoverHelpStore.getState().clearIfMatches(MODE_HELP_CURATED);
+      return;
+    }
+    if (focusedKey === "mode-quick")        useHoverHelpStore.getState().setText(MODE_HELP_QUICK);
+    else if (focusedKey === "mode-curated") useHoverHelpStore.getState().setText(MODE_HELP_CURATED);
+  }, [focusedKey, showButtonFocusRing]);
+
   useImperativeHandle(ref, () => ({
     hasBubbles: () => actionables.length > 0,
     moveFocus: (delta: 1 | -1) => {
@@ -319,8 +352,8 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
       >
         <button
           onClick={() => onStartSearch("quick")}
-          title="Sweep ~50 papers in seconds — survey trends and find gaps"
-          {...hh("Quick Search — sweeps ~50 papers in seconds. Best for surveying a field, spotting trends, and finding research gaps.")}
+          title={MODE_HELP_QUICK}
+          {...hh(MODE_HELP_QUICK)}
           data-focused={(showButtonFocusRing && isFocused("mode-quick")) || undefined}
           tabIndex={showSearchModeButtons ? 0 : -1}
           className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
@@ -335,8 +368,8 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
         </button>
         <button
           onClick={() => onStartSearch("curated")}
-          title="Multi-agent peer-reviewed evidence chains — first results in ~1 min"
-          {...hh("Curated Analysis — four agents debate sources, build evidence chains, and flag weak claims. First results land in about a minute.")}
+          title={MODE_HELP_CURATED}
+          {...hh(MODE_HELP_CURATED)}
           data-focused={(showButtonFocusRing && isFocused("mode-curated")) || undefined}
           tabIndex={showSearchModeButtons ? 0 : -1}
           className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"

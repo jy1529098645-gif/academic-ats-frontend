@@ -1228,12 +1228,16 @@ export default function HomePage() {
   // of this section.
 
   const [fastMode, setFastMode] = useState(true);
-  // 50 is the Quick-mode sweet spot — wide enough to spot trends and
-  // research gaps across a field, narrow enough to ship in seconds.
-  // Curated users typically tune this down in Search Settings (10–20)
-  // because each paper costs a multi-agent pass; the localStorage
-  // hydration below preserves whatever they last picked.
-  const [paperCount, setPaperCount] = useState(50);
+  // Two paper-count settings — one per mode. Quick defaults to 50 (wide
+  // sweep, seconds to ship); Curated defaults to 20 (each paper costs a
+  // multi-agent pass, so smaller pools keep latency reasonable). Settings
+  // exposes both as separate inputs so the user can independently tune
+  // them. handleSearch reads whichever one matches the active fastMode.
+  // The legacy `paperCount` localStorage key is migrated below: if a user
+  // had previously tuned a single value, that value seeds BOTH new fields
+  // so they don't lose their preference.
+  const [paperCountQuick,   setPaperCountQuick]   = useState(50);
+  const [paperCountCurated, setPaperCountCurated] = useState(20);
   const [sortMode, setSortMode] = useState("Relevance score");
   const [preferAbstracts, setPreferAbstracts] = useState(true);
   const [strictCoreOnly, setStrictCoreOnly] = useState(false);
@@ -1254,7 +1258,16 @@ export default function HomePage() {
       if (raw) {
         const p = JSON.parse(raw);
         if (typeof p.fastMode === "boolean")          setFastMode(p.fastMode);
-        if (Number.isFinite(p.paperCount))            setPaperCount(Math.max(3, Math.min(500, Math.round(p.paperCount))));
+        // Prefer the new per-mode keys; fall back to the legacy `paperCount`
+        // (single shared value) so a returning user keeps their tuned count
+        // on both modes until they explicitly adjust one of them.
+        const _legacyCount = Number.isFinite(p.paperCount)
+          ? Math.max(3, Math.min(500, Math.round(p.paperCount)))
+          : null;
+        if (Number.isFinite(p.paperCountQuick))       setPaperCountQuick(Math.max(3, Math.min(500, Math.round(p.paperCountQuick))));
+        else if (_legacyCount !== null)               setPaperCountQuick(_legacyCount);
+        if (Number.isFinite(p.paperCountCurated))     setPaperCountCurated(Math.max(3, Math.min(500, Math.round(p.paperCountCurated))));
+        else if (_legacyCount !== null)               setPaperCountCurated(_legacyCount);
         if (typeof p.sortMode === "string")           setSortMode(p.sortMode);
         if (typeof p.preferAbstracts === "boolean")   setPreferAbstracts(p.preferAbstracts);
         if (typeof p.strictCoreOnly === "boolean")    setStrictCoreOnly(p.strictCoreOnly);
@@ -1271,11 +1284,11 @@ export default function HomePage() {
     if (!_prefsHydratedRef.current) return;           // don't overwrite before hydration runs
     try {
       localStorage.setItem("ats-search-prefs", JSON.stringify({
-        fastMode, paperCount, sortMode, preferAbstracts, strictCoreOnly,
+        fastMode, paperCountQuick, paperCountCurated, sortMode, preferAbstracts, strictCoreOnly,
         openAccessOnly, sourceFilters, useYearRange, yearStart, yearEnd,
       }));
     } catch {}
-  }, [fastMode, paperCount, sortMode, preferAbstracts, strictCoreOnly, openAccessOnly, sourceFilters, useYearRange, yearStart, yearEnd]);
+  }, [fastMode, paperCountQuick, paperCountCurated, sortMode, preferAbstracts, strictCoreOnly, openAccessOnly, sourceFilters, useYearRange, yearStart, yearEnd]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -3183,7 +3196,10 @@ ${html}
           }
         : selectedOption || null,
       fast_mode: fastMode,
-      paper_count: paperCount,
+      // Pick the per-mode count. fastMode=true → Quick → paperCountQuick;
+      // fastMode=false → Curated → paperCountCurated. Each mode has its
+      // own slider in Settings (defaults 50 / 20).
+      paper_count: fastMode ? paperCountQuick : paperCountCurated,
       sort_mode: sortMode,
       prefer_abstracts: preferAbstracts,
       strict_core_only: strictCoreOnly,
@@ -4821,18 +4837,48 @@ ${html}
             >
               <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-2" onClick={() => setSettingsOpen(false)}><SlidersHorizontal size={14} /><span>Settings & Controls</span><ChevronDown size={12} className="ml-auto rotate-180" /></div>
               <div className="mt-2 space-y-2.5">
-                {/* Row 1: count + sort */}
+                {/* Row 1a: per-mode paper counts (Quick + Curated, side by side).
+                    Each mode has its own slot so the user can keep Quick set
+                    high (broad sweep) while keeping Curated low (deep but
+                    bounded latency). The active mode's input is highlighted
+                    so it's obvious which one a Run will actually use. */}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-400">Paper count</label>
-                    <input type="number" min={3} max={500} value={paperCount} onChange={(e) => setPaperCount(Number(e.target.value))} className="w-full rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500" />
+                    <label className="mb-1 block text-xs font-medium text-slate-400">Quick — paper count</label>
+                    <input
+                      type="number"
+                      min={3}
+                      max={500}
+                      value={paperCountQuick}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) setPaperCountQuick(Math.max(3, Math.min(500, Math.round(n))));
+                      }}
+                      className={`w-full rounded-lg border bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500 ${fastMode ? "border-blue-500/60" : "border-slate-700"}`}
+                    />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-400">Sort mode</label>
-                    <select value={sortMode} onChange={(e) => setSortMode(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500">
-                      {SORT_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
-                    </select>
+                    <label className="mb-1 block text-xs font-medium text-slate-400">Curated — paper count</label>
+                    <input
+                      type="number"
+                      min={3}
+                      max={500}
+                      value={paperCountCurated}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) setPaperCountCurated(Math.max(3, Math.min(500, Math.round(n))));
+                      }}
+                      className={`w-full rounded-lg border bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500 ${!fastMode ? "border-blue-500/60" : "border-slate-700"}`}
+                    />
                   </div>
+                </div>
+                {/* Row 1b: sort mode (full width — keeps the layout clean
+                    now that count occupies the row above). */}
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-400">Sort mode</label>
+                  <select value={sortMode} onChange={(e) => setSortMode(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500">
+                    {SORT_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+                  </select>
                 </div>
                 {/* Row 2: checkboxes */}
                 <div className="flex flex-wrap gap-2">
@@ -7237,22 +7283,44 @@ ${html}
                         })}
                       </div>
                     </div>
-                    {/* Default paper count */}
+                    {/* Per-mode default paper counts. Two slots so the user
+                        can tune Quick (broad scan) and Curated (deep dive)
+                        independently — each mode reads its own value when
+                        Run fires. The active mode's input is highlighted
+                        with the accent border so the user can see at a
+                        glance which value will be used on the next Run. */}
                     <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
                       <div>
-                        <p className="text-sm font-semibold text-slate-200">Default paper count</p>
-                        <p className="text-[10px] text-slate-500 mt-0.5">Papers returned per search (3–500)</p>
+                        <p className="text-sm font-semibold text-slate-200">Quick — paper count</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">How many papers Quick Search sweeps (3–500)</p>
                       </div>
                       <input
                         type="number"
                         min={3}
                         max={500}
-                        value={paperCount}
+                        value={paperCountQuick}
                         onChange={(e) => {
                           const n = Number(e.target.value);
-                          if (Number.isFinite(n)) setPaperCount(Math.max(3, Math.min(500, Math.round(n))));
+                          if (Number.isFinite(n)) setPaperCountQuick(Math.max(3, Math.min(500, Math.round(n))));
                         }}
-                        className="w-20 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums"
+                        className={`w-20 rounded-lg border bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums ${fastMode ? "border-blue-500/60" : "border-slate-700"}`}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-200">Curated — paper count</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">How many papers each Curated run analyses (3–500)</p>
+                      </div>
+                      <input
+                        type="number"
+                        min={3}
+                        max={500}
+                        value={paperCountCurated}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) setPaperCountCurated(Math.max(3, Math.min(500, Math.round(n))));
+                        }}
+                        className={`w-20 rounded-lg border bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums ${!fastMode ? "border-blue-500/60" : "border-slate-700"}`}
                       />
                     </div>
                     {/* Fast mode indicator */}
