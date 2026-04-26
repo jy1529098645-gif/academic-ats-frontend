@@ -3914,8 +3914,17 @@ function ActivityFeed({ rows }: { rows: ActivityEntry[] }) {
     deep_read:       "EVIDENCE CHAIN",
     evidence_chain:  "EVIDENCE CHAIN",
   };
+  // No own scroll container — the parent at the call site already wraps
+  // this in `max-h-[420px] overflow-y-auto thin-scrollbar`. Stacking two
+  // overflow-y-auto containers (inner max-h-96 = 528 px at 22 px root,
+  // outer max-h-[420px]) made BOTH render their own scrollbar once the
+  // feed grew past ~420 px (the user-reported "双 scrollbar"). Keeping
+  // a single scroller — the parent's — is the bug-free path. If a
+  // future caller wants to use ActivityFeed without an outer max-h,
+  // they should add their OWN overflow wrapper at the call site rather
+  // than pushing it back inside the component.
   return (
-    <div className="max-h-96 overflow-y-auto thin-scrollbar pr-1 space-y-1">
+    <div className="space-y-1">
       {rows.map(r => {
         const color = ACTION_COLOR[r.action] ?? "#64748b";
         const label = ACTION_LABEL[r.action] ?? r.action.replace(/_/g, " ").toUpperCase();
