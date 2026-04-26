@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { forwardRef, memo, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import { FlaskConical, Zap } from "lucide-react";
 
 /** Imperative handle exposed to parent so the textarea's onKeyDown can
@@ -76,7 +76,14 @@ export type SpriteProps = {
  * bubble-style state is gone; the sprite is a controlled view + a
  * thin event surface.
  */
-export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props, ref) {
+// memo + forwardRef — page.tsx re-renders on every keystroke, panel
+// toggle, search-progress chunk, etc. Without this wrapper Sprite (and
+// its 12 chip buttons) follow that churn. The parent passes stable
+// handlers via `useStableCallback`, so a default shallow-equality memo
+// is enough — Sprite skips the render whenever the props it actually
+// reads (query, introStage, hasRunSearch, message, hoverHelp, …) are
+// referentially equal to the previous pass.
+const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props, ref) {
   const {
     query, introStage, hasRunSearch, message,
     hoverHelp, recommendedTerms, buttonStep,
@@ -420,4 +427,6 @@ export const Sprite = forwardRef<SpriteHandle, SpriteProps>(function Sprite(prop
     </div>
   );
 });
-Sprite.displayName = "Sprite";
+_SpriteImpl.displayName = "Sprite";
+
+export const Sprite = memo(_SpriteImpl);

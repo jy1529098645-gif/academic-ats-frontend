@@ -1,7 +1,11 @@
 "use client";
 
 import ReactMarkdown from "react-markdown";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback, useDeferredValue, useEffect, useLayoutEffect,
+  useMemo, useRef, useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import { PaperCharts } from "./charts";
 import { supabase } from "@/lib/supabase/client";
@@ -256,6 +260,34 @@ function getDocumentZoom(): number {
 function getVisualVH(): number {
   if (typeof window === "undefined") return 0;
   return window.innerHeight / getDocumentZoom();
+}
+
+// ── useStableCallback ────────────────────────────────────────────────────────
+// Returns a callback whose IDENTITY never changes across renders, but whose
+// BODY always points to the latest function passed in. Lets us hand stable
+// references down to React.memo'd children (the Sprite, paper cards, etc.)
+// without forcing those children to skip the latest closure-captured state.
+//
+// This is the "useEffectEvent" pattern from the React RFC (still WIP in
+// stable React as of 19.x). We hand-roll it here so the rest of the file
+// can stop fighting the exhaustive-deps lint rule for handlers that
+// transitively depend on every piece of workspace state.
+// `any` here is intentional and safe: we want this helper to accept ANY
+// function shape and return a same-shaped wrapper, which is exactly what
+// `<T extends (...args: any[]) => any>` expresses. Constraining to
+// `unknown[]` would make TS reject concrete signatures like
+// `(mode: "quick" | "curated") => void` because unknown isn't assignable
+// to the parameter literal type. The body never inspects the args, so
+// there's no runtime risk to widening the constraint here.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function useStableCallback<T extends (...args: any[]) => any>(fn: T): T {
+  const ref = useRef(fn);
+  // useLayoutEffect (not useEffect) so the ref is updated BEFORE child
+  // commit runs — without this, a memo'd child clicking through to the
+  // ref on its first render would invoke the stale function.
+  useLayoutEffect(() => { ref.current = fn; });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return useCallback(((...args: any[]) => ref.current(...args)) as T, []);
 }
 
 function formatDuration(seconds: number) {
@@ -1164,6 +1196,18 @@ export default function HomePage() {
     });
   }
 
+  // ── Stable references for the Sprite handlers ──────────────────────────────
+  // The Sprite component is React.memo-wrapped so it skips render whenever
+  // its props are referentially equal to the previous render. The two
+  // handlers above are recreated every render (function declarations), so
+  // without this stabilisation Sprite would still re-render on every parent
+  // re-render — defeating the memo. `useStableCallback` returns a fixed
+  // identity that always invokes the latest closure under the hood.
+  const stableStartSearch       = useStableCallback(handleStartSearchFromSprite);
+  const stablePickRecommendedTerm = useStableCallback(handlePickRecommendedTerm);
+  // setHoverHelpText is already stable (React state setters are guaranteed
+  // referentially stable across renders), so it doesn't need wrapping.
+
   // The sprite typing-reaction + step-aware voice useEffects live AFTER
   // `buttonStep` and `isSubmitting` are declared further down — they
   // reference both, and React 19 + Turbopack TDZ-rejects the closure
@@ -1407,10 +1451,18 @@ export default function HomePage() {
   // Only fires when buttonStep === 0 (the user hasn't started the
   // 3-Enter ritual yet); the step-aware effect below owns the slot
   // once they have. Debounced 350 ms so steady typing doesn't churn.
+  //
+  // We key the effect off `useDeferredValue(query)` rather than `query`
+  // so React schedules the work at a lower priority — the textarea's
+  // controlled-value commit goes through the normal path on the same
+  // frame as the keystroke, while this side effect (which only changes
+  // the sprite voice) gets to wait a frame or two without dropping
+  // characters.
+  const deferredQuery = useDeferredValue(query);
   useEffect(() => {
     if (hasRunSearch || isSubmitting) return;
     if (buttonStep !== 0) return;
-    const trimmed = query.trim();
+    const trimmed = deferredQuery.trim();
     const id = window.setTimeout(() => {
       if (trimmed.length === 0)        setAssessmentMessage("");
       else if (trimmed.length < 4)     setAssessmentMessage("hmm, keep going…");
@@ -1418,7 +1470,7 @@ export default function HomePage() {
       else                             setAssessmentMessage("got plenty to work with — Enter when ready (◕‿◕)");
     }, 350);
     return () => window.clearTimeout(id);
-  }, [query, buttonStep, hasRunSearch, isSubmitting]);
+  }, [deferredQuery, buttonStep, hasRunSearch, isSubmitting]);
 
   // Step-aware sprite voice — fires the moment buttonStep changes so
   // the user always knows what the next Enter does. Putting it here
@@ -2393,8 +2445,13 @@ export default function HomePage() {
     setLayoutMode(mode);
     setGridTransitioning(true);
     if (mode === "default") {
+      // Default = balanced 1:3:1. Like Scholar mode, the brief is the
+      // primary surface a reader lands on, so we explicitly snap the
+      // left tab back to "brief" — otherwise a user who toggled to
+      // Charts in a previous session would still see Charts here.
       setLeftVisible(true); setAnalyticsVisible(true);
       setLeftPct(20); setCenterPct(60);
+      setLeftTab("brief");
     } else if (mode === "scholar") {
       // Scholar = focus on the Research Brief — right panel hidden so
       // the left can stretch wide, AND default the left tab to "brief"
@@ -3126,24 +3183,31 @@ ${html}
         try {
           const data = JSON.parse(sseData);
           if (sseEvent === "progress") {
-            if (typeof data.retrieval_count === "number") {
-              setRetrievalCount(data.retrieval_count);
-            }
-            if (typeof data.candidate_limit === "number" && data.candidate_limit > 0) {
-              setCandidateLimit(data.candidate_limit);
-            }
-            if (typeof data.raw_message === "string" && data.raw_message) {
-              setRawProgressMsg(data.raw_message);
-            }
-            setJob((prev) => ({
-              ...prev,
-              status: "running",
-              progress: Math.max(prev?.progress ?? 0, data.progress ?? 0),
-              message: data.message ?? prev?.message ?? "",
-              workflow: data.workflow_item
-                ? [...(prev?.workflow ?? []), data.workflow_item]
-                : (prev?.workflow ?? []),
-            }));
+            // Progress chunks fire every ~250 ms while a search runs;
+            // wrap the related state updates in startTransition so
+            // React treats them as low-priority. Any genuine user
+            // interaction (click, keypress) preempts them and lands on
+            // the next frame instead of queueing behind the SSE work.
+            startTransition(() => {
+              if (typeof data.retrieval_count === "number") {
+                setRetrievalCount(data.retrieval_count);
+              }
+              if (typeof data.candidate_limit === "number" && data.candidate_limit > 0) {
+                setCandidateLimit(data.candidate_limit);
+              }
+              if (typeof data.raw_message === "string" && data.raw_message) {
+                setRawProgressMsg(data.raw_message);
+              }
+              setJob((prev) => ({
+                ...prev,
+                status: "running",
+                progress: Math.max(prev?.progress ?? 0, data.progress ?? 0),
+                message: data.message ?? prev?.message ?? "",
+                workflow: data.workflow_item
+                  ? [...(prev?.workflow ?? []), data.workflow_item]
+                  : (prev?.workflow ?? []),
+              }));
+            });
           } else if (sseEvent === "brief_chunk") {
             const incomingVersion = (data.version as number) ?? 1;
             const incomingStatus = (data.status as "draft" | "final") ?? "final";
@@ -3168,26 +3232,36 @@ ${html}
               if (isFirstEver) setLeftTab("brief");
             }
           } else if (sseEvent === "thinking") {
-            setPlannerThinking(data as {planner_summary?: string; search_focus?: string; query_type?: string; agents_planned?: string[]});
+            startTransition(() => {
+              setPlannerThinking(data as {planner_summary?: string; search_focus?: string; query_type?: string; agents_planned?: string[]});
+            });
           } else if (sseEvent === "papers") {
+            // The `papers` event arrives once per phase but the payload
+            // can be 50+ entries — flagging it as a transition lets
+            // React paint progressive lists without holding up the UI.
             if (Array.isArray(data.papers)) {
-              setStreamPapers(data.papers);
-              // Sync counter to actual paper count so label matches the full bar
-              setRetrievalCount(data.papers.length);
-              setCandidateLimit(data.papers.length);
-              // All analysis agents start as soon as papers are retrieved
-              if (!fastMode) {
-                setStartedAgents(prev => {
-                  const s = new Set(prev);
-                  s.add("evidence_mapper"); s.add("scholar");
-                  s.add("gap_analyst"); s.add("verifier");
-                  return s;
-                });
-              }
+              startTransition(() => {
+                setStreamPapers(data.papers);
+                setRetrievalCount(data.papers.length);
+                setCandidateLimit(data.papers.length);
+                if (!fastMode) {
+                  setStartedAgents(prev => {
+                    const s = new Set(prev);
+                    s.add("evidence_mapper"); s.add("scholar");
+                    s.add("gap_analyst"); s.add("verifier");
+                    return s;
+                  });
+                }
+              });
             }
           } else if (sseEvent === "agent_result") {
+            // 4 agent results per Curated run, can arrive back-to-back.
+            // Transition-wrap so a streaming brief and an agent result
+            // landing in the same tick can't both starve user input.
             if (data.agent && data.data) {
-              setStreamAgents((prev) => ({ ...prev, [data.agent]: data.data }));
+              startTransition(() => {
+                setStreamAgents((prev) => ({ ...prev, [data.agent]: data.data }));
+              });
             }
           } else if (sseEvent === "result") {
             // Belt-and-suspenders: capture brief if it wasn't streamed via brief_chunk
@@ -4799,8 +4873,8 @@ ${html}
               recommendedTermsSource={recommendedTermsSource}
               recommendedTermsSourceUrl={recommendedTermsSourceUrl}
               buttonStep={buttonStep}
-              onPickRecommendedTerm={handlePickRecommendedTerm}
-              onStartSearch={handleStartSearchFromSprite}
+              onPickRecommendedTerm={stablePickRecommendedTerm}
+              onStartSearch={stableStartSearch}
             />
             </div>
             {/* Sprite UI lives in src/components/sprite/Sprite.tsx — rendering
