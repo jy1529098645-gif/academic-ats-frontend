@@ -2,7 +2,6 @@
 
 import ReactMarkdown from "react-markdown";
 import {
-  startTransition,
   useCallback, useDeferredValue, useEffect, useLayoutEffect,
   useMemo, useRef, useState,
 } from "react";
@@ -3190,31 +3189,33 @@ ${html}
         try {
           const data = JSON.parse(sseData);
           if (sseEvent === "progress") {
-            // Progress chunks fire every ~250 ms while a search runs;
-            // wrap the related state updates in startTransition so
-            // React treats them as low-priority. Any genuine user
-            // interaction (click, keypress) preempts them and lands on
-            // the next frame instead of queueing behind the SSE work.
-            startTransition(() => {
-              if (typeof data.retrieval_count === "number") {
-                setRetrievalCount(data.retrieval_count);
-              }
-              if (typeof data.candidate_limit === "number" && data.candidate_limit > 0) {
-                setCandidateLimit(data.candidate_limit);
-              }
-              if (typeof data.raw_message === "string" && data.raw_message) {
-                setRawProgressMsg(data.raw_message);
-              }
-              setJob((prev) => ({
-                ...prev,
-                status: "running",
-                progress: Math.max(prev?.progress ?? 0, data.progress ?? 0),
-                message: data.message ?? prev?.message ?? "",
-                workflow: data.workflow_item
-                  ? [...(prev?.workflow ?? []), data.workflow_item]
-                  : (prev?.workflow ?? []),
-              }));
-            });
+            // SSE progress chunks land at normal priority. We tried
+            // wrapping these in startTransition for INP gains, but it
+            // visibly delayed the progress bar / agent workflow card
+            // because React treats transitions as interruptible — any
+            // background work (other SSE chunks, GC, idle effects) was
+            // pushing these updates back. Search felt slower even
+            // though the backend hadn't changed. Reverted; user input
+            // responsiveness gains from Phase 1 still come from the
+            // Sprite memo + deferred typing-reaction.
+            if (typeof data.retrieval_count === "number") {
+              setRetrievalCount(data.retrieval_count);
+            }
+            if (typeof data.candidate_limit === "number" && data.candidate_limit > 0) {
+              setCandidateLimit(data.candidate_limit);
+            }
+            if (typeof data.raw_message === "string" && data.raw_message) {
+              setRawProgressMsg(data.raw_message);
+            }
+            setJob((prev) => ({
+              ...prev,
+              status: "running",
+              progress: Math.max(prev?.progress ?? 0, data.progress ?? 0),
+              message: data.message ?? prev?.message ?? "",
+              workflow: data.workflow_item
+                ? [...(prev?.workflow ?? []), data.workflow_item]
+                : (prev?.workflow ?? []),
+            }));
           } else if (sseEvent === "brief_chunk") {
             const incomingVersion = (data.version as number) ?? 1;
             const incomingStatus = (data.status as "draft" | "final") ?? "final";
@@ -3239,36 +3240,35 @@ ${html}
               if (isFirstEver) setLeftTab("brief");
             }
           } else if (sseEvent === "thinking") {
-            startTransition(() => {
-              setPlannerThinking(data as {planner_summary?: string; search_focus?: string; query_type?: string; agents_planned?: string[]});
-            });
+            // See the `progress` branch comment — also reverted from
+            // startTransition to prevent visible lag in the planner-
+            // metadata card.
+            setPlannerThinking(data as {planner_summary?: string; search_focus?: string; query_type?: string; agents_planned?: string[]});
           } else if (sseEvent === "papers") {
-            // The `papers` event arrives once per phase but the payload
-            // can be 50+ entries — flagging it as a transition lets
-            // React paint progressive lists without holding up the UI.
+            // Papers arrive once per phase. Land at normal priority so
+            // the result list paints as soon as it's available — any
+            // delay here reads to the user as "search is slow" even
+            // though the backend already returned.
             if (Array.isArray(data.papers)) {
-              startTransition(() => {
-                setStreamPapers(data.papers);
-                setRetrievalCount(data.papers.length);
-                setCandidateLimit(data.papers.length);
-                if (!fastMode) {
-                  setStartedAgents(prev => {
-                    const s = new Set(prev);
-                    s.add("evidence_mapper"); s.add("scholar");
-                    s.add("gap_analyst"); s.add("verifier");
-                    return s;
-                  });
-                }
-              });
+              setStreamPapers(data.papers);
+              setRetrievalCount(data.papers.length);
+              setCandidateLimit(data.papers.length);
+              if (!fastMode) {
+                setStartedAgents(prev => {
+                  const s = new Set(prev);
+                  s.add("evidence_mapper"); s.add("scholar");
+                  s.add("gap_analyst"); s.add("verifier");
+                  return s;
+                });
+              }
             }
           } else if (sseEvent === "agent_result") {
-            // 4 agent results per Curated run, can arrive back-to-back.
-            // Transition-wrap so a streaming brief and an agent result
-            // landing in the same tick can't both starve user input.
+            // 4 agent results per Curated run; each is a major
+            // user-visible milestone (the Analytical Trace card lights
+            // up). Apply at normal priority — transitioning these had
+            // the same "Curated feels slow" effect.
             if (data.agent && data.data) {
-              startTransition(() => {
-                setStreamAgents((prev) => ({ ...prev, [data.agent]: data.data }));
-              });
+              setStreamAgents((prev) => ({ ...prev, [data.agent]: data.data }));
             }
           } else if (sseEvent === "result") {
             // Belt-and-suspenders: capture brief if it wasn't streamed via brief_chunk
