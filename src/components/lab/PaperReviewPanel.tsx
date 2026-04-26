@@ -126,6 +126,21 @@ const LANGUAGE_OPTIONS = [
 // entry maps to a short hint that the intake agent + specialists fold into
 // their prompts, so a research proposal gets different critique focus than
 // an argumentative essay. Labels are plain-English — no jargon.
+// Draft LEVEL controls how strictly the rubric is applied — distinct from
+// DRAFT_TYPE (which is about what kind of paper). The backend
+// (paper_review_service.DRAFT_LEVEL_RUBRIC + DRAFT_LEVEL_TONE) shifts both
+// the verdict thresholds AND the reviewer tone based on this signal:
+//   working  — DEFAULT; ~1 grade more lenient than journal-grade. A solid
+//              mid-revision draft earns Minor Revision instead of Major.
+//   final    — full publication-grade scrutiny.
+//   sketch   — ~2 grades more lenient. An early outline that's on the
+//              right track gets Minor Revision instead of Reject.
+const DRAFT_LEVELS: Array<{ id: "working" | "final" | "sketch"; label: string; blurb: string }> = [
+  { id: "working", label: "Working draft",            blurb: "Default — calibrate to in-progress writing" },
+  { id: "final",   label: "Final / submission-ready", blurb: "Apply full publication-grade scrutiny" },
+  { id: "sketch",  label: "Early sketch / outline",   blurb: "Focus on structure + direction; skip polish" },
+];
+
 const DRAFT_TYPES: Array<{ id: string; label: string; hint: string }> = [
   { id: "auto",                 label: "Let reviewers infer",    hint: "" },
   { id: "research_paper",       label: "Research paper",         hint: "Full empirical / theoretical research paper — expect Methods, Results, Discussion." },
@@ -201,6 +216,7 @@ export function PaperReviewPanel() {
   const [paperText,    setPaperText]    = useState("");
   const [contextHint,  setContextHint]  = useState("");
   const [draftType,    setDraftType]    = useState("auto");
+  const [draftLevel,   setDraftLevel]   = useState<"working" | "final" | "sketch">("working");
   const [language,     setLanguage]     = useState("English");
   const [fileName,     setFileName]     = useState("");
   const [extractBusy,  setExtractBusy]  = useState(false);
@@ -284,7 +300,7 @@ export function PaperReviewPanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal:  ac.signal,
-        body:    JSON.stringify({ paper_text: text, context_hint: effectiveContext, language }),
+        body:    JSON.stringify({ paper_text: text, context_hint: effectiveContext, language, draft_level: draftLevel }),
       });
       if (res.status === 429) {
         // Quota exhausted — parse the server's friendly explanation
@@ -446,6 +462,32 @@ export function PaperReviewPanel() {
           className={`${INPUT_CLS} mt-2 resize-y hairline-scrollbar disabled:opacity-70`}
           style={INPUT_STYLE}
         />
+      </div>
+
+      {/* ── Draft level ──────────────────────────────────────────────────────
+          Calibrates the verdict thresholds + reviewer tone. The backend
+          shifts the Accept / Minor / Major / Reject cutoffs based on which
+          stage the user picks, AND tells the reviewer how strict to be — so
+          a working draft doesn't come back graded like a journal submission
+          (the original complaint that motivated this picker). */}
+      <div>
+        <label className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+          <Target size={14} /><span>How polished is this draft?</span>
+        </label>
+        <p className="mt-0.5 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
+          Tells the reviewers what stage of work to grade against.
+        </p>
+        <select
+          value={draftLevel}
+          onChange={e => setDraftLevel(e.target.value as "working" | "final" | "sketch")}
+          disabled={generating}
+          className={`${INPUT_CLS} mt-2`}
+          style={INPUT_STYLE}
+        >
+          {DRAFT_LEVELS.map(t => (
+            <option key={t.id} value={t.id}>{t.label} — {t.blurb}</option>
+          ))}
+        </select>
       </div>
 
       {/* ── Draft type ───────────────────────────────────────────────────── */}

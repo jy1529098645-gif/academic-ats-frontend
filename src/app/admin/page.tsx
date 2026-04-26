@@ -44,7 +44,7 @@ import {
   BarChart as BarChartIcon, Users, Activity, MessageSquare, Zap,
   DollarSign, RefreshCw, ArrowLeft, Sparkles,
   FileText, Clock, Database, LogOut,
-  Plus, Trash2, Check, X,
+  Plus, Trash2, Check, X, Megaphone, Inbox,
 } from "lucide-react";
 
 // ── Must stay in sync with the same list in src/app/page.tsx ────────────────
@@ -108,6 +108,8 @@ type Overview = {
   week?:  UsageWindow;           // optional — backends that predate the rolling-window commit omit these
   month?: UsageWindow;
   announcements_total: number;
+  feedback_total?: number;       // optional — backends predating the feedback-KPI commit omit these
+  feedback_open?:  number;       // unresolved subset
 };
 
 type TimeSeriesPoint = {
@@ -1223,8 +1225,14 @@ export default function AdminPage() {
               kpiWindow === "today" ? "today" :
               kpiWindow === "week"  ? "this week" :
                                       "this month";
+            // 8 cards: 2 even rows of 4 on lg, single row of 8 on xl.
+            // Was lg:grid-cols-6 with 6 cards (single row). Adding
+            // Announcements + Feedback pushed us to 8, and a 6+2 wrap
+            // was uglier than a clean 4-by-2 block. md jumps to 4
+            // columns earlier so the cards stay readable on tablet
+            // width.
             return (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-8 gap-3">
                 <KpiCard
                   icon={<Users size={14} />}
                   label="Total users"
@@ -1246,11 +1254,19 @@ export default function AdminPage() {
                   sublabel={win ? `${win.quick_search_count} quick · ${win.deep_search_count} deep` : ""}
                   color="#8b5cf6"
                 />
+                {/* Synthesis card now explicitly notes that the count
+                    INCLUDES Paper Review submissions — both flows go
+                    through gateway.record_success("synthesis") so they
+                    share the same daily counter. Splitting them out
+                    properly needs a new user_usage_daily column +
+                    increment-RPC change (see migrations TODO); until
+                    that lands, the sublabel keeps the dev honest about
+                    what they're looking at. */}
                 <KpiCard
                   icon={<Sparkles size={14} />}
-                  label={`Synthesis ${windowLabel}`}
+                  label={`Lab runs ${windowLabel}`}
                   value={win?.synthesis_count ?? "—"}
-                  sublabel={`${win?.deep_read_count ?? 0} evidence chains`}
+                  sublabel={`Synthesis + Paper Review · ${win?.deep_read_count ?? 0} evidence chains`}
                   color="#ec4899"
                 />
                 <KpiCard
@@ -1266,6 +1282,34 @@ export default function AdminPage() {
                   value={win ? `$${win.llm_cost_usd.toFixed(2)}` : "—"}
                   sublabel="LLM usage (USD)"
                   color="#ef4444"
+                />
+                {/* Announcements — all-time count of public-ticker rows.
+                    Not windowed (the ticker is a slow-moving stream;
+                    splitting by week/month would be noise). */}
+                <KpiCard
+                  icon={<Megaphone size={14} />}
+                  label="Announcements"
+                  value={ov?.announcements_total ?? "—"}
+                  sublabel="Public ticker rows"
+                  color="#06b6d4"
+                />
+                {/* Feedback inbox — all-time received with the
+                    unresolved subset called out as the actionable
+                    number. The "open" digit is what the dev actually
+                    needs to work through; total is for context. Stays
+                    "—" if the backend hasn't been upgraded to send
+                    feedback_total / feedback_open yet (graceful
+                    degradation, same pattern as week/month windows). */}
+                <KpiCard
+                  icon={<Inbox size={14} />}
+                  label="Feedback received"
+                  value={ov?.feedback_total ?? "—"}
+                  sublabel={
+                    typeof ov?.feedback_open === "number"
+                      ? `${ov.feedback_open} unresolved`
+                      : "all-time"
+                  }
+                  color="#84cc16"
                 />
               </div>
             );
