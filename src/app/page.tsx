@@ -14,6 +14,7 @@ import { Sprite, type SpriteHandle } from "@/components/sprite/Sprite";
 import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
+import { useHoverHelpStore } from "@/lib/stores/hover-help-store";
 import {
   usePrefsStore, hydratePrefsStore, applyServerWorkspaceCharLimit,
   ROTATOR_INTERVAL_MIN, ROTATOR_INTERVAL_MAX,
@@ -1066,12 +1067,17 @@ export default function HomePage() {
   // Hover-help overlay text — when set, the sprite voice line shows
   // this string in priority, so the user gets an instant explanation
   // of whatever UI element they're aiming at. Cleared on mouse-leave.
-  const [hoverHelpText, setHoverHelpText] = useState<string>("");
+  // Hover-help text was previously local state, but every button hover
+  // re-rendered this entire 8 000-line component for one piece of voice
+  // text the Sprite is the only consumer of. Moved to a dedicated
+  // Zustand store; page.tsx no longer subscribes (it doesn't read the
+  // value, only writes), so hovers cost zero parent renders. The Sprite
+  // subscribes via selector and re-renders alone when the text changes.
   const helpProps = useCallback((msg: string) => ({
-    onMouseEnter: () => setHoverHelpText(msg),
-    onMouseLeave: () => setHoverHelpText(prev => prev === msg ? "" : prev),
-    onFocus:      () => setHoverHelpText(msg),
-    onBlur:       () => setHoverHelpText(prev => prev === msg ? "" : prev),
+    onMouseEnter: () => useHoverHelpStore.getState().setText(msg),
+    onMouseLeave: () => useHoverHelpStore.getState().clearIfMatches(msg),
+    onFocus:      () => useHoverHelpStore.getState().setText(msg),
+    onBlur:       () => useHoverHelpStore.getState().clearIfMatches(msg),
   }), []);
   const placeholderWrapperRef = useRef<HTMLDivElement>(null);
   const [placeholderFontSize, setPlaceholderFontSize] = useState(48);
@@ -1205,8 +1211,9 @@ export default function HomePage() {
   // identity that always invokes the latest closure under the hood.
   const stableStartSearch       = useStableCallback(handleStartSearchFromSprite);
   const stablePickRecommendedTerm = useStableCallback(handlePickRecommendedTerm);
-  // setHoverHelpText is already stable (React state setters are guaranteed
-  // referentially stable across renders), so it doesn't need wrapping.
+  // (Hover-help is owned by `useHoverHelpStore` now — Sprite reads from
+  // the store directly, so we don't pass an `onHoverHelp` prop and don't
+  // need to wrap it in useStableCallback.)
 
   // The sprite typing-reaction + step-aware voice useEffects live AFTER
   // `buttonStep` and `isSubmitting` are declared further down — they
@@ -4867,8 +4874,6 @@ ${html}
               introStage={introStage as "blank" | "explore" | "full"}
               hasRunSearch={hasRunSearch}
               message={assessmentMessage}
-              hoverHelp={hoverHelpText}
-              onHoverHelp={setHoverHelpText}
               recommendedTerms={recommendedTerms}
               recommendedTermsSource={recommendedTermsSource}
               recommendedTermsSourceUrl={recommendedTermsSourceUrl}

@@ -2,6 +2,7 @@
 
 import { forwardRef, memo, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import { FlaskConical, Zap } from "lucide-react";
+import { useHoverHelpStore, selectHoverHelpText } from "@/lib/stores/hover-help-store";
 
 /** Imperative handle exposed to parent so the textarea's onKeyDown can
  * drive bubble focus + Enter commit without each side knowing the other's
@@ -35,10 +36,6 @@ export type SpriteProps = {
   hasRunSearch: boolean;
   /** Latest sprite voice line. */
   message: string;
-  /** Hover-help overlay text. When non-empty, the sprite voice line
-   * shows this string in priority — used to explain whichever UI
-   * element the user is hovering / focused on. */
-  hoverHelp: string;
   /** Curated suggestion chips shown under the mode buttons. Clicking a
    * chip replaces the textarea contents with the chip's text. */
   recommendedTerms: string[];
@@ -61,9 +58,6 @@ export type SpriteProps = {
   onStartSearch: (mode: "quick" | "curated") => void;
   /** Click a recommended-term chip — replaces the input with `term`. */
   onPickRecommendedTerm: (term: string) => void;
-  /** Hover-help wiring — call with a string when the user enters the
-   * element, with empty string when they leave. */
-  onHoverHelp?: (text: string) => void;
 };
 
 /**
@@ -86,15 +80,22 @@ export type SpriteProps = {
 const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props, ref) {
   const {
     query, introStage, hasRunSearch, message,
-    hoverHelp, recommendedTerms, buttonStep,
+    recommendedTerms, buttonStep,
     recommendedTermsSource, recommendedTermsSourceUrl,
-    onStartSearch, onPickRecommendedTerm, onHoverHelp,
+    onStartSearch, onPickRecommendedTerm,
   } = props;
+  // Hover-help is now owned by `useHoverHelpStore` (see lib/stores) so
+  // page.tsx doesn't have to re-render every time the user's mouse
+  // crosses a button — only the Sprite (the sole consumer of the text)
+  // re-renders when the value changes. The store's `setText` /
+  // `clearIfMatches` actions are referentially stable, so the inline
+  // `hh()` factory below doesn't need useCallback either.
+  const hoverHelp = useHoverHelpStore(selectHoverHelpText);
   const hh = (msg: string) => ({
-    onMouseEnter: () => onHoverHelp?.(msg),
-    onMouseLeave: () => onHoverHelp?.(""),
-    onFocus:      () => onHoverHelp?.(msg),
-    onBlur:       () => onHoverHelp?.(""),
+    onMouseEnter: () => useHoverHelpStore.getState().setText(msg),
+    onMouseLeave: () => useHoverHelpStore.getState().clearIfMatches(msg),
+    onFocus:      () => useHoverHelpStore.getState().setText(msg),
+    onBlur:       () => useHoverHelpStore.getState().clearIfMatches(msg),
   });
 
   const trimmedQuery = query.trim();
