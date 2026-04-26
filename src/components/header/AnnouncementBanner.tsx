@@ -460,7 +460,7 @@ export function AnnouncementBanner({
           parent flex row (mascot + banner) stays anchored and nothing
           around the banner reflows.
 
-          HARD-LOCKED height: h-[5.25rem] pins the card's vertical
+          HARD-LOCKED height: h-[3.75rem] pins the card's vertical
           size regardless of what changes inside (vote icon swaps,
           counter ticks between 0↔1, danmu ↔ board mode, composer
           focus border additions, etc). Without this lock, any
@@ -470,30 +470,32 @@ export function AnnouncementBanner({
           fix. Fixing the outer box's dimensions is the bulletproof
           option.
 
-          Sizing math (at the current 22 px root):
-            row 1: py-2 (22 px) + text-xs leading-snug (~22.7 px)
-                                                     = ~44.7 px
-            row 2: py-1.5 (16.5 px) + Send button height
-                   (px-2.5 py-1 + text-xs + 2 px border = ~30 px)
-                                                     = ~46.5 px
-            border between rows                      =     1 px
-            ─────────────────────────────────────────────────────
-            content total                            ≈   92.2 px
+          Sizing math at the current 22 px root, AFTER the
+          padding compression below:
+            row 1: py-1 (11 px) + text-xs leading-snug (~22.7 px)
+                                                      = ~33.7 px
+            row 2: py-1 (11 px) + Send button height
+                   (px-2.5 py-0.5 + text-xs + 2 px border ≈ 25 px)
+                                                      = ~36 px
+            border between rows                       =    1 px
+            ──────────────────────────────────────────────────────
+            content total                             ≈ ~70.7 px
 
-          h-[5.25rem] = 5.25 × 22 = 115.5 px → ~23 px slack so any
-          browser sub-pixel rounding or theme-induced font metric
-          drift never clips the bottom row's Send button (the
-          regression we kept hitting at h-[4.25rem]).
+          h-[3.75rem] = 3.75 × 22 = 82.5 px → ~12 px slack — enough
+          for sub-pixel rounding without clipping, and ~33 px less
+          vertical real estate than the previous 5.25 rem shell so
+          the workspace below has more room (the user's ask: "把
+          公告栏上下调小一些 我不希望它挤兑下面的内容").
 
-          Why rem (5.25rem = 84 px at the original 16 px root)
+          Why rem (3.75 rem = 60 px at the original 16 px root)
           rather than a literal `h-[N px]`: when we bumped the
-          global font scale to 22 px, the row contents (rem-based
-          padding + text-xs coerced to a proportional floor) grew
-          but a hardcoded shell DID NOT — bottom row got clipped.
-          rem unit means the banner height tracks root size
-          automatically: at 16 px root → 84 px, at 22 px root →
-          115.5 px, at any future scale → right by construction. */}
-      <div className="relative h-[5.25rem] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
+          global font scale, hardcoded pixel shells stop tracking
+          the row contents (rem padding + text-xs coerced to a
+          proportional floor) and start clipping. rem unit means
+          the banner height tracks root size automatically: at
+          16 px root → 60 px, at 22 px root → 82.5 px, at any
+          future scale → right by construction. */}
+      <div className="relative h-[3.75rem] shrink-0 overflow-hidden rounded-2xl border border-blue-500/15 bg-[var(--ats-bg-panel)]">
         {/* Theme toggle moved out to the title row in page.tsx so it stays
             visible even when the announcement banner is hidden. The
             ThemeToggleButton helper below + props (themeMode/onToggleTheme)
@@ -517,7 +519,14 @@ export function AnnouncementBanner({
               cues now live on the external megaphone toggle sitting
               next to the mascot (see page.tsx), so this row is just
               the rotator text now. */}
-          <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 pr-10">
+          {/* Vertical paddings on both rows compressed (py-2 → py-1
+              on row 1; py-1.5 → py-1 on row 2) so the banner shell
+              can drop from 5.25 rem to 3.75 rem without clipping any
+              content. Saves ~33 px of header real estate which goes
+              straight back to the workspace area below. Horizontal
+              padding (px-3 / pr-10) is unchanged — only vertical was
+              eating space the user didn't want. */}
+          <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1 pr-10">
             <div className="min-w-0 flex-1 overflow-hidden">
               <AnnouncementRotatorCard items={announcements} paused={hoverPaused} idx={idx} />
             </div>
@@ -527,14 +536,14 @@ export function AnnouncementBanner({
                 ticker stays clean and doesn't dox the sender.
               · 50-char hard cap (was 280) — anything longer should be
                 a private message, not the public ticker. */}
-          <div className="flex items-center gap-1.5 border-t border-slate-800/50 px-3 py-1.5">
+          <div className="flex items-center gap-1.5 border-t border-slate-800/50 px-3 py-1">
             <MessageSquare size={11} className="shrink-0 text-slate-600" />
             <input
               type="text"
               value={msgInput}
               onChange={(e) => setMsgInput(e.target.value.slice(0, 50))}
               onKeyDown={(e) => { if (e.key === "Enter" && !msgSending) void onSend(); }}
-              placeholder="Broadcast a short message (up to 50 chars)"
+              placeholder="Share something with everyone… (◕‿◕)"
               maxLength={50}
               tabIndex={collapsed ? -1 : 0}
               className="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-slate-300 outline-none placeholder:text-slate-700"
@@ -544,7 +553,7 @@ export function AnnouncementBanner({
               onClick={() => void onSend()}
               disabled={!msgInput.trim() || msgSending}
               tabIndex={collapsed ? -1 : 0}
-              className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:opacity-50 ${
+              className={`shrink-0 rounded-lg border px-2.5 py-0.5 text-xs font-medium transition disabled:opacity-50 ${
                 msgSentOk
                   ? "border-emerald-500/40 text-emerald-400"
                   : "border-slate-700/50 text-slate-500 hover:border-blue-500/40 hover:text-blue-400"
