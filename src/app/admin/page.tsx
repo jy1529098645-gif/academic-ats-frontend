@@ -1589,9 +1589,18 @@ export default function AdminPage() {
             </div>
           </div>
           {isPanelOpen("activity") && (
-            <div className="max-h-[420px] overflow-y-auto thin-scrollbar pr-1">
-              <ActivityFeed rows={activity.data?.activity ?? []} />
-            </div>
+            // No max-h / overflow here. The whole admin page is already
+            // a scroll container (`admin-main h-screen overflow-y-auto`,
+            // see top of this component), so capping the panel at 420 px
+            // forced a SECOND vertical scrollbar to appear next to the
+            // page-level one — what the user reported as "双 scrollbar".
+            // Letting the activity feed grow to its natural height means
+            // there's exactly ONE scrollbar (page-level) regardless of
+            // how many rows the feed has. The CollapseCaret in the
+            // header above lets the user collapse the panel when it
+            // gets long, which is the right control for "I don't want
+            // to scroll past 50 rows of activity right now".
+            <ActivityFeed rows={activity.data?.activity ?? []} />
           )}
         </section>
 
