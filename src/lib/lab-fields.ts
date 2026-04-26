@@ -195,6 +195,27 @@ export const LAB_FIELD_SPECS: Record<string, LabFieldSpec> = {
       { key: "audience",         label: "Intended audience",           description: "Who it's written for.",             placeholder: "e.g. policy brief for university admins",   required: false },
     ],
   },
+  personal_statement: {
+    id: "personal_statement",
+    blurb: "A personal essay for grad-school / scholarship / job applications.",
+    coreLabel: "Your driving motivation",
+    coreDescription: "What pulls you toward this path — the through-line of the essay. One short paragraph.",
+    corePlaceholder: "e.g. Watching my grandmother struggle with a smartphone made me realise accessibility-first AI is the gap I want to spend my career filling.",
+    coreRequired: true,
+    coreRows: 3,
+    pointsLabel: "Experiences / qualities to highlight",
+    pointsDescription: "Specific moments, projects, or strengths the essay should weave in. 3–5 work best.",
+    pointsAddLabel: "+ Add experience",
+    pointsPlaceholder: (i) => i === 0 ? "e.g. Led a 6-month research project on screen-reader UX" : `Experience ${i + 1}…`,
+    pointsRequired: true,
+    extras: [
+      { key: "target_program",    label: "Target program / role",                 description: "Specific name + institution.",                                                placeholder: "e.g. MS in Computer Science, Stanford University",                              required: true },
+      { key: "opening_anecdote",  label: "Opening moment / anecdote",             description: "A specific memory or turning point to anchor the opening. Optional but powerful.", placeholder: "e.g. The first time I saw my code help someone in a wheelchair navigate campus.", required: false, rows: 3 },
+      { key: "future_goals",      label: "Future goals",                          description: "What you want to do during and after this program / role.",                  placeholder: "e.g. Build assistive AI tools at a major tech company; eventually start a non-profit.", required: true, rows: 2 },
+      { key: "fit_with_program",  label: "Why this program / role specifically",  description: "Concrete reasons — faculty, courses, team, resources.",                       placeholder: "e.g. Want to work with Prof. X on assistive AI; CMU's HCI lab matches my methodology exactly.", required: false, rows: 2 },
+      { key: "word_limit",        label: "Word / page limit",                     description: "What the application asks for. Optional.",                                    placeholder: "e.g. 750 words / 2 pages",                                                       required: false },
+    ],
+  },
 };
 
 export function labFieldSpec(outputType: string): LabFieldSpec {

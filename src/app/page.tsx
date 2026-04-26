@@ -6153,6 +6153,7 @@ ${html}
                       <option value="conclusion">Conclusion</option>
                       <option value="abstract">Abstract</option>
                       <option value="argumentative_essay">Academic Essay</option>
+                      <option value="personal_statement">Personal Statement</option>
                     </select>
                   </div>
 
@@ -6601,6 +6602,7 @@ ${html}
                       conclusion:            "Conclusion",
                       abstract:              "Abstract",
                       argumentative_essay:   "Academic_Essay",
+                      personal_statement:    "Personal_Statement",
                     };
                     const OUTPUT_LABELS_TITLE: Record<string,string> = {
                       literature_review:     "Literature Review",
@@ -6611,6 +6613,7 @@ ${html}
                       conclusion:            "Conclusion",
                       abstract:              "Abstract",
                       argumentative_essay:   "Academic Essay",
+                      personal_statement:    "Personal Statement",
                     };
                     const outputSlug  = OUTPUT_LABELS_SLUG[labOutputType] ?? "Output";
                     const outputTitle = OUTPUT_LABELS_TITLE[labOutputType] ?? "Lab Output";
