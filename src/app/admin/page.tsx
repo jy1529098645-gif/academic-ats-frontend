@@ -1040,7 +1040,16 @@ export default function AdminPage() {
   //    AFTER the early returns suddenly start running. Lifting them
   //    above the returns keeps the hook count stable. ──────────────────
   const ov = overview.data;
-  const ts = timeseries.data?.data ?? [];
+  // Timeseries comes back keyed by UTC day. Drop any bucket whose UTC
+  // date is AHEAD of NY's current date — happens during the 4-5 hour
+  // evening window in NY when UTC has rolled to the next calendar day
+  // but the dev's clock hasn't. Without this, the rightmost tick on
+  // the chart shows "tomorrow" from the dev's perspective (the user-
+  // reported bug: "目前还没到27号才26号"). The filtered bucket is
+  // typically near-empty anyway (just an hour or two of UTC-tomorrow
+  // activity) so dropping it doesn't lose meaningful signal.
+  const _nyTodayKey = _NY_DATE_FMT.format(new Date());  // "YYYY-MM-DD" in NY
+  const ts = (timeseries.data?.data ?? []).filter(p => p.day <= _nyTodayKey);
   const rawUserList = users.data?.users ?? [];
   const annList  = announcements.data?.announcements ?? [];
   // Sorted view of the user list — defaults to the server-provided order
@@ -3548,6 +3557,16 @@ function niceAxisMax(m: number): number {
 // Returns the set of indices to render AND the format function. Decoupling
 // the format lets the final "today" tick always use its full label even
 // when intermediate ticks are compressed.
+// Tick formatters interpret the bucket's ISO date as a calendar day in
+// NY. Earlier revisions used `getUTCDate()` / `getUTCDay()` / etc. on
+// `new Date(iso + "T00:00:00Z")` — that gave UTC components, which
+// mismatched the rest of the admin UI (now NY-anchored everywhere).
+// Pre-built Intl formatters keep the call sites cheap.
+const _NY_TICK_DAY_NUM_FMT  = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", day: "numeric" });
+const _NY_TICK_WEEKDAY_FMT  = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" });
+const _NY_TICK_MONTH_FMT    = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short" });
+const _NY_TICK_MD_FMT       = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", month: "2-digit", day: "2-digit" });
+
 function pickXTicks(data: TimeSeriesPoint[], windowDays: number): {
   indices: number[];
   fmt: (d: string) => string;
@@ -3558,33 +3577,39 @@ function pickXTicks(data: TimeSeriesPoint[], windowDays: number): {
   let stride: number;
   let fmt: (d: string) => string;
 
+  // ISO `YYYY-MM-DD` strings are anchored to noon UTC for tick formatting,
+  // not midnight UTC. Using midnight + NY format would render every
+  // bucket as the previous calendar day in NY (UTC midnight = NY 19-20:00
+  // of previous day), which matches the user's screenshot complaint but
+  // is wrong for every bucket EXCEPT the rightmost one. Anchoring at
+  // noon UTC (= NY 07-08:00 of the SAME day) keeps the date correct for
+  // every bucket — and the timeseries is already filtered above to drop
+  // any bucket with `day` > NY today, so the rightmost tick is correct
+  // by construction.
+  const _toNY = (iso: string) => new Date(iso + "T12:00:00Z");
+
   if (windowDays <= 7) {
     // Daily ticks. "Mon 21" style reads naturally for a week view.
     stride = 1;
     fmt = (iso) => {
-      const d = new Date(iso + "T00:00:00Z");
-      const wk = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()];
-      return `${wk} ${d.getUTCDate()}`;
+      const d = _toNY(iso);
+      return `${_NY_TICK_WEEKDAY_FMT.format(d)} ${_NY_TICK_DAY_NUM_FMT.format(d)}`;
     };
   } else if (windowDays <= 30) {
-    // Every ~5 days. Classic month view.
+    // Every ~5 days. Classic month view, MM-DD format anchored to NY.
     stride = Math.max(1, Math.ceil(n / 6));
-    fmt = (iso) => iso.slice(5);   // MM-DD
+    fmt = (iso) => _NY_TICK_MD_FMT.format(_toNY(iso));
   } else if (windowDays <= 90) {
     // Weekly ticks.
     stride = 7;
     fmt = (iso) => {
-      const d = new Date(iso + "T00:00:00Z");
-      const mo = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
-      return `${mo} ${d.getUTCDate()}`;
+      const d = _toNY(iso);
+      return `${_NY_TICK_MONTH_FMT.format(d)} ${_NY_TICK_DAY_NUM_FMT.format(d)}`;
     };
   } else {
     // Year view — monthly ticks.
     stride = 30;
-    fmt = (iso) => {
-      const d = new Date(iso + "T00:00:00Z");
-      return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
-    };
+    fmt = (iso) => _NY_TICK_MONTH_FMT.format(_toNY(iso));
   }
 
   const indices: number[] = [];
