@@ -39,6 +39,7 @@ import {
   Search, ListOrdered, Clock, User as UserIcon,
   Zap, FlaskConical, LogOut, Sun, Moon,
   ExternalLink, RefreshCw, Send,
+  Menu, X, PenLine, ClipboardList, ChevronDown,
 } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
@@ -46,6 +47,7 @@ import { fetchWithApiFallback, getAuthToken } from "@/lib/api";
 import { useThemeStore } from "@/lib/stores/theme-store";
 import { useGuestQuotaStore, GUEST_QUICK_MAX, GUEST_CURATED_MAX } from "@/lib/stores/guest-quota-store";
 import { APP_VERSION } from "@/lib/tos-content";
+import { labFieldSpec } from "@/lib/lab-fields";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — minimal, mobile-only. Doesn't import the desktop's Paper / Job
@@ -53,7 +55,18 @@ import { APP_VERSION } from "@/lib/tos-content";
 // type-checked at use-site.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Tab = "home" | "results" | "history" | "profile";
+type Tab = "home" | "results" | "lab" | "review" | "history" | "profile";
+
+// Section metadata used by both the Drawer (slide-out left nav) and any
+// section-aware logic. Single source of truth so adding a new section means
+// editing one array, not three.
+type SectionMeta = {
+  id: Tab;
+  label: string;
+  blurb: string;        // one-line description shown inside the drawer row
+  icon: React.ReactNode;
+  hideUntilResults?: boolean; // Results — only show once the user has run
+};
 
 type Paper = {
   title: string;
@@ -134,7 +147,12 @@ export default function MobileApp() {
   const guestCuratedRemaining = useGuestQuotaStore(s => Math.max(0, GUEST_CURATED_MAX - s.curatedUsed));
 
   // ── Tab state ───────────────────────────────────────────────────────────
+  // The Drawer slides out from the left when `drawerOpen` is true. We keep it
+  // closed by default so the active section gets the full viewport. Selecting
+  // a section closes the drawer; the user can also dismiss it by tapping the
+  // backdrop or hitting the X.
   const [tab, setTab] = useState<Tab>("home");
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // ── Search state ────────────────────────────────────────────────────────
   const [query, setQuery] = useState("");
@@ -175,6 +193,175 @@ export default function MobileApp() {
   // Refresh history when the user signs in or opens that tab.
   useEffect(() => { void loadHistory(); }, [loadHistory]);
   useEffect(() => { if (tab === "history") void loadHistory(); }, [tab, loadHistory]);
+
+  // ── Synthesis Lab state ─────────────────────────────────────────────────
+  // Mobile keeps Lab streamlined: pick an output type, type a topic, hit Run.
+  // No multi-extras editor, no model picker, no points list — those live on
+  // desktop. The backend accepts an empty extras object and falls back to
+  // sensible defaults. Result streams into `labResult` as Markdown.
+  const [labOutputType, setLabOutputType] = useState<string>("synthesis");
+  const [labCoreArg, setLabCoreArg] = useState<string>("");
+  const [labResult, setLabResult] = useState<string>("");
+  const [labStatus, setLabStatus] = useState<string>("");
+  const [labGenerating, setLabGenerating] = useState<boolean>(false);
+  const [labError, setLabError] = useState<string>("");
+  const labAbortRef = useRef<AbortController | null>(null);
+
+  const runLab = useCallback(async () => {
+    if (labGenerating) return;
+    if (!labCoreArg.trim()) {
+      setLabError("Please describe what you want to write about.");
+      return;
+    }
+    const ac = new AbortController();
+    labAbortRef.current = ac;
+    setLabGenerating(true);
+    setLabResult("");
+    setLabStatus("Starting…");
+    setLabError("");
+    try {
+      const token = await getAuthToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetchWithApiFallback("/api/forge/synthesize", {
+        method: "POST",
+        headers,
+        signal: ac.signal,
+        body: JSON.stringify({
+          papers: [],
+          core_argument: labCoreArg.trim(),
+          supporting_points: [],
+          extras: {},
+          output_type: labOutputType,
+          citation_format: "APA",
+          language: "English",
+          target_pages: 2,
+          writing_model: "gpt-5.3",
+        }),
+      });
+      if (!res.ok) {
+        if (res.status === 429) setLabError("Daily quota reached. Sign in for more headroom.");
+        else setLabError(`Synthesis failed: ${res.status}`);
+        return;
+      }
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") break outer;
+          try {
+            const obj = JSON.parse(payload) as Record<string, string>;
+            if (obj.chunk) setLabResult(prev => prev + obj.chunk);
+            if (obj.error) setLabError(obj.error);
+            if (obj.status) setLabStatus(obj.status);
+          } catch { /* malformed line */ }
+        }
+      }
+    } catch (e) {
+      if ((e as { name?: string })?.name !== "AbortError") {
+        setLabError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setLabGenerating(false);
+      setLabStatus("");
+      labAbortRef.current = null;
+    }
+  }, [labCoreArg, labOutputType, labGenerating]);
+
+  const stopLab = useCallback(() => {
+    labAbortRef.current?.abort();
+    labAbortRef.current = null;
+    setLabGenerating(false);
+  }, []);
+
+  // ── Paper Review state ──────────────────────────────────────────────────
+  type DraftLevel = "final" | "working" | "sketch";
+  const [reviewText, setReviewText] = useState<string>("");
+  const [reviewDraftLevel, setReviewDraftLevel] = useState<DraftLevel>("working");
+  const [reviewResult, setReviewResult] = useState<string>("");
+  const [reviewStatus, setReviewStatus] = useState<string>("");
+  const [reviewGenerating, setReviewGenerating] = useState<boolean>(false);
+  const [reviewError, setReviewError] = useState<string>("");
+  const reviewAbortRef = useRef<AbortController | null>(null);
+
+  const runReview = useCallback(async () => {
+    if (reviewGenerating) return;
+    const text = reviewText.trim();
+    if (text.length < 200) {
+      setReviewError("Paste at least a few paragraphs (≥ 200 chars) for a meaningful review.");
+      return;
+    }
+    const ac = new AbortController();
+    reviewAbortRef.current = ac;
+    setReviewGenerating(true);
+    setReviewResult("");
+    setReviewStatus("Starting review…");
+    setReviewError("");
+    try {
+      const token = await getAuthToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetchWithApiFallback("/api/forge/review-paper", {
+        method: "POST",
+        headers,
+        signal: ac.signal,
+        body: JSON.stringify({
+          paper_text: text,
+          context_hint: "",
+          language: "English",
+          draft_level: reviewDraftLevel,
+        }),
+      });
+      if (!res.ok) {
+        if (res.status === 429) setReviewError("Daily quota reached. Sign in for more headroom.");
+        else setReviewError(`Review failed: ${res.status}`);
+        return;
+      }
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") break outer;
+          try {
+            const obj = JSON.parse(payload) as Record<string, string>;
+            if (obj.chunk) setReviewResult(prev => prev + obj.chunk);
+            if (obj.error) setReviewError(obj.error);
+            if (obj.status) setReviewStatus(obj.status);
+          } catch { /* malformed line */ }
+        }
+      }
+    } catch (e) {
+      if ((e as { name?: string })?.name !== "AbortError") {
+        setReviewError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setReviewGenerating(false);
+      setReviewStatus("");
+      reviewAbortRef.current = null;
+    }
+  }, [reviewText, reviewDraftLevel, reviewGenerating]);
+
+  const stopReview = useCallback(() => {
+    reviewAbortRef.current?.abort();
+    reviewAbortRef.current = null;
+    setReviewGenerating(false);
+  }, []);
 
   // ── Search runner ───────────────────────────────────────────────────────
   const runSearch = useCallback(async () => {
@@ -397,6 +584,18 @@ export default function MobileApp() {
     );
   }
 
+  // ── Section catalogue — single source of truth for the Drawer ─────────
+  const hasResults = searchStatus !== "idle" || papers.length > 0;
+  const sections: SectionMeta[] = [
+    { id: "home",     label: "Search",         blurb: "Find papers across 9 sources",     icon: <Search size={22} /> },
+    { id: "results",  label: "Results",        blurb: "Papers + research brief",          icon: <ListOrdered size={22} />, hideUntilResults: true },
+    { id: "lab",      label: "Synthesis Lab",  blurb: "Draft writing from your input",    icon: <PenLine size={22} /> },
+    { id: "review",   label: "Paper Review",   blurb: "Multi-agent feedback on a draft",  icon: <ClipboardList size={22} /> },
+    { id: "history",  label: "History",        blurb: "Past searches, restore any run",   icon: <Clock size={22} /> },
+    { id: "profile",  label: "Profile",        blurb: "Account, theme, sign out",         icon: <UserIcon size={22} /> },
+  ];
+  const activeSection = sections.find(s => s.id === tab) ?? sections[0];
+
   return (
     <div
       className="min-h-[100dvh] flex flex-col"
@@ -405,9 +604,11 @@ export default function MobileApp() {
       <Header
         themeMode={themeMode}
         onToggleTheme={() => setThemeMode(m => m === "day" ? "night" : "day")}
+        onMenu={() => setDrawerOpen(true)}
+        sectionLabel={activeSection.label}
       />
 
-      <main className="flex-1 min-h-0 overflow-y-auto pb-[5.5rem]">
+      <main className="flex-1 min-h-0 overflow-y-auto">
         {tab === "home" && (
           <HomeScreen
             query={query}
@@ -434,6 +635,34 @@ export default function MobileApp() {
             onStop={stopSearch}
           />
         )}
+        {tab === "lab" && (
+          <LabScreen
+            outputType={labOutputType}
+            setOutputType={setLabOutputType}
+            coreArg={labCoreArg}
+            setCoreArg={setLabCoreArg}
+            generating={labGenerating}
+            status={labStatus}
+            result={labResult}
+            errorMsg={labError}
+            onRun={() => void runLab()}
+            onStop={stopLab}
+          />
+        )}
+        {tab === "review" && (
+          <ReviewScreen
+            text={reviewText}
+            setText={setReviewText}
+            draftLevel={reviewDraftLevel}
+            setDraftLevel={setReviewDraftLevel}
+            generating={reviewGenerating}
+            status={reviewStatus}
+            result={reviewResult}
+            errorMsg={reviewError}
+            onRun={() => void runReview()}
+            onStop={stopReview}
+          />
+        )}
         {tab === "history" && (
           <HistoryScreen
             items={history}
@@ -456,10 +685,15 @@ export default function MobileApp() {
         )}
       </main>
 
-      <TabBar
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        sections={sections}
         active={tab}
-        onChange={setTab}
-        hasResults={searchStatus !== "idle" || papers.length > 0}
+        hasResults={hasResults}
+        onPick={(id) => { setTab(id); setDrawerOpen(false); }}
+        user={authUser}
+        isGuest={isGuest}
       />
     </div>
   );
@@ -472,99 +706,246 @@ export default function MobileApp() {
 function Header({
   themeMode,
   onToggleTheme,
+  onMenu,
+  sectionLabel,
 }: {
   themeMode: "day" | "night";
   onToggleTheme: () => void;
+  onMenu: () => void;
+  sectionLabel: string;
 }) {
+  // Layout: [hamburger] [logo + section label] [theme toggle]
+  // Hamburger and theme toggle are h-11 (44 px) — meets WCAG / Apple HIG
+  // tap-target guidance. Section label sits next to the logo so the user
+  // always sees which screen they're on without opening the drawer.
   return (
     <header
-      className="shrink-0 flex items-center justify-between px-4 py-3 border-b"
+      className="shrink-0 flex items-center justify-between gap-2 px-3 py-2.5 border-b"
       style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
     >
-      <div className="flex items-center gap-2">
+      <button
+        onClick={onMenu}
+        aria-label="Open navigation"
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors active:scale-95"
+        style={{
+          borderColor:     "var(--ats-border-subtle)",
+          backgroundColor: "var(--ats-bg-input)",
+          color:           "var(--ats-fg-primary)",
+        }}
+      >
+        <Menu size={22} />
+      </button>
+
+      <div className="flex flex-1 min-w-0 items-center gap-2">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/Cats_01.png" alt="" className="h-7 w-7" draggable={false} />
-        <div>
-          <div className="text-base font-bold leading-none">
+        <img src="/Cats_01.png" alt="" className="h-8 w-8 shrink-0" draggable={false} />
+        <div className="min-w-0 leading-tight">
+          <div className="text-base font-bold truncate">
             <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
             <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
           </div>
-          <div className="text-[10px] leading-none mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
-            {APP_VERSION}
+          <div
+            className="text-[11px] font-semibold truncate"
+            style={{ color: "var(--ats-fg-muted)" }}
+          >
+            {sectionLabel}
           </div>
         </div>
       </div>
+
       <button
         onClick={onToggleTheme}
         aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
-        className="flex h-9 w-9 items-center justify-center rounded-full border transition-colors"
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors active:scale-95"
         style={{
           borderColor:     "var(--ats-border-subtle)",
           backgroundColor: "var(--ats-bg-accent-soft)",
           color:           "var(--ats-fg-accent)",
         }}
       >
-        {themeMode === "night" ? <Sun size={16} /> : <Moon size={16} />}
+        {themeMode === "night" ? <Sun size={20} /> : <Moon size={20} />}
       </button>
     </header>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bottom tab bar — primary nav, thumb-zone
+// Drawer — slide-in left navigation
+//
+// Replaces the original bottom tab bar. The bottom bar only fit four entries
+// before tap targets started crowding; once we wanted Synthesis Lab and Paper
+// Review beside Search / Results / History / Profile, a vertical drawer was
+// the natural fit. Each row is a full-width 56-px-tall button so the user can
+// thumb-tap any section without precision.
+//
+// Behaviour:
+//   • Backdrop tap, X-button tap, Escape key, or selecting a section closes.
+//   • Body scroll locked while open so the page beneath doesn't slide along.
+//   • Slide animation runs on `transform` + `opacity` only — GPU-cheap.
+//   • Disabled rows render greyed but still tappable for affordance — the
+//     onPick handler short-circuits if the section requires data the user
+//     hasn't generated yet (e.g. Results before any search has run).
 // ─────────────────────────────────────────────────────────────────────────────
 
-function TabBar({
+function Drawer({
+  open,
+  onClose,
+  sections,
   active,
-  onChange,
   hasResults,
+  onPick,
+  user,
+  isGuest,
 }: {
+  open: boolean;
+  onClose: () => void;
+  sections: SectionMeta[];
   active: Tab;
-  onChange: (t: Tab) => void;
   hasResults: boolean;
+  onPick: (id: Tab) => void;
+  user: AuthUser | null;
+  isGuest: boolean;
 }) {
-  const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode; disabled?: boolean }> = [
-    { id: "home",     label: "Search",  icon: <Search size={20} /> },
-    { id: "results",  label: "Results", icon: <ListOrdered size={20} />, disabled: !hasResults },
-    { id: "history",  label: "History", icon: <Clock size={20} /> },
-    { id: "profile",  label: "Profile", icon: <UserIcon size={20} /> },
-  ];
+  // Lock body scroll while drawer is open so the page underneath doesn't
+  // wiggle when the user drags inside the drawer panel.
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [open]);
+
+  // Esc key closes the drawer — keyboard users / dev tools.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  const accountLabel = isGuest
+    ? "Guest mode"
+    : (user?.email ?? "Signed in");
+
   return (
-    <nav
-      className="fixed bottom-0 inset-x-0 z-30 flex items-stretch border-t safe-area-bottom"
-      style={{
-        borderColor:     "var(--ats-border-subtle)",
-        backgroundColor: "var(--ats-bg-panel)",
-        paddingBottom:   "env(safe-area-inset-bottom, 0px)",
-      }}
-    >
-      {tabs.map(t => {
-        const isActive = active === t.id;
-        return (
+    <>
+      {/* Backdrop — behind the panel, dims the rest of the page */}
+      <div
+        onClick={onClose}
+        aria-hidden={!open}
+        className="fixed inset-0 z-40 transition-opacity duration-200"
+        style={{
+          backgroundColor: "rgba(0,0,0,0.45)",
+          opacity:        open ? 1 : 0,
+          pointerEvents:  open ? "auto" : "none",
+        }}
+      />
+      {/* Panel — slides in from the left edge */}
+      <aside
+        role="dialog"
+        aria-label="Section navigation"
+        aria-hidden={!open}
+        className="fixed inset-y-0 left-0 z-50 flex w-[82%] max-w-[340px] flex-col border-r shadow-2xl transition-transform duration-200 ease-out"
+        style={{
+          backgroundColor: "var(--ats-bg-panel)",
+          borderColor:     "var(--ats-border-subtle)",
+          color:           "var(--ats-fg-primary)",
+          transform:       open ? "translateX(0)" : "translateX(-100%)",
+          paddingTop:      "env(safe-area-inset-top, 0px)",
+          paddingBottom:   "env(safe-area-inset-bottom, 0px)",
+        }}
+      >
+        {/* Drawer header */}
+        <div
+          className="flex items-center justify-between border-b px-4 py-3"
+          style={{ borderColor: "var(--ats-border-subtle)" }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/Cats_01.png" alt="" className="h-9 w-9 shrink-0" draggable={false} />
+            <div className="min-w-0">
+              <div className="text-base font-bold leading-none">
+                <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
+                <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
+              </div>
+              <div className="mt-1 truncate text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
+                {accountLabel}
+              </div>
+            </div>
+          </div>
           <button
-            key={t.id}
-            onClick={() => !t.disabled && onChange(t.id)}
-            disabled={t.disabled}
-            className="flex-1 flex flex-col items-center justify-center gap-1 py-2.5 transition-colors disabled:opacity-40"
+            onClick={onClose}
+            aria-label="Close navigation"
+            className="flex h-11 w-11 items-center justify-center rounded-xl border active:scale-95"
             style={{
-              color: isActive ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-input)",
+              color:           "var(--ats-fg-primary)",
             }}
-            aria-pressed={isActive}
-            aria-label={t.label}
           >
-            <span style={isActive ? { color: "var(--ats-fg-accent)" } : undefined}>{t.icon}</span>
-            <span className="text-[10px] font-semibold tracking-wide">{t.label}</span>
-            {isActive && (
-              <span
-                className="absolute top-0 h-0.5 w-10 rounded-b-full"
-                style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                aria-hidden
-              />
-            )}
+            <X size={20} />
           </button>
-        );
-      })}
-    </nav>
+        </div>
+
+        {/* Section list — scrollable if it ever overflows */}
+        <nav className="flex-1 overflow-y-auto px-2 py-3">
+          {sections.map(sec => {
+            const isActive   = sec.id === active;
+            const isDisabled = sec.hideUntilResults && !hasResults;
+            return (
+              <button
+                key={sec.id}
+                onClick={() => { if (!isDisabled) onPick(sec.id); }}
+                disabled={isDisabled}
+                aria-current={isActive ? "page" : undefined}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.98]"
+                style={{
+                  backgroundColor: isActive ? "var(--ats-bg-accent-soft)" : "transparent",
+                  color:           isActive ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                  minHeight:       "56px",
+                }}
+              >
+                <span
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
+                  style={{
+                    backgroundColor: isActive ? "var(--ats-bg-panel)" : "var(--ats-bg-input)",
+                    color:           isActive ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                  }}
+                >
+                  {sec.icon}
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-[15px] font-semibold leading-tight">
+                    {sec.label}
+                  </span>
+                  <span
+                    className="block truncate text-[11px] mt-0.5"
+                    style={{ color: isActive ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
+                  >
+                    {isDisabled ? "Run a search first" : sec.blurb}
+                  </span>
+                </span>
+                {isActive && (
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                    aria-hidden
+                  />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Drawer footer */}
+        <div
+          className="border-t px-4 py-3 text-[10px]"
+          style={{ borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-muted)" }}
+        >
+          {APP_VERSION}
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -671,25 +1052,27 @@ function HomeScreen({
         </div>
       )}
 
-      {/* Run button — large, sticky-feeling */}
+      {/* Run button — large, sticky-feeling. min-h 60 px so the icon + label
+          have breathing room and the button is unmistakeably the primary CTA. */}
       <button
         onClick={onSearch}
         disabled={!query.trim() || blockedByQuota}
-        className="w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-base font-bold shadow-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.99]"
+        className="w-full flex items-center justify-center gap-2 rounded-2xl text-[17px] font-bold shadow-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.99]"
         style={{
           backgroundColor: "var(--ats-fg-accent)",
           color:           "#ffffff",
+          minHeight:       "60px",
         }}
       >
-        {fastMode ? <Zap size={18} /> : <FlaskConical size={18} />}
+        {fastMode ? <Zap size={20} /> : <FlaskConical size={20} />}
         <span>{blockedByQuota ? "Sign in for unlimited search" : (fastMode ? "Quick Search" : "Curated Analysis")}</span>
       </button>
 
-      {/* Soft-pointer to desktop for advanced features */}
+      {/* Pointer to drawer for the rest of the app */}
       <div className="rounded-xl border border-dashed px-3 py-2.5 text-[11px] leading-relaxed"
         style={{ borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-muted)" }}
       >
-        Need the writing Lab, charts, or evidence chain? Open AcademiCats on a laptop or desktop browser for the full toolkit.
+        Tap the menu icon (top-left) for Synthesis Lab, Paper Review, History, and Profile.
       </div>
     </div>
   );
@@ -707,17 +1090,19 @@ function ModeChip({
   return (
     <button
       onClick={onClick}
-      className="flex flex-col items-center gap-1 rounded-xl py-2.5 transition-colors"
+      aria-pressed={active}
+      className="flex flex-col items-center justify-center gap-1 rounded-xl transition-colors active:scale-[0.97]"
       style={{
         backgroundColor: active ? "var(--ats-fg-accent)" : "transparent",
         color:           active ? "#ffffff" : "var(--ats-fg-secondary)",
+        minHeight:       "56px",
       }}
     >
       <div className="flex items-center gap-1.5">
         {icon}
-        <span className="text-sm font-bold">{label}</span>
+        <span className="text-[15px] font-bold">{label}</span>
       </div>
-      <span className="text-[10px] opacity-80">{tagline}</span>
+      <span className="text-[11px] opacity-80">{tagline}</span>
     </button>
   );
 }
@@ -942,6 +1327,328 @@ function PaperCard({ paper, index }: { paper: Paper; index: number }) {
         </a>
       )}
     </article>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LabScreen — Synthesis Lab, mobile-streamlined
+//
+// Desktop Lab has ~12 controls (output type, citation, language, points list,
+// extras, writing model, target pages, etc.). On a phone that's a wall of
+// fields nobody fills out. This trim keeps the three controls that materially
+// change the output:
+//   1. Output type — picks the prompt template
+//   2. Topic / argument — the core context the writer expands from
+//   3. Run / Stop
+// Everything else falls back to sensible defaults on the backend (APA / English
+// / 2 pages / gpt-5.3). Power users can still hit the desktop site for the
+// full editor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LAB_OUTPUT_TYPES: Array<{ id: string; label: string; blurb: string }> = [
+  { id: "synthesis",            label: "Synthesis",          blurb: "General academic writing"             },
+  { id: "literature_review",    label: "Literature Review",  blurb: "Themed map of existing research"     },
+  { id: "personal_statement",   label: "Personal Statement", blurb: "For grad-school applications"         },
+  { id: "sop",                  label: "Statement of Purpose", blurb: "Goals + research fit"               },
+  { id: "resume",               label: "Resume / CV",        blurb: "Student academic CV"                  },
+  { id: "abstract",             label: "Abstract",           blurb: "150–250 word summary"                 },
+  { id: "theoretical_framework", label: "Theoretical Frame", blurb: "Model that explains a phenomenon"     },
+];
+
+function LabScreen({
+  outputType, setOutputType,
+  coreArg, setCoreArg,
+  generating, status, result, errorMsg,
+  onRun, onStop,
+}: {
+  outputType: string;
+  setOutputType: (s: string) => void;
+  coreArg: string;
+  setCoreArg: (s: string) => void;
+  generating: boolean;
+  status: string;
+  result: string;
+  errorMsg: string;
+  onRun: () => void;
+  onStop: () => void;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const selected = LAB_OUTPUT_TYPES.find(t => t.id === outputType) ?? LAB_OUTPUT_TYPES[0];
+  // Pull the core-field placeholder + label from the shared lab-fields spec
+  // so the mobile copy stays in sync with desktop instead of drifting.
+  const spec = useMemo(() => labFieldSpec(outputType), [outputType]);
+
+  return (
+    <div className="px-4 py-4 pb-24 space-y-5">
+      {/* Output-type picker — large tap area, opens chip-grid below on tap */}
+      <section className="space-y-2">
+        <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+          Output type
+        </label>
+        <button
+          onClick={() => setPickerOpen(o => !o)}
+          className="flex w-full items-center justify-between rounded-xl border px-4 py-3.5 text-left transition-colors active:scale-[0.99]"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-primary)",
+            minHeight:       "56px",
+          }}
+        >
+          <span className="min-w-0 flex-1 pr-2">
+            <span className="block text-[15px] font-semibold">{selected.label}</span>
+            <span className="block truncate text-[11px] mt-0.5" style={{ color: "var(--ats-fg-muted)" }}>
+              {selected.blurb}
+            </span>
+          </span>
+          <ChevronDown
+            size={20}
+            style={{
+              color: "var(--ats-fg-muted)",
+              transform: pickerOpen ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.15s",
+            }}
+          />
+        </button>
+        {pickerOpen && (
+          <div className="grid grid-cols-1 gap-2 pt-1">
+            {LAB_OUTPUT_TYPES.map(t => {
+              const active = t.id === outputType;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => { setOutputType(t.id); setPickerOpen(false); }}
+                  className="flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-colors active:scale-[0.99]"
+                  style={{
+                    borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                    backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                    color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                    minHeight:       "52px",
+                  }}
+                >
+                  <span className="min-w-0">
+                    <span className="block text-[14px] font-semibold">{t.label}</span>
+                    <span className="block truncate text-[11px] mt-0.5" style={{ color: active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}>
+                      {t.blurb}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* Core argument / topic */}
+      <section className="space-y-2">
+        <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+          {spec.coreLabel}
+        </label>
+        <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>{spec.coreDescription}</p>
+        <textarea
+          value={coreArg}
+          onChange={e => setCoreArg(e.target.value)}
+          placeholder={spec.corePlaceholder}
+          rows={6}
+          className="w-full resize-none rounded-xl border px-4 py-3 text-[15px] leading-relaxed focus:outline-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+      </section>
+
+      {/* Run / Stop button — full-width, 56-px tall */}
+      <button
+        onClick={generating ? onStop : onRun}
+        disabled={!generating && !coreArg.trim()}
+        className="flex w-full items-center justify-center gap-2 rounded-xl text-[16px] font-semibold transition-all disabled:opacity-40 active:scale-[0.99]"
+        style={{
+          backgroundColor: generating ? "var(--ats-bg-input)" : "var(--ats-fg-accent)",
+          color:           generating ? "var(--ats-fg-primary)" : "var(--ats-bg-base)",
+          minHeight:       "56px",
+          border:          "1px solid var(--ats-border-subtle)",
+        }}
+      >
+        {generating ? (
+          <>
+            <RefreshCw size={18} className="animate-spin" />
+            <span>Stop</span>
+          </>
+        ) : (
+          <>
+            <PenLine size={18} />
+            <span>Run synthesis</span>
+          </>
+        )}
+      </button>
+
+      {/* Status / error / result */}
+      {(status || errorMsg) && (
+        <div className="space-y-1 text-[12px]">
+          {status && <div style={{ color: "var(--ats-fg-muted)" }}>{status}</div>}
+          {errorMsg && <div style={{ color: "var(--ats-fg-error, #d33)" }}>{errorMsg}</div>}
+        </div>
+      )}
+      {result && (
+        <article
+          className="rounded-xl border px-4 py-4 prose prose-sm max-w-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        >
+          <ReactMarkdown>{result}</ReactMarkdown>
+        </article>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReviewScreen — Paper Review, mobile-streamlined
+//
+// Mirrors the same prune as Lab: paste text, pick draft level, run. Status +
+// streamed result come back as plain prose. Desktop has the rich agent log
+// + structured issue cards; on mobile we render the streamed Markdown inline.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DRAFT_LEVELS: Array<{ id: "final" | "working" | "sketch"; label: string; blurb: string }> = [
+  { id: "final",   label: "Final",   blurb: "Polished — strict review" },
+  { id: "working", label: "Working", blurb: "Mid-stage — balanced"      },
+  { id: "sketch",  label: "Sketch",  blurb: "Early draft — gentle"       },
+];
+
+function ReviewScreen({
+  text, setText,
+  draftLevel, setDraftLevel,
+  generating, status, result, errorMsg,
+  onRun, onStop,
+}: {
+  text: string;
+  setText: (s: string) => void;
+  draftLevel: "final" | "working" | "sketch";
+  setDraftLevel: (s: "final" | "working" | "sketch") => void;
+  generating: boolean;
+  status: string;
+  result: string;
+  errorMsg: string;
+  onRun: () => void;
+  onStop: () => void;
+}) {
+  const charCount = text.length;
+  return (
+    <div className="px-4 py-4 pb-24 space-y-5">
+      {/* Draft level chips — three big targets */}
+      <section className="space-y-2">
+        <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+          Draft stage
+        </label>
+        <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>
+          Calibrates how strict the reviewers are.
+        </p>
+        <div className="grid grid-cols-3 gap-2">
+          {DRAFT_LEVELS.map(d => {
+            const active = d.id === draftLevel;
+            return (
+              <button
+                key={d.id}
+                onClick={() => setDraftLevel(d.id)}
+                className="flex flex-col items-center justify-center rounded-xl border px-2 py-3 transition-colors active:scale-[0.97]"
+                style={{
+                  borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                  backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                  color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                  minHeight:       "64px",
+                }}
+                aria-pressed={active}
+              >
+                <span className="text-[14px] font-bold">{d.label}</span>
+                <span
+                  className="mt-0.5 text-[10px] leading-tight text-center"
+                  style={{ color: active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
+                >
+                  {d.blurb}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Paste text */}
+      <section className="space-y-2">
+        <div className="flex items-end justify-between">
+          <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+            Paper text
+          </label>
+          <span className="text-[10px]" style={{ color: charCount < 200 ? "var(--ats-fg-error, #d33)" : "var(--ats-fg-muted)" }}>
+            {charCount.toLocaleString()} chars
+          </span>
+        </div>
+        <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>
+          Paste your draft. Minimum 200 characters.
+        </p>
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder="Paste the full text of your paper / draft here…"
+          rows={12}
+          className="w-full resize-none rounded-xl border px-4 py-3 text-[14px] leading-relaxed focus:outline-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+      </section>
+
+      {/* Run / Stop */}
+      <button
+        onClick={generating ? onStop : onRun}
+        disabled={!generating && charCount < 200}
+        className="flex w-full items-center justify-center gap-2 rounded-xl text-[16px] font-semibold transition-all disabled:opacity-40 active:scale-[0.99]"
+        style={{
+          backgroundColor: generating ? "var(--ats-bg-input)" : "var(--ats-fg-accent)",
+          color:           generating ? "var(--ats-fg-primary)" : "var(--ats-bg-base)",
+          minHeight:       "56px",
+          border:          "1px solid var(--ats-border-subtle)",
+        }}
+      >
+        {generating ? (
+          <>
+            <RefreshCw size={18} className="animate-spin" />
+            <span>Stop review</span>
+          </>
+        ) : (
+          <>
+            <ClipboardList size={18} />
+            <span>Run review</span>
+          </>
+        )}
+      </button>
+
+      {(status || errorMsg) && (
+        <div className="space-y-1 text-[12px]">
+          {status && <div style={{ color: "var(--ats-fg-muted)" }}>{status}</div>}
+          {errorMsg && <div style={{ color: "var(--ats-fg-error, #d33)" }}>{errorMsg}</div>}
+        </div>
+      )}
+      {result && (
+        <article
+          className="rounded-xl border px-4 py-4 prose prose-sm max-w-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        >
+          <ReactMarkdown>{result}</ReactMarkdown>
+        </article>
+      )}
+    </div>
   );
 }
 
