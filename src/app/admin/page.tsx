@@ -568,6 +568,16 @@ export default function AdminPage() {
   const activity     = usePolling(fetchActivity,     30_000,           enabled);
   const maintenance  = usePolling(fetchMaintenance,  15_000,           enabled);
 
+  // 1 Hz ticking "now" timestamp — drives the live NY + Beijing clock in
+  // the header. Cheapest possible setInterval; setting integer-millisecond
+  // state values is React-idle compatible. Stops when the page is hidden
+  // so the tab doesn't keep ticking in a background window.
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // ── Maintenance-mode mutations ────────────────────────────────────────
   // Three operations: toggle-on-with-ETA, update-message-only, toggle-off.
   // Each PATCHes the singleton via /api/admin/maintenance (or the
@@ -1136,9 +1146,31 @@ export default function AdminPage() {
             </span>
           </div>
           <div className="ml-auto flex items-center gap-3 text-[11px]" style={{ color: "var(--ats-fg-secondary)" }}>
+            {/* Live NY + Beijing clock — server reference time on the
+                left, Beijing reference on the right. The clock ticks
+                every second via the nowTick interval declared above.
+                Same Intl formatters as fmtDateTime so the displayed
+                time matches the format in tables / activity feed
+                exactly. Hidden on narrow viewports to keep the
+                Refresh / Sign out controls visible. */}
+            <span
+              className="hidden md:inline-flex items-center gap-1.5 tabular-nums"
+              title="Server reference time. All admin tables show timestamps in NY time."
+            >
+              <Clock size={11} />
+              <span style={{ color: "var(--ats-fg-primary)" }}>
+                NY {(() => {
+                  const d = new Date(nowTick);
+                  return _NY_DATETIME_FMT.format(d).replace(", ", " ").slice(11, 16);
+                })()}
+              </span>
+              <span style={{ color: "var(--ats-fg-muted)" }}>·</span>
+              <span style={{ color: "var(--ats-fg-secondary)" }}>
+                Beijing {_BJ_TIME_FMT.format(new Date(nowTick))}
+              </span>
+            </span>
             {overview.lastUpdated > 0 && (
               <span className="inline-flex items-center gap-1">
-                <Clock size={11} />
                 Updated {relativeTime(overview.lastUpdated)}
               </span>
             )}
@@ -2046,7 +2078,7 @@ function MaintenancePanel({
           {state?.set_by && (
             <p className="text-[10px] mt-1" style={{ color: "var(--ats-fg-muted)" }}>
               Last changed by <span className="font-semibold">{state.set_by}</span>
-              {state.set_at && <> at <span className="tabular-nums">{new Date(state.set_at).toLocaleString()}</span></>}
+              {state.set_at && <> at <span className="tabular-nums">{fmtDateTime(state.set_at)}</span></>}
             </p>
           )}
         </div>
@@ -5262,26 +5294,57 @@ function pct(num: number, denom: number): string {
   return ((num / denom) * 100).toFixed(1);
 }
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toISOString().slice(0, 10);
-}
+// All timestamps the admin sees are normalised to America/New_York (the
+// canonical "server reference time" since the dev's user-facing rules
+// like UTC midnight quota resets and daily-rotated chips are easier to
+// reason about against ET) with a Beijing reference appended for
+// dev convenience. Previously fmtDate returned `.toISOString().slice(0,10)`
+// which was UTC date — visibly wrong for late-evening events on either
+// coast — and timestamps like the maintenance set_at used raw
+// `.toLocaleString()` which fell back to whichever TZ the dev's browser
+// was in. Single source of truth now.
 
+const _NY_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric", month: "2-digit", day: "2-digit",
+});
 const _NY_DATETIME_FMT = new Intl.DateTimeFormat("en-CA", {
   timeZone: "America/New_York",
   year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", second: "2-digit",
   hour12: false,
 });
+const _BJ_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric", month: "2-digit", day: "2-digit",
+});
+const _BJ_TIME_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  hour: "2-digit", minute: "2-digit",
+  hour12: false,
+});
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return _NY_DATE_FMT.format(d);
+}
 
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
   // en-CA gives "YYYY-MM-DD, HH:MM:SS" → strip the comma.
-  return _NY_DATETIME_FMT.format(d).replace(", ", " ") + " ET";
+  const ny = _NY_DATETIME_FMT.format(d).replace(", ", " ");
+  // Beijing is +12-13 h ahead of ET so the date often differs. Show date
+  // + time when it does, time-only when it doesn't (compact when same day,
+  // unambiguous when not).
+  const sameDay = _NY_DATE_FMT.format(d) === _BJ_DATE_FMT.format(d);
+  const bj = sameDay
+    ? _BJ_TIME_FMT.format(d)
+    : `${_BJ_DATE_FMT.format(d)} ${_BJ_TIME_FMT.format(d)}`;
+  return `${ny} ET · ${bj} Beijing`;
 }
 
 function relativeTime(ts: number): string {
