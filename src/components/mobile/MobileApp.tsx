@@ -2601,81 +2601,149 @@ function SignInGate({
   themeMode: "day" | "night";
   onToggleTheme: () => void;
 }) {
+  // Layout philosophy:
+  //   • A single 20-rem-wide column anchors EVERYTHING (mascot, wordmark,
+  //     tagline, both CTAs, footnote). The previous version let the tagline
+  //     stretch full-width while the buttons were 24-rem capped, which made
+  //     the typography look wider than the action area beneath it — a
+  //     classic "centered text wider than the buttons" mismatch.
+  //   • Primary CTA (Google) gets the accent fill so there's no question
+  //     which path is the recommended one. The previous version painted
+  //     both buttons in the same panel colour, so the user had to read both
+  //     to know which was primary.
+  //   • Guest quota count moves OUT of the button label onto a tiny
+  //     subtitle line below — the old "Try as guest · 2 Quick + 1 Curated"
+  //     wrapped onto two lines on narrow phones because the chip text
+  //     ran over the button width.
+  //   • Theme toggle stays in the top-right but uses a subtle pill with a
+  //     1-px ring, not the previous accent-soft chip. Less visual weight
+  //     so the hero owns the attention.
   return (
     <div
       className="min-h-[100dvh] flex flex-col"
       style={{ backgroundColor: "var(--ats-bg-base)", color: "var(--ats-fg-primary)" }}
     >
-      <header className="flex items-center justify-end px-4 py-3">
+      <header className="flex items-center justify-between px-5 py-3.5">
+        <span
+          className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+          style={{ color: "var(--ats-fg-muted)" }}
+        >
+          {APP_VERSION}
+        </span>
         <button
           onClick={onToggleTheme}
           aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
-          className="flex h-9 w-9 items-center justify-center rounded-full border transition-colors"
+          className="flex h-10 w-10 items-center justify-center rounded-full border transition-colors active:scale-95"
           style={{
             borderColor:     "var(--ats-border-subtle)",
-            backgroundColor: "var(--ats-bg-accent-soft)",
-            color:           "var(--ats-fg-accent)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-secondary)",
           }}
         >
-          {themeMode === "night" ? <Sun size={16} /> : <Moon size={16} />}
+          {themeMode === "night" ? <Sun size={18} /> : <Moon size={18} />}
         </button>
       </header>
 
-      <main className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/Cats_01.png" alt="" className="h-20 w-20 mb-4" draggable={false} />
-        <h1 className="text-2xl font-bold mb-1">
-          <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
-          <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
-        </h1>
-        <p className="text-sm mb-8" style={{ color: "var(--ats-fg-muted)" }}>
-          An academic search assistant for structuring and verifying thought.
-        </p>
+      <main className="flex-1 flex flex-col items-center justify-center px-6 pb-12">
+        <div className="w-full max-w-[20rem] flex flex-col items-center">
+          {/* ── Hero: mascot + wordmark + italic tagline ─────────────── */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/Cats_01.png"
+            alt="AcademiCats mascot"
+            className="h-24 w-24 mb-4 select-none pointer-events-none drop-shadow-md"
+            draggable={false}
+          />
+          <h1 className="text-[32px] font-black tracking-tight leading-none">
+            <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
+            <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
+          </h1>
 
-        <div className="w-full max-w-sm space-y-3">
-          <button
-            onClick={onGoogle}
-            className="w-full flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold transition-colors"
-            style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "var(--ats-bg-panel)",
-              color:           "var(--ats-fg-primary)",
-            }}
+          {/* Tagline — split onto two lines manually so we never get the
+              "two short words orphaned on line 2" widow problem, and so
+              the line break sits on a natural prepositional boundary. */}
+          <p
+            className="mt-3 text-center text-[13px] italic leading-snug"
+            style={{ color: "var(--ats-fg-muted)" }}
           >
-            <svg width="16" height="16" viewBox="0 0 48 48" fill="none">
-              <path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/>
-              <path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/>
-              <path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/>
-              <path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/>
-            </svg>
-            Continue with Google
-          </button>
+            An academic search assistant<br />
+            for structuring and verifying thought.
+          </p>
 
-          <div className="flex items-center gap-2" style={{ color: "var(--ats-fg-muted)" }}>
-            <div className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
-            <span className="text-[10px] uppercase tracking-wider">or</span>
-            <div className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+          {/* ── CTAs ─────────────────────────────────────────────────── */}
+          <div className="mt-10 w-full space-y-3">
+            {/* Primary: Continue with Google. Accent fill so it's
+                unmistakeably the recommended path. min-h 56 px = WCAG /
+                Apple HIG comfortable tap target. */}
+            <button
+              onClick={onGoogle}
+              className="flex w-full items-center justify-center gap-2.5 rounded-xl text-[15px] font-bold shadow-sm transition-all active:scale-[0.99]"
+              style={{
+                backgroundColor: "var(--ats-fg-accent)",
+                color:           "#ffffff",
+                minHeight:       "56px",
+                border:          "1px solid var(--ats-border-accent)",
+              }}
+            >
+              {/* White-bg circle around the Google logo so the multicolour
+                  brand mark stays legible on any accent background. */}
+              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white">
+                <svg width="14" height="14" viewBox="0 0 48 48" fill="none">
+                  <path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/>
+                  <path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/>
+                  <path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/>
+                  <path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/>
+                </svg>
+              </span>
+              <span>Continue with Google</span>
+            </button>
+
+            {/* Divider — half-opacity hairline rules with "OR" between */}
+            <div className="flex items-center gap-3 py-1" style={{ color: "var(--ats-fg-muted)" }}>
+              <div className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+              <span className="text-[10px] font-bold uppercase tracking-[0.18em]">or</span>
+              <div className="flex-1 h-px" style={{ backgroundColor: "var(--ats-border-subtle)" }} />
+            </div>
+
+            {/* Secondary: Try as guest. Ghost outlined — same height as
+                primary so the two CTAs feel symmetrical. The quota count
+                lives below as a sub-line so the button label can't wrap. */}
+            <div className="space-y-1.5">
+              <button
+                onClick={onGuest}
+                disabled={guestBusy}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border text-[15px] font-semibold transition-colors disabled:opacity-50 active:scale-[0.99]"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  color:           "var(--ats-fg-primary)",
+                  minHeight:       "56px",
+                }}
+              >
+                {guestBusy ? "Starting guest session…" : "Try as guest"}
+              </button>
+              {!guestBusy && (
+                <p
+                  className="text-center text-[11px]"
+                  style={{ color: "var(--ats-fg-muted)" }}
+                >
+                  {GUEST_QUICK_MAX} Quick + {GUEST_CURATED_MAX} Curated · no signup
+                </p>
+              )}
+            </div>
           </div>
 
-          <button
-            onClick={onGuest}
-            disabled={guestBusy}
-            className="w-full rounded-xl border px-4 py-3 text-sm font-medium transition-colors disabled:opacity-50"
-            style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "transparent",
-              color:           "var(--ats-fg-secondary)",
-            }}
+          {/* ── Footnote ────────────────────────────────────────────── */}
+          <p
+            className="mt-10 text-center text-[10px] leading-relaxed"
+            style={{ color: "var(--ats-fg-muted)" }}
           >
-            {guestBusy
-              ? "Starting guest session…"
-              : `Try as guest · ${GUEST_QUICK_MAX} Quick + ${GUEST_CURATED_MAX} Curated`}
-          </button>
+            By continuing you agree to our{" "}
+            <span style={{ color: "var(--ats-fg-secondary)" }}>Terms</span>
+            {" "}&amp;{" "}
+            <span style={{ color: "var(--ats-fg-secondary)" }}>Privacy</span>.
+          </p>
         </div>
-
-        <p className="mt-8 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-          {APP_VERSION}
-        </p>
       </main>
     </div>
   );
