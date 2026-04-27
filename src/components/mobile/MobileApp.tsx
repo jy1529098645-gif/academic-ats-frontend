@@ -36,7 +36,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
-  Search, ListOrdered, Clock, User as UserIcon,
+  Search, ListOrdered, User as UserIcon,
   Zap, FlaskConical, LogOut, Sun, Moon,
   ExternalLink, RefreshCw, Send,
   PenLine, ClipboardList, ChevronDown,
@@ -58,7 +58,7 @@ import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
 // type-checked at use-site.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Tab = "home" | "results" | "lab" | "review" | "history" | "profile";
+type Tab = "home" | "results" | "lab" | "review" | "profile";
 
 // Section metadata used by both the Drawer (slide-out left nav) and any
 // section-aware logic. Single source of truth so adding a new section means
@@ -84,14 +84,6 @@ type Paper = {
   is_oa?: boolean;
   summary?: string;
   recommendation_reason?: string;
-};
-
-type HistoryItem = {
-  id: string;
-  title: string;
-  updated_at: string;
-  isFast?: boolean;
-  result?: { brief?: string; papers?: Paper[] } | null;
 };
 
 type AuthUser = {
@@ -189,34 +181,10 @@ export default function MobileApp() {
     );
   }, [papers]);
 
-  // ── History (read-only on mobile; server-backed) ────────────────────────
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-
-  const loadHistory = useCallback(async () => {
-    if (!authUser?.email) { setHistory([]); return; }
-    setHistoryLoading(true);
-    try {
-      const token = await getAuthToken();
-      if (!token) return;
-      const res = await fetchWithApiFallback("/api/history?limit=50", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { items?: HistoryItem[] };
-      const items = data.items ?? [];
-      items.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      setHistory(items);
-    } catch {
-      // best-effort; leave previous list if fetch fails
-    } finally {
-      setHistoryLoading(false);
-    }
-  }, [authUser?.email]);
-
-  // Refresh history when the user signs in or opens that tab.
-  useEffect(() => { void loadHistory(); }, [loadHistory]);
-  useEffect(() => { if (tab === "history") void loadHistory(); }, [tab, loadHistory]);
+  // (History was removed from mobile per product decision — no server fetch
+  // is required and the History tab is gone from the bottom bar. The server
+  // still records search runs for desktop access; mobile just doesn't
+  // surface them.)
 
   // ── Synthesis Lab state ─────────────────────────────────────────────────
   // Mobile keeps Lab streamlined: pick an output type, type a topic, hit Run.
@@ -514,8 +482,6 @@ export default function MobileApp() {
         setSearchStatus("done");
         setProgress(100);
       }
-
-      void loadHistory();
     } catch (e) {
       if ((e as { name?: string })?.name === "AbortError") {
         setSearchStatus("idle");
@@ -527,7 +493,7 @@ export default function MobileApp() {
     } finally {
       abortRef.current = null;
     }
-  }, [query, fastMode, paperCount, searchStatus, authUser, isGuest, guestQuickRemaining, guestCuratedRemaining, loadHistory]);
+  }, [query, fastMode, paperCount, searchStatus, authUser, isGuest, guestQuickRemaining, guestCuratedRemaining]);
 
   // Live ref for the SSE consumer's "did we end cleanly?" check above.
   const searchStatusRef = useRef<SearchStatus>("idle");
@@ -537,21 +503,6 @@ export default function MobileApp() {
     abortRef.current?.abort();
     abortRef.current = null;
     setSearchStatus("idle");
-  }, []);
-
-  // ── Restore from history ────────────────────────────────────────────────
-  const restoreFromHistory = useCallback((item: HistoryItem) => {
-    setQuery(item.title);
-    if (item.result) {
-      setPapers(item.result.papers ?? []);
-      setBrief(item.result.brief ?? "");
-      setSearchStatus("done");
-      setProgress(100);
-      setStatusMsg("Restored from history.");
-      setTab("results");
-    } else {
-      setTab("home");
-    }
   }, []);
 
   // ── Sign-in handlers ────────────────────────────────────────────────────
@@ -615,7 +566,6 @@ export default function MobileApp() {
     { id: "results",  label: "Results",        blurb: "Papers + research brief",          icon: <ListOrdered size={22} />, hideUntilResults: true },
     { id: "lab",      label: "Synthesis Lab",  blurb: "Draft writing from your input",    icon: <PenLine size={22} /> },
     { id: "review",   label: "Paper Review",   blurb: "Multi-agent feedback on a draft",  icon: <ClipboardList size={22} /> },
-    { id: "history",  label: "History",        blurb: "Past searches, restore any run",   icon: <Clock size={22} /> },
     { id: "profile",  label: "Profile",        blurb: "Account, theme, sign out",         icon: <UserIcon size={22} /> },
   ];
   const activeSection = sections.find(s => s.id === tab) ?? sections[0];
@@ -689,14 +639,6 @@ export default function MobileApp() {
             errorMsg={reviewError}
             onRun={() => void runReview()}
             onStop={stopReview}
-          />
-        )}
-        {tab === "history" && (
-          <HistoryScreen
-            items={history}
-            loading={historyLoading}
-            onRestore={restoreFromHistory}
-            onRefresh={() => void loadHistory()}
           />
         )}
         {tab === "profile" && (
@@ -950,13 +892,29 @@ function HomeScreen({
         {/* Italic rotating sprite voice. Keyed on `voiceLine` so React
             reissues the element every rotation, retriggering the fade-in
             keyframe (.voice-fade is defined in globals.css alongside the
-            desktop sprite). Fixed-height container prevents layout shift
-            when the line wraps from one row to two. */}
-        <div className="flex min-h-[3.25rem] w-full items-start justify-center px-2">
+            desktop sprite).
+
+            FIXED-HEIGHT slot — the placeholder pool ranges from short
+            (~30 chars, 1 line on most phones) to long (~92 chars, 2–3
+            lines on narrow devices). If we let the slot shrink/grow with
+            the line, every rotation jolts everything below — textarea,
+            mode picker, Run button — by 20+ px. We pin the height to
+            5 rem (≈ 80 px ≈ 3 lines at 15-px italic / leading 1.45)
+            and clamp the text to 3 lines so anything longer truncates
+            instead of overflowing. Single-line slogans get vertically
+            centred via `items-center` so the slot doesn't look empty. */}
+        <div className="flex h-[5rem] w-full items-center justify-center px-2">
           <p
             key={voiceLine}
-            className="voice-fade max-w-[28rem] text-center text-[15px] italic leading-snug"
-            style={{ color: "var(--ats-fg-accent)" }}
+            className="voice-fade max-w-[28rem] text-center text-[15px] italic"
+            style={{
+              color:           "var(--ats-fg-accent)",
+              display:         "-webkit-box",
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: "vertical",
+              overflow:        "hidden",
+              lineHeight:      1.45,
+            }}
           >
             {voiceLine}
           </p>
@@ -1826,79 +1784,8 @@ function ReviewScreen({
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HistoryScreen — list of past searches as cards
-// ─────────────────────────────────────────────────────────────────────────────
-
-function HistoryScreen({
-  items, loading, onRestore, onRefresh,
-}: {
-  items: HistoryItem[];
-  loading: boolean;
-  onRestore: (item: HistoryItem) => void;
-  onRefresh: () => void;
-}) {
-  return (
-    <div className="px-4 py-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-base font-bold">History</h2>
-        <button
-          onClick={onRefresh}
-          className="flex items-center gap-1 text-xs"
-          style={{ color: "var(--ats-fg-muted)" }}
-        >
-          <RefreshCw size={12} /> Refresh
-        </button>
-      </div>
-
-      {loading && (
-        <div className="text-xs" style={{ color: "var(--ats-fg-muted)" }}>Loading…</div>
-      )}
-
-      {!loading && items.length === 0 && (
-        <div
-          className="rounded-xl border border-dashed px-4 py-8 text-center text-sm"
-          style={{ borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-muted)" }}
-        >
-          No history yet. Run a search to start a timeline.
-        </div>
-      )}
-
-      {!loading && items.map(item => {
-        const d = new Date(item.updated_at);
-        return (
-          <button
-            key={item.id}
-            onClick={() => onRestore(item)}
-            className="block w-full rounded-xl border p-3.5 text-left transition-colors active:scale-[0.99]"
-            style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "var(--ats-bg-panel)",
-            }}
-          >
-            <div className="flex items-start justify-between gap-2 mb-1">
-              <span
-                className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold"
-                style={{
-                  backgroundColor: item.isFast ? "#10b9811a" : "#f59e0b1a",
-                  color:           item.isFast ? "#10b981"   : "#f59e0b",
-                }}
-              >
-                {item.isFast ? "Quick" : "Curated"}
-              </span>
-              <span className="text-[10px] tabular-nums" style={{ color: "var(--ats-fg-muted)" }}>
-                {d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-              </span>
-            </div>
-            <p className="text-sm font-semibold leading-snug line-clamp-2 break-words" style={{ color: "var(--ats-fg-primary)" }}>
-              {item.title}
-            </p>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
+// (HistoryScreen removed — mobile no longer surfaces history per product
+// decision. The desktop view still provides full history access.)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ProfileScreen — account info + theme toggle + sign-out
