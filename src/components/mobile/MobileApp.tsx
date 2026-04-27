@@ -160,6 +160,12 @@ export default function MobileApp() {
   // ── Search state ────────────────────────────────────────────────────────
   const [query, setQuery] = useState("");
   const [fastMode, setFastMode] = useState(true); // true = Quick, false = Curated
+  // User-tunable result-set size. Desktop has separate Quick / Curated counts
+  // and a 3–500 range; mobile collapses that to a single value with a chip
+  // strip of presets (20 / 50 / 100 / 200) plus a custom number entry. 50 is
+  // the default — matches desktop's Quick default and is a comfortable
+  // "single-screen" depth on a phone.
+  const [paperCount, setPaperCount] = useState<number>(50);
   const [searchStatus, setSearchStatus] = useState<SearchStatus>("idle");
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("");
@@ -167,6 +173,22 @@ export default function MobileApp() {
   const [brief, setBrief] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+
+  // Sort the paper list by evidence/relevance score descending. The backend
+  // returns them sorted, but during streaming partial batches arrive in
+  // source-of-arrival order, and `setPapers` from history restoration may
+  // also bypass the backend sort. Sorting here in a useMemo guarantees a
+  // consistent ordering for both the Results list and the Charts panel.
+  const sortedPapers = useMemo(() => {
+    const toNum = (v: unknown): number => {
+      if (v == null) return 0;
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    return [...papers].sort(
+      (a, b) => toNum(b.evidence_score ?? b.score) - toNum(a.evidence_score ?? a.score),
+    );
+  }, [papers]);
 
   // ── History (read-only on mobile; server-backed) ────────────────────────
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -406,7 +428,7 @@ export default function MobileApp() {
         body: JSON.stringify({
           query: q,
           fast_mode: fastMode,
-          paper_count: fastMode ? 50 : 20,
+          paper_count: paperCount,
           sort_mode: "Relevance score",
           prefer_abstracts: true,
           strict_core_only: false,
@@ -506,7 +528,7 @@ export default function MobileApp() {
     } finally {
       abortRef.current = null;
     }
-  }, [query, fastMode, searchStatus, authUser, isGuest, guestQuickRemaining, guestCuratedRemaining, loadHistory]);
+  }, [query, fastMode, paperCount, searchStatus, authUser, isGuest, guestQuickRemaining, guestCuratedRemaining, loadHistory]);
 
   // Live ref for the SSE consumer's "did we end cleanly?" check above.
   const searchStatusRef = useRef<SearchStatus>("idle");
@@ -618,6 +640,8 @@ export default function MobileApp() {
             setQuery={setQuery}
             fastMode={fastMode}
             setFastMode={setFastMode}
+            paperCount={paperCount}
+            setPaperCount={setPaperCount}
             onSearch={() => void runSearch()}
             errorMsg={errorMsg}
             isGuest={isGuest}
@@ -631,7 +655,7 @@ export default function MobileApp() {
             progress={progress}
             statusMsg={statusMsg}
             errorMsg={errorMsg}
-            papers={papers}
+            papers={sortedPapers}
             brief={brief}
             query={query}
             fastMode={fastMode}
@@ -986,13 +1010,16 @@ function Drawer({
 // surface feel like the same product, just resized for one hand.
 
 function HomeScreen({
-  query, setQuery, fastMode, setFastMode, onSearch, errorMsg,
+  query, setQuery, fastMode, setFastMode, paperCount, setPaperCount,
+  onSearch, errorMsg,
   isGuest, quickRemaining, curatedRemaining,
 }: {
   query: string;
   setQuery: (s: string) => void;
   fastMode: boolean;
   setFastMode: (b: boolean) => void;
+  paperCount: number;
+  setPaperCount: (n: number) => void;
   onSearch: () => void;
   errorMsg: string;
   isGuest: boolean;
@@ -1102,6 +1129,9 @@ function HomeScreen({
           tagline="High quality"
         />
       </section>
+
+      {/* ── Paper-count picker ──────────────────────────────────────────── */}
+      <PaperCountPicker count={paperCount} setCount={setPaperCount} />
 
       {/* ── Run button — primary CTA ─────────────────────────────────────── */}
       <button
@@ -1221,6 +1251,110 @@ function ModeChip({
       </div>
       <span className="text-[11px] opacity-80">{tagline}</span>
     </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PaperCountPicker — choose how many papers the search returns.
+//
+// Four chips (20 / 50 / 100 / 200) cover the common cases with one tap;
+// users who want a different number type into the "Custom" field, which
+// accepts 3–500 (the same range the desktop allows). The custom input is
+// only committed to state on blur or Enter so partial typing (e.g. "1"
+// while heading toward "150") doesn't fire the search at the wrong size.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PAPER_COUNT_PRESETS = [20, 50, 100, 200] as const;
+const PAPER_COUNT_MIN = 3;
+const PAPER_COUNT_MAX = 500;
+
+function clampPaperCount(n: number): number {
+  if (!Number.isFinite(n)) return 50;
+  return Math.max(PAPER_COUNT_MIN, Math.min(PAPER_COUNT_MAX, Math.round(n)));
+}
+
+function PaperCountPicker({
+  count, setCount,
+}: {
+  count: number;
+  setCount: (n: number) => void;
+}) {
+  // The custom-input is uncontrolled (`defaultValue`) and remounts via
+  // `key={count}` whenever the parent value changes — that way tapping a
+  // preset chip clears the custom field without us having to mirror state
+  // through a useEffect. Commit happens on blur / Enter.
+  const isPreset = (PAPER_COUNT_PRESETS as readonly number[]).includes(count);
+
+  const commitCustom = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") return; // nothing typed — leave count as-is
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return;
+    setCount(clampPaperCount(n));
+  };
+
+  return (
+    <section className="space-y-2">
+      <div
+        className="flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.14em]"
+        style={{ color: "var(--ats-fg-muted)" }}
+      >
+        <span>Number of papers</span>
+        <span className="tabular-nums" style={{ color: "var(--ats-fg-accent)" }}>
+          {count}
+        </span>
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {PAPER_COUNT_PRESETS.map(n => {
+          const active = count === n;
+          return (
+            <button
+              key={n}
+              onClick={() => setCount(n)}
+              aria-pressed={active}
+              className="rounded-xl border text-[15px] font-bold transition-colors active:scale-[0.97]"
+              style={{
+                borderColor:     active ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+                backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                minHeight:       "48px",
+              }}
+            >
+              {n}
+            </button>
+          );
+        })}
+      </div>
+      {/* Custom entry — accepts 3–500 */}
+      <div
+        className="flex items-center gap-2 rounded-xl border px-3"
+        style={{
+          borderColor:     !isPreset ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+          backgroundColor: !isPreset ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-input)",
+          minHeight:       "48px",
+        }}
+      >
+        <span className="text-[12px] font-semibold" style={{ color: "var(--ats-fg-muted)" }}>
+          Custom
+        </span>
+        <input
+          // Remount whenever the parent count changes (e.g. preset tap) so
+          // the field reflects external value changes without controlled
+          // state. Custom counts persist as the input's defaultValue.
+          key={count}
+          type="number"
+          inputMode="numeric"
+          min={PAPER_COUNT_MIN}
+          max={PAPER_COUNT_MAX}
+          defaultValue={isPreset ? "" : String(count)}
+          onBlur={e => commitCustom(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
+          placeholder={`${PAPER_COUNT_MIN}–${PAPER_COUNT_MAX}`}
+          className="flex-1 bg-transparent text-right text-[15px] font-bold outline-none tabular-nums"
+          style={{ color: !isPreset ? "var(--ats-fg-accent)" : "var(--ats-fg-primary)" }}
+        />
+      </div>
+    </section>
   );
 }
 
