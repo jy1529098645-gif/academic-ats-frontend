@@ -985,11 +985,16 @@ function HomeScreen({
         <span>{blockedByQuota ? "Sign in for unlimited search" : (fastMode ? "Quick Search" : "Curated Analysis")}</span>
       </button>
 
-      {/* ── Recommended chips — horizontal scroll, single row ─────────────
+      {/* ── Recommended chips — wrap to multiple rows ───────────────────
           Mirrors the desktop landing's chip strip. Tapping fills the
-          textarea verbatim. We use horizontal scroll instead of wrap so
-          the home screen doesn't grow unboundedly tall on phones with
-          long term lists; the user can swipe to see the rest. */}
+          textarea verbatim. Earlier this was a single-row horizontal
+          scroller; users complained that off-screen chips were
+          discoverable only by experimentation. Now we use flex-wrap
+          so any chip that doesn't fit on the current line drops to the
+          next — every term is visible at first paint. The home screen
+          can grow taller as a result, but that's the natural cost of
+          full discoverability and the layout below the chips
+          (textarea + mode + Run) is already pinned to the page above. */}
       {showChips && (
         <section className="space-y-2">
           <div
@@ -1003,15 +1008,12 @@ function HomeScreen({
             />
             <span>Trending today</span>
           </div>
-          <div
-            className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1"
-            style={{ scrollbarWidth: "none" }}
-          >
+          <div className="flex flex-wrap gap-2">
             {recommendedTerms.slice(0, 12).map(term => (
               <button
                 key={term}
                 onClick={() => setQuery(term)}
-                className="shrink-0 rounded-full border px-4 py-2.5 text-[13px] font-medium transition-colors active:scale-[0.97]"
+                className="rounded-full border px-4 py-2.5 text-[13px] font-medium transition-colors active:scale-[0.97]"
                 style={{
                   borderColor:     "var(--ats-border-subtle)",
                   backgroundColor: "var(--ats-bg-panel)",
