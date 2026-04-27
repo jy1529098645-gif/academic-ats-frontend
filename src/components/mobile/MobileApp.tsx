@@ -49,6 +49,8 @@ import { useGuestQuotaStore, GUEST_QUICK_MAX, GUEST_CURATED_MAX } from "@/lib/st
 import { APP_VERSION } from "@/lib/tos-content";
 import { labFieldSpec } from "@/lib/lab-fields";
 import { PaperCharts } from "@/app/charts";
+import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
+import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — minimal, mobile-only. Doesn't import the desktop's Paper / Job
@@ -954,6 +956,35 @@ function Drawer({
 // HomeScreen — search input, mode picker, run button
 // ─────────────────────────────────────────────────────────────────────────────
 
+// HomeScreen — landing surface, modeled on the desktop hero.
+//
+// The desktop landing centres a "AcademiCats" wordmark + cat mascot, an
+// italic rotating sprite line from WORKSPACE_PLACEHOLDERS, the search
+// textarea, Quick / Curated mode bubbles, and a chip strip of recommended
+// terms (pulled daily from /api/workspace/recommended-terms). The mobile
+// version preserves the same elements and reading rhythm, but vertically
+// stacked and tuned for thumb interaction.
+//
+// Layout (top → bottom):
+//   1. Mascot (h-20) + "AcademiCats" wordmark, centered
+//   2. Italic rotating placeholder — same WORKSPACE_PLACEHOLDERS strings
+//      desktop uses, cycling on a 7-second interval. Acts as the sprite
+//      voice line.
+//   3. Search textarea — translucent panel-style, big text, tap target ≥ 64
+//      px
+//   4. Mode picker (Quick / Curated) — pill bubbles in the desktop sprite
+//      style
+//   5. Run button — full-width, accent-coloured CTA
+//   6. Recommended terms — horizontal scrolling chip strip pulling from the
+//      same /api/workspace/recommended-terms feed as desktop. Tap fills the
+//      textarea.
+//   7. Guest quota / error banners (only when relevant)
+//
+// Why this redesign vs the previous one: the original mobile home was a
+// vanilla "label + textarea + mode picker + button" stack. It worked but
+// didn't carry the brand. Mirroring the desktop hero on mobile makes the
+// surface feel like the same product, just resized for one hand.
+
 function HomeScreen({
   query, setQuery, fastMode, setFastMode, onSearch, errorMsg,
   isGuest, quickRemaining, curatedRemaining,
@@ -971,90 +1002,108 @@ function HomeScreen({
   const remaining = fastMode ? quickRemaining : curatedRemaining;
   const blockedByQuota = isGuest && remaining <= 0;
 
-  return (
-    <div className="px-4 py-5 space-y-5">
-      {/* Greeting */}
-      <div className="space-y-1">
-        <h1 className="text-xl font-bold leading-tight" style={{ color: "var(--ats-fg-primary)" }}>
-          What are you exploring?
-        </h1>
-        <p className="text-sm" style={{ color: "var(--ats-fg-muted)" }}>
-          Type a research question, theme, or paper title.
-        </p>
-      </div>
+  // Daily-rotating chip strip — same hook the desktop uses.
+  const { terms: recommendedTerms } = useRecommendedTerms();
 
-      {/* Query input */}
-      <div>
+  // Rotating italic placeholder — picks a stable starting index per mount
+  // (so the user doesn't see it always start at the same line) and
+  // advances every 7 seconds. Pauses while the user has typed anything,
+  // since changing the line beneath their input would feel restless.
+  const [voiceIdx, setVoiceIdx] = useState(() =>
+    Math.floor(Math.random() * WORKSPACE_PLACEHOLDERS.length),
+  );
+  useEffect(() => {
+    if (query.trim().length > 0) return; // pause while user is composing
+    const id = setInterval(() => {
+      setVoiceIdx(i => (i + 1) % WORKSPACE_PLACEHOLDERS.length);
+    }, 7000);
+    return () => clearInterval(id);
+  }, [query]);
+  const voiceLine = WORKSPACE_PLACEHOLDERS[voiceIdx] ?? WORKSPACE_PLACEHOLDERS[0];
+
+  // Show the chip strip only when the user hasn't typed anything yet — once
+  // they're composing, the chips are noise.
+  const showChips = query.trim().length === 0 && recommendedTerms.length > 0;
+
+  return (
+    <div className="px-4 pt-6 pb-10 space-y-5">
+      {/* ── Hero: mascot + wordmark, centered ────────────────────────────── */}
+      <header className="flex flex-col items-center gap-3">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/Cats_01.png"
+          alt="AcademiCats mascot"
+          className="h-20 w-20 select-none pointer-events-none drop-shadow-md"
+          draggable={false}
+        />
+        <div className="text-3xl font-black tracking-tight leading-none">
+          <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
+          <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
+        </div>
+
+        {/* Italic rotating sprite voice. Keyed on `voiceLine` so React
+            reissues the element every rotation, retriggering the fade-in
+            keyframe (.voice-fade is defined in globals.css alongside the
+            desktop sprite). Fixed-height container prevents layout shift
+            when the line wraps from one row to two. */}
+        <div className="flex min-h-[3.25rem] w-full items-start justify-center px-2">
+          <p
+            key={voiceLine}
+            className="voice-fade max-w-[28rem] text-center text-[15px] italic leading-snug"
+            style={{ color: "var(--ats-fg-accent)" }}
+          >
+            {voiceLine}
+          </p>
+        </div>
+      </header>
+
+      {/* ── Search input ────────────────────────────────────────────────── */}
+      <section className="space-y-1.5">
         <textarea
           value={query}
           onChange={e => setQuery(e.target.value)}
-          placeholder="e.g. mindfulness apps and undergraduate anxiety"
+          placeholder="Type a research question, theme, or paper title…"
           rows={4}
-          className="w-full rounded-2xl border px-4 py-3 text-base resize-y outline-none focus:ring-2 focus:ring-[var(--ats-fg-accent)] transition-shadow"
+          className="w-full rounded-2xl border px-4 py-3.5 text-[16px] leading-relaxed resize-y outline-none focus:ring-2 transition-shadow"
           style={{
             borderColor:     "var(--ats-border-subtle)",
             backgroundColor: "var(--ats-bg-panel)",
             color:           "var(--ats-fg-primary)",
+            minHeight:       "8rem",
           }}
         />
-        <div className="mt-1 text-right text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-          {query.trim().length} chars
-        </div>
-      </div>
+        {query.trim().length > 0 && (
+          <div className="text-right text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+            {query.trim().length} chars
+          </div>
+        )}
+      </section>
 
-      {/* Mode picker — segmented control */}
-      <div>
-        <div
-          className="grid grid-cols-2 gap-1 rounded-2xl p-1 border"
-          style={{
-            borderColor:     "var(--ats-border-subtle)",
-            backgroundColor: "var(--ats-bg-panel)",
-          }}
-        >
-          <ModeChip
-            active={fastMode}
-            onClick={() => setFastMode(true)}
-            icon={<Zap size={16} />}
-            label="Quick"
-            tagline="Scan at scale"
-          />
-          <ModeChip
-            active={!fastMode}
-            onClick={() => setFastMode(false)}
-            icon={<FlaskConical size={16} />}
-            label="Curated"
-            tagline="High quality"
-          />
-        </div>
-      </div>
+      {/* ── Mode picker: Quick / Curated ────────────────────────────────── */}
+      <section
+        className="grid grid-cols-2 gap-1 rounded-2xl p-1 border"
+        style={{
+          borderColor:     "var(--ats-border-subtle)",
+          backgroundColor: "var(--ats-bg-panel)",
+        }}
+      >
+        <ModeChip
+          active={fastMode}
+          onClick={() => setFastMode(true)}
+          icon={<Zap size={18} />}
+          label="Quick"
+          tagline="Scan at scale"
+        />
+        <ModeChip
+          active={!fastMode}
+          onClick={() => setFastMode(false)}
+          icon={<FlaskConical size={18} />}
+          label="Curated"
+          tagline="High quality"
+        />
+      </section>
 
-      {/* Guest quota indicator */}
-      {isGuest && (
-        <div
-          className="flex items-center justify-between rounded-xl border px-3 py-2 text-xs"
-          style={{
-            borderColor:     "var(--ats-border-accent)",
-            backgroundColor: "var(--ats-bg-accent-soft)",
-            color:           "var(--ats-fg-accent)",
-          }}
-        >
-          <span className="font-semibold">Guest mode</span>
-          <span className="tabular-nums">{quickRemaining}Q · {curatedRemaining}C left</span>
-        </div>
-      )}
-
-      {/* Error */}
-      {errorMsg && (
-        <div
-          className="rounded-xl border px-3 py-2 text-xs"
-          style={{ borderColor: "#ef444455", backgroundColor: "#ef44441a", color: "#ef4444" }}
-        >
-          {errorMsg}
-        </div>
-      )}
-
-      {/* Run button — large, sticky-feeling. min-h 60 px so the icon + label
-          have breathing room and the button is unmistakeably the primary CTA. */}
+      {/* ── Run button — primary CTA ─────────────────────────────────────── */}
       <button
         onClick={onSearch}
         disabled={!query.trim() || blockedByQuota}
@@ -1069,11 +1118,78 @@ function HomeScreen({
         <span>{blockedByQuota ? "Sign in for unlimited search" : (fastMode ? "Quick Search" : "Curated Analysis")}</span>
       </button>
 
-      {/* Pointer to drawer for the rest of the app */}
-      <div className="rounded-xl border border-dashed px-3 py-2.5 text-[11px] leading-relaxed"
+      {/* ── Recommended chips — horizontal scroll, single row ─────────────
+          Mirrors the desktop landing's chip strip. Tapping fills the
+          textarea verbatim. We use horizontal scroll instead of wrap so
+          the home screen doesn't grow unboundedly tall on phones with
+          long term lists; the user can swipe to see the rest. */}
+      {showChips && (
+        <section className="space-y-2">
+          <div
+            className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em]"
+            style={{ color: "var(--ats-fg-muted)" }}
+          >
+            <span
+              className="sprite-dot-idle inline-block h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: "var(--ats-fg-accent)" }}
+              aria-hidden
+            />
+            <span>Trending today</span>
+          </div>
+          <div
+            className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1"
+            style={{ scrollbarWidth: "none" }}
+          >
+            {recommendedTerms.slice(0, 12).map(term => (
+              <button
+                key={term}
+                onClick={() => setQuery(term)}
+                className="shrink-0 rounded-full border px-4 py-2.5 text-[13px] font-medium transition-colors active:scale-[0.97]"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  color:           "var(--ats-fg-primary)",
+                  minHeight:       "44px",
+                }}
+              >
+                {term}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ── Guest quota indicator ────────────────────────────────────────── */}
+      {isGuest && (
+        <div
+          className="flex items-center justify-between rounded-xl border px-3.5 py-2.5 text-xs"
+          style={{
+            borderColor:     "var(--ats-border-accent)",
+            backgroundColor: "var(--ats-bg-accent-soft)",
+            color:           "var(--ats-fg-accent)",
+          }}
+        >
+          <span className="font-semibold">Guest mode</span>
+          <span className="tabular-nums">{quickRemaining}Q · {curatedRemaining}C left</span>
+        </div>
+      )}
+
+      {/* ── Error ────────────────────────────────────────────────────────── */}
+      {errorMsg && (
+        <div
+          className="rounded-xl border px-3 py-2 text-xs"
+          style={{ borderColor: "#ef444455", backgroundColor: "#ef44441a", color: "#ef4444" }}
+        >
+          {errorMsg}
+        </div>
+      )}
+
+      {/* ── Drawer pointer ───────────────────────────────────────────────── */}
+      <div
+        className="rounded-xl border border-dashed px-3 py-2.5 text-center text-[11px] leading-relaxed"
         style={{ borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-muted)" }}
       >
-        Tap the menu icon (top-left) for Synthesis Lab, Paper Review, History, and Profile.
+        Tap the menu (top-left) for Lab · Paper Review · History
       </div>
     </div>
   );
