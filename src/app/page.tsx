@@ -7778,7 +7778,15 @@ ${html}
             // subscription/help/accounts/legal can be translated. Volatile
             // streaming regions still opt out individually via translate="no".
             translate="yes"
-            className={`w-full rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
+            // max-h-[90vh] + flex column lets the body scroll independently
+            // from the header / dialog frame, so the title + close-X stay
+            // pinned to the top no matter how tall the body content grows.
+            // Without this, long content (Terms & Notices on small viewports,
+            // Dev controls' 3-column editor on short windows) pushed both
+            // ends of the modal off-screen — the centred flex parent meant
+            // the title disappeared above the top of the viewport while the
+            // bottom buttons disappeared below.
+            className={`w-full max-h-[90vh] flex flex-col rounded-2xl border border-slate-700/60 bg-slate-900 shadow-2xl ${
               // Dev panel hosts a 3-column grid (warning + editor + cleanup),
               // so it needs the widest modal size — anything narrower squashes
               // the system-announcement editor. Subscription / Legal / Usage /
@@ -7792,8 +7800,9 @@ ${html}
             }`}
             onClick={e => e.stopPropagation()}
           >
-            {/* Header */}
-            <div className="flex items-center gap-3 px-6 py-4 border-b border-slate-700/50">
+            {/* Header — shrink-0 so the body's overflow steals all the
+                vertical slack instead of squeezing the header. */}
+            <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-slate-700/50">
               <span className="text-slate-400">
                 {userPanel === "profile"      && <User size={16} />}
                 {userPanel === "accounts"     && <Users size={16} />}
@@ -7819,8 +7828,14 @@ ${html}
 
             {/* Body — dev panel gets extra vertical breathing room
                 because its 3-column grid + editor rows otherwise feel
-                cramped against the modal header/footer borders. */}
-            <div className={`px-6 ${userPanel === "dev" ? "py-8" : "py-5"}`}>
+                cramped against the modal header/footer borders.
+                flex-1 + min-h-0 + overflow-y-auto: lets this region
+                consume all remaining height (after the header), but
+                cap at the parent's max-h-[90vh] and scroll internally
+                if the content (e.g. Terms & Notices' 7 sections) is
+                taller than that. .hairline-scrollbar paints the thumb
+                with the active theme tokens. */}
+            <div className={`flex-1 min-h-0 overflow-y-auto hairline-scrollbar px-6 ${userPanel === "dev" ? "py-8" : "py-5"}`}>
 
               {userPanel === "profile" && (
                 <div className="space-y-4">
