@@ -54,6 +54,8 @@ import { useAnnouncements } from "@/lib/hooks/use-announcements";
 import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
 import { PaperReviewPanel } from "@/components/lab/PaperReviewPanel";
 import { TOS_SECTIONS, TOS_VERSION, APP_VERSION } from "@/lib/tos-content";
+import { useIsMobile } from "@/lib/hooks/use-is-mobile";
+import MobileApp from "@/components/mobile/MobileApp";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
   Zap, FlaskConical, SlidersHorizontal, BookOpen, Upload, FolderOpen,
@@ -944,7 +946,41 @@ function DividerScrollbar({
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level page component.
+//
+// We split the original monolithic HomePage in two:
+//   • `HomePage` (this default export) — a thin viewport-aware router. It
+//     calls `useIsMobile()` and picks a UI tree. While the hook returns
+//     `null` (pre-hydration / first paint) we render nothing to avoid the
+//     classic "render desktop, then snap to mobile" flash.
+//   • `DesktopWorkspace` — the original giant component, untouched. It owns
+//     the desktop three-pane workspace, theme application, every modal and
+//     panel. Renamed from `HomePage` so the export becomes the router.
+//   • `MobileApp` — a fully independent mobile UI (separate file). It has
+//     its own theme application, auth, search runner, history view, and
+//     bottom tab bar. It shares only the Zustand stores (theme, guest
+//     quota) so the two surfaces stay in lockstep on visual identity but
+//     never share component code.
+//
+// Why two trees instead of CSS-only responsiveness: the desktop UI is a
+// dense three-pane workstation that doesn't shrink gracefully below the
+// `md` breakpoint. Forcing it into a phone viewport via Tailwind variants
+// would either bloat the desktop component with mobile branches or
+// compromise the phone experience. A separate tree lets each surface
+// optimise for its own input model (cursor + keyboard vs. thumb + tap).
+// ─────────────────────────────────────────────────────────────────────────────
 export default function HomePage() {
+  const isMobile = useIsMobile();
+  // `null` = hook hasn't resolved yet (SSR / first paint). Render nothing so
+  // the server-rendered HTML doesn't lock us into the wrong tree before the
+  // matchMedia listener fires on the client.
+  if (isMobile === null) return null;
+  if (isMobile) return <MobileApp />;
+  return <DesktopWorkspace />;
+}
+
+function DesktopWorkspace() {
   const gridRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragTarget>(null);
   const leftSectionRef = useRef<HTMLElement>(null);
