@@ -229,6 +229,116 @@ html {
   font-size: 22px;
 }
 
+/* ── Mobile-only font-size override (≤768 px viewport) ─────────────────────
+   The 22 px desktop baseline is too aggressive on phone-class viewports —
+   text-base would resolve to 22 px in a ~360 px wide column, which gives
+   only 6-8 chars per line. This @media block ONLY fires below 768 px;
+   desktop / laptop / tablet at landscape stays untouched at 22 px.
+
+   Why a @media query and not a CSS clamp(): clamp() would smoothly
+   shrink the font on desktop window-resize too (split-screen, dev tools
+   open), which the dev explicitly didn't want. Hard-cut at 768 px keeps
+   the desktop experience identical pixel-for-pixel.
+
+   16 px is the browser default and the value the codebase was originally
+   designed for before the global type rescale — every fixed-pixel
+   constraint (h-[68px] shells, max-w-[140px] truncations, etc.) was
+   tuned to this. Mobile lands back on it cleanly.
+
+   Same-shaped overrides for the floor coercion + sprite px values are
+   added below so the three rescaled families stay in lockstep on mobile. */
+@media (max-width: 768px) {
+  /* Workspace 3-pane grid → single column on mobile. The grid
+     container has dynamic inline `gridTemplateColumns` (computed in
+     px from leftPct / centerPct / rightPct) which beats Tailwind
+     classes — so the override has to come from a CSS rule with
+     `!important`. The .workspace-grid class is only applied to the
+     specific grid container in app/page.tsx. Side panels (left aside
+     + right aside) and dividers carry `max-md:hidden` so only the
+     centre column survives on mobile and gets all the width. */
+  .workspace-grid {
+    grid-template-columns: 1fr !important;
+    column-gap: 0 !important;
+  }
+
+  /* History panel on mobile: pin to a fixed 60 vh (drag-to-resize is
+     hidden on mobile via max-md:hidden on the drag strip) and switch
+     the timeline from horizontal to vertical scroll. The inline
+     style on the panel sets a height in CSS px from JS state — we
+     override with !important to land on the mobile-friendly height
+     regardless of what the user dragged it to on desktop. */
+  [data-history-panel] {
+    height: 60vh !important;
+  }
+  [data-history-timeline] {
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+  /* Stack history entries vertically on mobile. flex-col + gap gives
+     each entry its own row instead of cramming them into a horizontal
+     timeline that requires sideways scrolling. The desktop horizontal
+     line behind the dots is hidden via max-md:hidden on its element. */
+  [data-history-row] {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 0.75rem !important;
+  }
+  [data-history-row] > div {
+    margin-right: 0 !important;
+    align-self: flex-start;
+  }
+
+  html {
+    font-size: 16px;
+  }
+  /* Reset --sprite-zoom-comp on mobile. The earlier media-query chain
+     (lines above) kept multiplying the comp factor as the viewport
+     shrank from 2200 px down to 820 px — that compensation was tuned
+     for "small laptop with browser zoom" scenarios where the viewport
+     is narrow because of zoom, not because the device is small. On an
+     actual phone the viewport is narrow because the SCREEN is small,
+     so multiplying further is the wrong direction. Setting comp = 1
+     means the mobile sprite font sizes below render at face value. */
+  :root { --sprite-zoom-comp: 1 !important; }
+
+  .text-\[9px\],
+  .text-\[9\.5px\],
+  .text-\[10px\],
+  .text-\[11px\],
+  .text-\[12px\] {
+    font-size: 12px !important;
+  }
+  .sprite-voice       { font-size: 20px !important; }
+  .sprite-bubble      { font-size: 14px !important; }
+  .sprite-badge       { font-size: 12px !important; }
+  .sprite-bubble-soft { font-size: 12px !important; }
+
+  /* Admin dashboard is desktop-only — its 1600 px-wide max layout,
+     wide tables, and 8-card KPI grid don't shrink usefully below
+     768 px and aren't worth a Phase 1A rewrite. Hide the admin chrome
+     and show a friendly "open on desktop" notice instead. The hide
+     scopes only to .admin-main to avoid touching admin's login gate
+     (which the dev still needs to be able to use on mobile if they
+     ever land on /admin from a phone). */
+  .admin-main > * {
+    display: none !important;
+  }
+  .admin-main::before {
+    content: "AcademiCats Admin works best on a larger screen. Please open this on a laptop or desktop browser.";
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 1.5rem;
+    text-align: center;
+    color: var(--ats-fg-secondary, #475569);
+    font-size: 0.95rem;
+    line-height: 1.6;
+    min-height: 100vh;
+    width: 100%;
+    background-color: var(--ats-bg-base, #fafafa);
+  }
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

@@ -4433,7 +4433,7 @@ ${html}
 
         <div
           ref={gridRef}
-          className="relative grid flex-1 min-h-0"
+          className="workspace-grid relative grid flex-1 min-h-0"
           style={{
             // Grid tracks are computed in uniform px units so that when panels
             // toggle, every track (left col, dividers, centre, right col)
@@ -4471,8 +4471,10 @@ ${html}
               trace rendering doesn't take down the entire app — the
               user still has the center Workspace + right Lab working. */}
           <ErrorBoundary label="Research Brief panel">
-          {/* Left panel */}
-          <div className="relative min-w-0 h-full overflow-hidden rounded-xl">
+          {/* Left panel — hidden on mobile (Phase 1A: single-column
+              workspace only). Brief / Charts surfaces will land in
+              their own mobile treatment in Phase 1B. */}
+          <div className="relative min-w-0 h-full overflow-hidden rounded-xl max-md:hidden">
             {/* Expand button — sits at tab-bar height on the left edge, square (not circular)
                 so it reads as a panel toggle rather than a "next" arrow. */}
             <button
@@ -4828,7 +4830,13 @@ ${html}
           </div>
           </ErrorBoundary>
 
-          <DividerScrollbar onResizeStart={() => startDrag("left")} onSnap={snapDividerToDefault} sectionRef={leftSectionRef} />
+          {/* Wrapper uses display: contents so the divider stays a direct
+              child of the grid on desktop (no extra layout level), but
+              max-md:hidden hides the wrapper + child on mobile where
+              there's only one column. */}
+          <div className="contents max-md:hidden">
+            <DividerScrollbar onResizeStart={() => startDrag("left")} onSnap={snapDividerToDefault} sectionRef={leftSectionRef} />
+          </div>
 
           {/* Center Workspace — the textarea + Retrieved Papers stream +
               agent trace live here. Isolated in its own boundary so a
@@ -5956,14 +5964,20 @@ ${html}
           </section>
           </ErrorBoundary>
 
-          <DividerScrollbar onResizeStart={() => startDrag("center")} onSnap={snapDividerToDefault} sectionRef={centerSectionRef} />
+          {/* Same display:contents wrapper as the left divider — keeps
+              the desktop grid structure unchanged and hides on mobile. */}
+          <div className="contents max-md:hidden">
+            <DividerScrollbar onResizeStart={() => startDrag("center")} onSnap={snapDividerToDefault} sectionRef={centerSectionRef} />
+          </div>
 
           {/* Right panel — Synthesis Lab. Isolated so a crash in the
               Lab editor or reference list doesn't take down search +
-              the workspace alongside it. */}
+              the workspace alongside it. Hidden on mobile (Phase 1A
+              keeps the workspace single-column; Lab is desktop-only
+              for now since its forms are dense). */}
           <ErrorBoundary label="Synthesis Lab">
           {/* Analytics column — slides in/out to the right */}
-          <div className="relative min-w-0 h-full overflow-hidden rounded-xl">
+          <div className="relative min-w-0 h-full overflow-hidden rounded-xl max-md:hidden">
             {/* Expand button — at header height on the right edge, square. */}
             <button
               onClick={() => setAnalyticsVisible(true)}
@@ -7545,12 +7559,17 @@ ${html}
       {historyPanelOpen && (
         <div
           ref={historyPanelRef}
+          data-history-panel
           className="fixed bottom-0 left-0 right-0 z-40 rounded-t-2xl border-t border-slate-700/60 bg-slate-950/95 backdrop-blur-md shadow-2xl flex flex-col"
           style={{ height: historyPanelHeight }}
         >
-          {/* Drag strip — invisible h-0 touch target at top, nub sits over border */}
+          {/* Drag strip — invisible h-0 touch target at top, nub sits over border.
+              Hidden on mobile: drag-to-resize requires precise pointer
+              control and conflicts with browser scroll gestures on touch.
+              Mobile gets a fixed 60vh panel via the @media block in
+              globals.css instead. */}
           <div
-            className="absolute top-0 left-0 right-0 h-3 cursor-ns-resize select-none z-10 flex items-center justify-center"
+            className="absolute top-0 left-0 right-0 h-3 cursor-ns-resize select-none z-10 flex items-center justify-center max-md:hidden"
             onMouseDown={e => {
               e.preventDefault();
               historyDragRef.current = { startY: e.clientY, startH: historyPanelHeight };
@@ -7603,9 +7622,12 @@ ${html}
             <button onClick={() => setHistoryPanelOpen(false)} className="text-slate-600 hover:text-slate-300 transition-colors text-base leading-none">✕</button>
           </div>
 
-          {/* Timeline body — horizontal scroll, no vertical scroll */}
+          {/* Timeline body — horizontal scroll on desktop, vertical
+              scroll on mobile (CSS override via @media block in
+              globals.css). No vertical scroll on desktop. */}
           <div
             ref={timelineScrollRef}
+            data-history-timeline
             className="flex-1 overflow-x-auto overflow-y-hidden thin-scrollbar-x"
             onWheel={e => {
               if (!timelineScrollRef.current) return;
@@ -7619,9 +7641,12 @@ ${html}
                 <p className="text-xs text-slate-500 py-2">No history yet. Run a search to get started.</p>
               )}
               {!historyLoading && historyList.length > 0 && (
-                <div className="relative flex items-start">
-                  {/* Continuous timeline line behind all nodes */}
-                  <div className="absolute top-[19px] left-[5px] right-[5px] h-px bg-slate-700/50 pointer-events-none" />
+                <div data-history-row className="relative flex items-start">
+                  {/* Continuous timeline line behind all nodes — hidden
+                      on mobile where the entries stack vertically (the
+                      horizontal line wouldn't make sense between
+                      stacked rows). */}
+                  <div className="absolute top-[19px] left-[5px] right-[5px] h-px bg-slate-700/50 pointer-events-none max-md:hidden" />
                   {historyList.map((item, i) => {
                     const next = historyList[i + 1];
                     const sameGroup = next && next.title === item.title;
