@@ -1124,8 +1124,11 @@ function HomeScreen({
           (textarea + mode + Run) is already pinned to the page above. */}
       {showChips && (
         <section className="space-y-2">
+          {/* Header dot + "Trending today" — centred so it sits over the
+              middle of the chip cluster below, not left-anchored against
+              chips that may not extend to the left edge after centring. */}
           <div
-            className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em]"
+            className="flex items-center justify-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em]"
             style={{ color: "var(--ats-fg-muted)" }}
           >
             <span
@@ -1135,7 +1138,10 @@ function HomeScreen({
             />
             <span>Trending today</span>
           </div>
-          <div className="flex flex-wrap gap-2">
+          {/* justify-center: centre each row of chips horizontally. Mixed
+              with flex-wrap, the last (incomplete) row also stays centred
+              instead of left-anchored — visually balanced. */}
+          <div className="flex flex-wrap justify-center gap-2">
             {recommendedTerms.slice(0, 12).map(term => (
               <button
                 key={term}
