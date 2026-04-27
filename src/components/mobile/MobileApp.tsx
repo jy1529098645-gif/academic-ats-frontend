@@ -39,7 +39,7 @@ import {
   Search, ListOrdered, Clock, User as UserIcon,
   Zap, FlaskConical, LogOut, Sun, Moon,
   ExternalLink, RefreshCw, Send,
-  Menu, X, PenLine, ClipboardList, ChevronDown,
+  PenLine, ClipboardList, ChevronDown,
 } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
@@ -150,12 +150,11 @@ export default function MobileApp() {
   const guestCuratedRemaining = useGuestQuotaStore(s => Math.max(0, GUEST_CURATED_MAX - s.curatedUsed));
 
   // ── Tab state ───────────────────────────────────────────────────────────
-  // The Drawer slides out from the left when `drawerOpen` is true. We keep it
-  // closed by default so the active section gets the full viewport. Selecting
-  // a section closes the drawer; the user can also dismiss it by tapping the
-  // backdrop or hitting the X.
+  // The bottom TabBar drives section navigation. Six tabs is the upper end
+  // for a comfortable phone layout, but Results is conditional (only visible
+  // once the user has run a search), so the bar shows 5 most of the time
+  // and grows to 6 after the first search — both densities tap-tested.
   const [tab, setTab] = useState<Tab>("home");
-  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // ── Search state ────────────────────────────────────────────────────────
   const [query, setQuery] = useState("");
@@ -629,11 +628,13 @@ export default function MobileApp() {
       <Header
         themeMode={themeMode}
         onToggleTheme={() => setThemeMode(m => m === "day" ? "night" : "day")}
-        onMenu={() => setDrawerOpen(true)}
         sectionLabel={activeSection.label}
       />
 
-      <main className="flex-1 min-h-0 overflow-y-auto">
+      {/* Bottom-padded so the last screen content can scroll above the
+          fixed-position TabBar without hiding behind it. 5.5 rem = bar
+          height (~3.5 rem) + safe-area-inset breathing room. */}
+      <main className="flex-1 min-h-0 overflow-y-auto pb-[5.5rem]">
         {tab === "home" && (
           <HomeScreen
             query={query}
@@ -712,15 +713,11 @@ export default function MobileApp() {
         )}
       </main>
 
-      <Drawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+      <TabBar
         sections={sections}
         active={tab}
         hasResults={hasResults}
-        onPick={(id) => { setTab(id); setDrawerOpen(false); }}
-        user={authUser}
-        isGuest={isGuest}
+        onPick={setTab}
       />
     </div>
   );
@@ -733,41 +730,26 @@ export default function MobileApp() {
 function Header({
   themeMode,
   onToggleTheme,
-  onMenu,
   sectionLabel,
 }: {
   themeMode: "day" | "night";
   onToggleTheme: () => void;
-  onMenu: () => void;
   sectionLabel: string;
 }) {
-  // Layout: [hamburger] [logo + section label] [theme toggle]
-  // Hamburger and theme toggle are h-11 (44 px) — meets WCAG / Apple HIG
-  // tap-target guidance. Section label sits next to the logo so the user
-  // always sees which screen they're on without opening the drawer.
+  // Header is now anchor-only — no hamburger because the bottom TabBar owns
+  // section nav. Layout: [logo + wordmark + current section] [theme toggle].
+  // The theme toggle stays h-11 to clear the WCAG / Apple HIG 44 px tap
+  // floor; the rest of the header is informational, no tap target needed.
   return (
     <header
-      className="shrink-0 flex items-center justify-between gap-2 px-3 py-2.5 border-b"
+      className="shrink-0 flex items-center justify-between gap-2 px-4 py-2.5 border-b"
       style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
     >
-      <button
-        onClick={onMenu}
-        aria-label="Open navigation"
-        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors active:scale-95"
-        style={{
-          borderColor:     "var(--ats-border-subtle)",
-          backgroundColor: "var(--ats-bg-input)",
-          color:           "var(--ats-fg-primary)",
-        }}
-      >
-        <Menu size={22} />
-      </button>
-
-      <div className="flex flex-1 min-w-0 items-center gap-2">
+      <div className="flex flex-1 min-w-0 items-center gap-2.5">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/Cats_01.png" alt="" className="h-8 w-8 shrink-0" draggable={false} />
+        <img src="/Cats_01.png" alt="" className="h-9 w-9 shrink-0" draggable={false} />
         <div className="min-w-0 leading-tight">
-          <div className="text-base font-bold truncate">
+          <div className="text-[17px] font-bold truncate">
             <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
             <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
           </div>
@@ -797,189 +779,86 @@ function Header({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Drawer — slide-in left navigation
+// TabBar — fixed bottom navigation
 //
-// Replaces the original bottom tab bar. The bottom bar only fit four entries
-// before tap targets started crowding; once we wanted Synthesis Lab and Paper
-// Review beside Search / Results / History / Profile, a vertical drawer was
-// the natural fit. Each row is a full-width 56-px-tall button so the user can
-// thumb-tap any section without precision.
+// Six section entries (Search / Results / Lab / Review / History / Profile)
+// rendered as equal-flex columns. Results is hidden until the user has run
+// at least one search, so the bar shows 5 tabs in the first session and
+// grows to 6 afterwards. We render icon + tiny label per tab so users can
+// scan the bar without memorising icon meanings; the active tab gets the
+// accent colour plus a slim top accent line for redundancy.
 //
-// Behaviour:
-//   • Backdrop tap, X-button tap, Escape key, or selecting a section closes.
-//   • Body scroll locked while open so the page beneath doesn't slide along.
-//   • Slide animation runs on `transform` + `opacity` only — GPU-cheap.
-//   • Disabled rows render greyed but still tappable for affordance — the
-//     onPick handler short-circuits if the section requires data the user
-//     hasn't generated yet (e.g. Results before any search has run).
+// Why a bottom bar instead of the previous left drawer: the drawer was a
+// fine fit for many sections, but added a click of friction to switch
+// surfaces. The user's workflow on mobile bounces between Search,
+// Results, and Profile constantly — a permanent bar at the thumb zone
+// matches that better. Six tabs fits comfortably on phones ≥ 360 px wide
+// (each tab gets ~60 px, room for icon + 9-px label).
 // ─────────────────────────────────────────────────────────────────────────────
 
-function Drawer({
-  open,
-  onClose,
+function TabBar({
   sections,
   active,
   hasResults,
   onPick,
-  user,
-  isGuest,
 }: {
-  open: boolean;
-  onClose: () => void;
   sections: SectionMeta[];
   active: Tab;
   hasResults: boolean;
   onPick: (id: Tab) => void;
-  user: AuthUser | null;
-  isGuest: boolean;
 }) {
-  // Lock body scroll while drawer is open so the page underneath doesn't
-  // wiggle when the user drags inside the drawer panel.
-  useEffect(() => {
-    if (!open) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = prev; };
-  }, [open]);
-
-  // Esc key closes the drawer — keyboard users / dev tools.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  const accountLabel = isGuest
-    ? "Guest mode"
-    : (user?.email ?? "Signed in");
-
+  // Results is suppressed pre-search — no point showing a tab the user
+  // can't tap. Keeping the section catalogue intact and filtering at
+  // render time means we don't have to special-case the metadata when
+  // the search runs.
+  const visible = sections.filter(s => !(s.hideUntilResults && !hasResults));
   return (
-    <>
-      {/* Backdrop — behind the panel, dims the rest of the page */}
-      <div
-        onClick={onClose}
-        aria-hidden={!open}
-        className="fixed inset-0 z-40 transition-opacity duration-200"
-        style={{
-          backgroundColor: "rgba(0,0,0,0.45)",
-          opacity:        open ? 1 : 0,
-          pointerEvents:  open ? "auto" : "none",
-        }}
-      />
-      {/* Panel — slides in from the left edge */}
-      <aside
-        role="dialog"
-        aria-label="Section navigation"
-        aria-hidden={!open}
-        className="fixed inset-y-0 left-0 z-50 flex w-[82%] max-w-[340px] flex-col border-r shadow-2xl transition-transform duration-200 ease-out"
-        style={{
-          backgroundColor: "var(--ats-bg-panel)",
-          borderColor:     "var(--ats-border-subtle)",
-          color:           "var(--ats-fg-primary)",
-          transform:       open ? "translateX(0)" : "translateX(-100%)",
-          paddingTop:      "env(safe-area-inset-top, 0px)",
-          paddingBottom:   "env(safe-area-inset-bottom, 0px)",
-        }}
-      >
-        {/* Drawer header */}
-        <div
-          className="flex items-center justify-between border-b px-4 py-3"
-          style={{ borderColor: "var(--ats-border-subtle)" }}
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/Cats_01.png" alt="" className="h-9 w-9 shrink-0" draggable={false} />
-            <div className="min-w-0">
-              <div className="text-base font-bold leading-none">
-                <span style={{ color: "var(--ats-fg-primary)" }}>Academi</span>
-                <span style={{ color: "var(--ats-fg-accent)" }}>Cats</span>
-              </div>
-              <div className="mt-1 truncate text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
-                {accountLabel}
-              </div>
-            </div>
-          </div>
+    <nav
+      role="navigation"
+      aria-label="Section navigation"
+      className="fixed bottom-0 inset-x-0 z-30 flex items-stretch border-t"
+      style={{
+        borderColor:     "var(--ats-border-subtle)",
+        backgroundColor: "var(--ats-bg-panel)",
+        paddingBottom:   "env(safe-area-inset-bottom, 0px)",
+      }}
+    >
+      {visible.map(sec => {
+        const isActive = sec.id === active;
+        return (
           <button
-            onClick={onClose}
-            aria-label="Close navigation"
-            className="flex h-11 w-11 items-center justify-center rounded-xl border active:scale-95"
+            key={sec.id}
+            onClick={() => onPick(sec.id)}
+            aria-current={isActive ? "page" : undefined}
+            aria-label={sec.label}
+            className="relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors active:scale-[0.97]"
             style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "var(--ats-bg-input)",
-              color:           "var(--ats-fg-primary)",
+              color: isActive ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+              minHeight: "60px",
             }}
           >
-            <X size={20} />
+            {/* Active-state accent line — 2 px high, 28 px wide, anchored
+                to the top edge so it reads as a "currently here" stripe
+                without crowding the icon below. */}
+            {isActive && (
+              <span
+                className="absolute top-0 h-0.5 w-7 rounded-b-full"
+                style={{ backgroundColor: "var(--ats-fg-accent)" }}
+                aria-hidden
+              />
+            )}
+            {sec.icon}
+            <span className="text-[10px] font-semibold tracking-wide leading-none">
+              {sec.label}
+            </span>
           </button>
-        </div>
-
-        {/* Section list — scrollable if it ever overflows */}
-        <nav className="flex-1 overflow-y-auto px-2 py-3">
-          {sections.map(sec => {
-            const isActive   = sec.id === active;
-            const isDisabled = sec.hideUntilResults && !hasResults;
-            return (
-              <button
-                key={sec.id}
-                onClick={() => { if (!isDisabled) onPick(sec.id); }}
-                disabled={isDisabled}
-                aria-current={isActive ? "page" : undefined}
-                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.98]"
-                style={{
-                  backgroundColor: isActive ? "var(--ats-bg-accent-soft)" : "transparent",
-                  color:           isActive ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
-                  minHeight:       "56px",
-                }}
-              >
-                <span
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
-                  style={{
-                    backgroundColor: isActive ? "var(--ats-bg-panel)" : "var(--ats-bg-input)",
-                    color:           isActive ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
-                  }}
-                >
-                  {sec.icon}
-                </span>
-                <span className="flex-1 min-w-0">
-                  <span className="block text-[15px] font-semibold leading-tight">
-                    {sec.label}
-                  </span>
-                  <span
-                    className="block truncate text-[11px] mt-0.5"
-                    style={{ color: isActive ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
-                  >
-                    {isDisabled ? "Run a search first" : sec.blurb}
-                  </span>
-                </span>
-                {isActive && (
-                  <span
-                    className="h-2 w-2 shrink-0 rounded-full"
-                    style={{ backgroundColor: "var(--ats-fg-accent)" }}
-                    aria-hidden
-                  />
-                )}
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Drawer footer */}
-        <div
-          className="border-t px-4 py-3 text-[10px]"
-          style={{ borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-muted)" }}
-        >
-          {APP_VERSION}
-        </div>
-      </aside>
-    </>
+        );
+      })}
+    </nav>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HomeScreen — search input, mode picker, run button
-// ─────────────────────────────────────────────────────────────────────────────
-
 // HomeScreen — landing surface, modeled on the desktop hero.
 //
 // The desktop landing centres a "AcademiCats" wordmark + cat mascot, an
@@ -1214,13 +1093,8 @@ function HomeScreen({
         </div>
       )}
 
-      {/* ── Drawer pointer ───────────────────────────────────────────────── */}
-      <div
-        className="rounded-xl border border-dashed px-3 py-2.5 text-center text-[11px] leading-relaxed"
-        style={{ borderColor: "var(--ats-border-subtle)", color: "var(--ats-fg-muted)" }}
-      >
-        Tap the menu (top-left) for Lab · Paper Review · History
-      </div>
+      {/* (Removed the menu hint — the bottom TabBar now makes Lab /
+          Paper Review / History / Profile visible from any screen.) */}
     </div>
   );
 }
