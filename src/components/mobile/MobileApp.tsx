@@ -48,6 +48,7 @@ import { useThemeStore } from "@/lib/stores/theme-store";
 import { useGuestQuotaStore, GUEST_QUICK_MAX, GUEST_CURATED_MAX } from "@/lib/stores/guest-quota-store";
 import { APP_VERSION } from "@/lib/tos-content";
 import { labFieldSpec } from "@/lib/lab-fields";
+import { PaperCharts } from "@/app/charts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — minimal, mobile-only. Doesn't import the desktop's Paper / Job
@@ -1124,12 +1125,23 @@ function ResultsScreen({
   fastMode: boolean;
   onStop: () => void;
 }) {
-  const [view, setView] = useState<"papers" | "brief">("papers");
+  const [view, setView] = useState<"papers" | "brief" | "charts">("papers");
 
   // Note: we used to auto-flip the active tab when papers arrived, but that
   // ripped the user out of the Brief view if they switched to it during
   // streaming. The initial state already defaults to "papers"; respect any
   // manual switch from there.
+
+  // Charts only need a stable papers reference; the chart sub-trees are
+  // already memoised. We coerce `year` (Paper allows string | number; the
+  // chart's ChartPaper expects only string) and pass everything else
+  // through — extras are ignored by the chart components. Charts render in
+  // stacked mode on mobile (wide=false) so each chart gets the full
+  // viewport width.
+  const chartPapers = useMemo(
+    () => papers.map(p => ({ ...p, year: p.year != null ? String(p.year) : undefined })),
+    [papers],
+  );
 
   return (
     <div className="px-4 py-4 space-y-4">
@@ -1190,15 +1202,19 @@ function ResultsScreen({
         </div>
       )}
 
-      {/* View switch — only shown when at least one of the views has content */}
+      {/* View switch — three tabs (Papers / Brief / Charts). Brief is the
+          curated-analysis narrative; Charts is the desktop's analytics
+          panel rendered in stacked mode for mobile. We show all three
+          tabs the moment any view has content so the user can hop
+          between them mid-stream without waiting. */}
       {(papers.length > 0 || brief) && (
         <div
-          className="grid grid-cols-2 gap-1 rounded-xl p-1 border"
+          className="grid grid-cols-3 gap-1 rounded-xl p-1 border"
           style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
         >
           <button
             onClick={() => setView("papers")}
-            className="rounded-lg py-2 text-sm font-semibold transition-colors"
+            className="rounded-lg py-2.5 text-[13px] font-semibold transition-colors"
             style={{
               backgroundColor: view === "papers" ? "var(--ats-fg-accent)" : "transparent",
               color:           view === "papers" ? "#ffffff" : "var(--ats-fg-secondary)",
@@ -1209,13 +1225,24 @@ function ResultsScreen({
           <button
             onClick={() => setView("brief")}
             disabled={!brief && status !== "running"}
-            className="rounded-lg py-2 text-sm font-semibold transition-colors disabled:opacity-40"
+            className="rounded-lg py-2.5 text-[13px] font-semibold transition-colors disabled:opacity-40"
             style={{
               backgroundColor: view === "brief" ? "var(--ats-fg-accent)" : "transparent",
               color:           view === "brief" ? "#ffffff" : "var(--ats-fg-secondary)",
             }}
           >
             Brief
+          </button>
+          <button
+            onClick={() => setView("charts")}
+            disabled={papers.length === 0}
+            className="rounded-lg py-2.5 text-[13px] font-semibold transition-colors disabled:opacity-40"
+            style={{
+              backgroundColor: view === "charts" ? "var(--ats-fg-accent)" : "transparent",
+              color:           view === "charts" ? "#ffffff" : "var(--ats-fg-secondary)",
+            }}
+          >
+            Charts
           </button>
         </div>
       )}
@@ -1249,6 +1276,29 @@ function ResultsScreen({
                 {status === "running" ? "Drafting brief…" : "No brief yet."}
               </div>
           }
+        </div>
+      )}
+
+      {/* Charts view — three stacked SVG charts (Year / Bullseye / Source).
+          Reuses the desktop PaperCharts component with wide=false so each
+          chart spans the full mobile viewport width. The wrapper carries
+          the same card styling as the Brief view so the surface feels
+          coherent across tabs. */}
+      {view === "charts" && (
+        <div
+          className="rounded-xl border p-3"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+          }}
+        >
+          {papers.length > 0 ? (
+            <PaperCharts papers={chartPapers} wide={false} />
+          ) : (
+            <div className="px-2 py-8 text-center text-sm" style={{ color: "var(--ats-fg-muted)" }}>
+              {status === "running" ? "Charts populate as papers arrive…" : "No papers to chart yet."}
+            </div>
+          )}
         </div>
       )}
     </div>
