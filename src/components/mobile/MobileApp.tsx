@@ -40,6 +40,7 @@ import {
   Zap, FlaskConical, LogOut, Sun, Moon,
   ExternalLink, RefreshCw, Send,
   PenLine, ClipboardList, ChevronDown,
+  Plus, Trash2, Upload,
 } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
@@ -47,7 +48,7 @@ import { fetchWithApiFallback, getAuthToken } from "@/lib/api";
 import { useThemeStore } from "@/lib/stores/theme-store";
 import { useGuestQuotaStore, GUEST_QUICK_MAX, GUEST_CURATED_MAX } from "@/lib/stores/guest-quota-store";
 import { APP_VERSION } from "@/lib/tos-content";
-import { labFieldSpec } from "@/lib/lab-fields";
+import { labFieldSpec, labPointsPlaceholder, type LabExtraField } from "@/lib/lab-fields";
 import { PaperCharts } from "@/app/charts";
 import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
 import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
@@ -187,22 +188,36 @@ export default function MobileApp() {
   // surface them.)
 
   // ── Synthesis Lab state ─────────────────────────────────────────────────
-  // Mobile keeps Lab streamlined: pick an output type, type a topic, hit Run.
-  // No multi-extras editor, no model picker, no points list — those live on
-  // desktop. The backend accepts an empty extras object and falls back to
-  // sensible defaults. Result streams into `labResult` as Markdown.
+  // Mobile Lab now mirrors desktop's full feature set: per-output-type
+  // extras, supporting points list, citation / language / length / writer
+  // model pickers, and inline file uploads (PDF/TXT/MD) for any field whose
+  // spec marks it `acceptUpload`. The form re-renders against `labFieldSpec`
+  // so adding a new output type on the backend automatically surfaces here
+  // — no per-type branching in this component.
   const [labOutputType, setLabOutputType] = useState<string>("synthesis");
   const [labCoreArg, setLabCoreArg] = useState<string>("");
+  const [labPoints, setLabPoints] = useState<string[]>([""]);
+  const [labExtras, setLabExtras] = useState<Record<string, string>>({});
+  const [labExtrasMulti, setLabExtrasMulti] = useState<Record<string, string[]>>({});
+  const [labCitationFormat, setLabCitationFormat] = useState<string>("APA");
+  const [labLanguage, setLabLanguage] = useState<string>("English");
+  const [labTargetPages, setLabTargetPages] = useState<number>(3);
+  const [labWritingModel, setLabWritingModel] = useState<string>("gpt-5.3");
   const [labResult, setLabResult] = useState<string>("");
   const [labStatus, setLabStatus] = useState<string>("");
   const [labGenerating, setLabGenerating] = useState<boolean>(false);
   const [labError, setLabError] = useState<string>("");
+  // Upload status per extras key — keyed so multiple acceptUpload fields can
+  // be in different states at once (e.g. resume_text uploading while
+  // existing_draft already uploaded).
+  const [labExtraUploadBusy, setLabExtraUploadBusy] = useState<Record<string, boolean>>({});
+  const [labExtraUploadError, setLabExtraUploadError] = useState<Record<string, string>>({});
   const labAbortRef = useRef<AbortController | null>(null);
 
   const runLab = useCallback(async () => {
     if (labGenerating) return;
     if (!labCoreArg.trim()) {
-      setLabError("Please describe what you want to write about.");
+      setLabError("Please fill in the topic or core argument.");
       return;
     }
     const ac = new AbortController();
@@ -212,6 +227,21 @@ export default function MobileApp() {
     setLabStatus("Starting…");
     setLabError("");
     try {
+      // Read the current spec so we only forward extras the active output
+      // type actually accepts. Stale keys from a previous output type are
+      // dropped here rather than leaking to the backend.
+      const _spec = labFieldSpec(labOutputType);
+      const _extras: Record<string, string | string[]> = {};
+      for (const f of (_spec.extras ?? [])) {
+        if (f.multi) {
+          const arr = (labExtrasMulti[f.key] ?? []).map(s => s.trim()).filter(Boolean);
+          if (arr.length) _extras[f.key] = arr;
+        } else {
+          const v = (labExtras[f.key] ?? "").trim();
+          if (v) _extras[f.key] = v;
+        }
+      }
+
       const token = await getAuthToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -222,13 +252,13 @@ export default function MobileApp() {
         body: JSON.stringify({
           papers: [],
           core_argument: labCoreArg.trim(),
-          supporting_points: [],
-          extras: {},
+          supporting_points: labPoints.map(p => p.trim()).filter(Boolean),
+          extras: _extras,
           output_type: labOutputType,
-          citation_format: "APA",
-          language: "English",
-          target_pages: 2,
-          writing_model: "gpt-5.3",
+          citation_format: labCitationFormat,
+          language: labLanguage,
+          target_pages: labTargetPages,
+          writing_model: labWritingModel,
         }),
       });
       if (!res.ok) {
@@ -266,7 +296,45 @@ export default function MobileApp() {
       setLabStatus("");
       labAbortRef.current = null;
     }
-  }, [labCoreArg, labOutputType, labGenerating]);
+  }, [
+    labCoreArg, labOutputType, labGenerating,
+    labPoints, labExtras, labExtrasMulti,
+    labCitationFormat, labLanguage, labTargetPages, labWritingModel,
+  ]);
+
+  // File-upload helper for any LabExtraField whose spec marks
+  // `acceptUpload: true`. Uses the same /extract-text endpoint the desktop
+  // Lab + Paper Review use; result text overwrites the field's labExtras
+  // entry so the user can still edit / paste over after auto-fill.
+  const uploadLabExtra = useCallback(async (key: string, file: File) => {
+    setLabExtraUploadBusy(prev => ({ ...prev, [key]: true }));
+    setLabExtraUploadError(prev => ({ ...prev, [key]: "" }));
+    try {
+      const token = await getAuthToken();
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetchWithApiFallback("/api/forge/review-paper/extract-text", {
+        method: "POST",
+        headers,
+        body:   fd,
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const data = await res.json() as { text: string; filename: string };
+      setLabExtras(prev => ({ ...prev, [key]: data.text }));
+    } catch (err) {
+      setLabExtraUploadError(prev => ({
+        ...prev,
+        [key]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setLabExtraUploadBusy(prev => ({ ...prev, [key]: false }));
+    }
+  }, []);
 
   const stopLab = useCallback(() => {
     labAbortRef.current?.abort();
@@ -275,20 +343,55 @@ export default function MobileApp() {
   }, []);
 
   // ── Paper Review state ──────────────────────────────────────────────────
+  // Now mirrors the desktop reviewer: paste OR upload a draft, optionally
+  // add a context hint (venue / journal / professor preferences), pick a
+  // language for the agent voice, and a draft stage that calibrates
+  // strictness.
   type DraftLevel = "final" | "working" | "sketch";
   const [reviewText, setReviewText] = useState<string>("");
+  const [reviewContextHint, setReviewContextHint] = useState<string>("");
+  const [reviewLanguage, setReviewLanguage] = useState<string>("English");
   const [reviewDraftLevel, setReviewDraftLevel] = useState<DraftLevel>("working");
+  const [reviewUploadBusy, setReviewUploadBusy] = useState<boolean>(false);
+  const [reviewUploadError, setReviewUploadError] = useState<string>("");
   const [reviewResult, setReviewResult] = useState<string>("");
   const [reviewStatus, setReviewStatus] = useState<string>("");
   const [reviewGenerating, setReviewGenerating] = useState<boolean>(false);
   const [reviewError, setReviewError] = useState<string>("");
   const reviewAbortRef = useRef<AbortController | null>(null);
 
+  const uploadReviewDraft = useCallback(async (file: File) => {
+    setReviewUploadBusy(true);
+    setReviewUploadError("");
+    try {
+      const token = await getAuthToken();
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetchWithApiFallback("/api/forge/review-paper/extract-text", {
+        method: "POST",
+        headers,
+        body:   fd,
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const data = await res.json() as { text: string; filename: string };
+      setReviewText(data.text);
+    } catch (err) {
+      setReviewUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewUploadBusy(false);
+    }
+  }, []);
+
   const runReview = useCallback(async () => {
     if (reviewGenerating) return;
     const text = reviewText.trim();
     if (text.length < 200) {
-      setReviewError("Paste at least a few paragraphs (≥ 200 chars) for a meaningful review.");
+      setReviewError("Paste or upload at least a few paragraphs (≥ 200 chars).");
       return;
     }
     const ac = new AbortController();
@@ -307,8 +410,8 @@ export default function MobileApp() {
         signal: ac.signal,
         body: JSON.stringify({
           paper_text: text,
-          context_hint: "",
-          language: "English",
+          context_hint: reviewContextHint.trim(),
+          language: reviewLanguage,
           draft_level: reviewDraftLevel,
         }),
       });
@@ -347,7 +450,7 @@ export default function MobileApp() {
       setReviewStatus("");
       reviewAbortRef.current = null;
     }
-  }, [reviewText, reviewDraftLevel, reviewGenerating]);
+  }, [reviewText, reviewContextHint, reviewLanguage, reviewDraftLevel, reviewGenerating]);
 
   const stopReview = useCallback(() => {
     reviewAbortRef.current?.abort();
@@ -619,6 +722,23 @@ export default function MobileApp() {
             setOutputType={setLabOutputType}
             coreArg={labCoreArg}
             setCoreArg={setLabCoreArg}
+            points={labPoints}
+            setPoints={setLabPoints}
+            extras={labExtras}
+            setExtras={setLabExtras}
+            extrasMulti={labExtrasMulti}
+            setExtrasMulti={setLabExtrasMulti}
+            citationFormat={labCitationFormat}
+            setCitationFormat={setLabCitationFormat}
+            language={labLanguage}
+            setLanguage={setLabLanguage}
+            targetPages={labTargetPages}
+            setTargetPages={setLabTargetPages}
+            writingModel={labWritingModel}
+            setWritingModel={setLabWritingModel}
+            uploadBusy={labExtraUploadBusy}
+            uploadError={labExtraUploadError}
+            onUpload={uploadLabExtra}
             generating={labGenerating}
             status={labStatus}
             result={labResult}
@@ -631,8 +751,15 @@ export default function MobileApp() {
           <ReviewScreen
             text={reviewText}
             setText={setReviewText}
+            contextHint={reviewContextHint}
+            setContextHint={setReviewContextHint}
+            language={reviewLanguage}
+            setLanguage={setReviewLanguage}
             draftLevel={reviewDraftLevel}
             setDraftLevel={setReviewDraftLevel}
+            uploadBusy={reviewUploadBusy}
+            uploadError={reviewUploadError}
+            onUpload={uploadReviewDraft}
             generating={reviewGenerating}
             status={reviewStatus}
             result={reviewResult}
@@ -1489,9 +1616,32 @@ const LAB_OUTPUT_TYPES: Array<{ id: string; label: string; blurb: string }> = [
   { id: "theoretical_framework", label: "Theoretical Frame", blurb: "Model that explains a phenomenon"     },
 ];
 
+// Citation / language / writer-model option catalogues — single source of
+// truth so the form & the runLab payload reference the same ids.
+const LAB_CITATION_FORMATS = ["APA", "MLA", "Chicago", "Harvard"] as const;
+const LAB_LANGUAGES        = ["English", "中文"] as const;
+const LAB_LENGTHS: Array<{ id: number; label: string; blurb: string }> = [
+  { id: 1, label: "Short",  blurb: "≈ 1 page · quick draft" },
+  { id: 3, label: "Medium", blurb: "≈ 3 pages · standard"   },
+  { id: 6, label: "Long",   blurb: "≈ 6 pages · in-depth"   },
+];
+const LAB_WRITING_MODELS: Array<{ id: string; label: string; tagline: string }> = [
+  { id: "gpt-5.3",           label: "Writer",   tagline: "Top-tier prose · default"     },
+  { id: "claude-sonnet-4-6", label: "Scholar",  tagline: "Citation-careful long form"   },
+  { id: "gpt-4o",            label: "Drafter",  tagline: "Balanced everyday drafts"     },
+];
+
 function LabScreen({
   outputType, setOutputType,
   coreArg, setCoreArg,
+  points, setPoints,
+  extras, setExtras,
+  extrasMulti, setExtrasMulti,
+  citationFormat, setCitationFormat,
+  language, setLanguage,
+  targetPages, setTargetPages,
+  writingModel, setWritingModel,
+  uploadBusy, uploadError, onUpload,
   generating, status, result, errorMsg,
   onRun, onStop,
 }: {
@@ -1499,6 +1649,23 @@ function LabScreen({
   setOutputType: (s: string) => void;
   coreArg: string;
   setCoreArg: (s: string) => void;
+  points: string[];
+  setPoints: React.Dispatch<React.SetStateAction<string[]>>;
+  extras: Record<string, string>;
+  setExtras: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  extrasMulti: Record<string, string[]>;
+  setExtrasMulti: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
+  citationFormat: string;
+  setCitationFormat: (s: string) => void;
+  language: string;
+  setLanguage: (s: string) => void;
+  targetPages: number;
+  setTargetPages: (n: number) => void;
+  writingModel: string;
+  setWritingModel: (s: string) => void;
+  uploadBusy: Record<string, boolean>;
+  uploadError: Record<string, string>;
+  onUpload: (key: string, file: File) => void;
   generating: boolean;
   status: string;
   result: string;
@@ -1507,14 +1674,16 @@ function LabScreen({
   onStop: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const selected = LAB_OUTPUT_TYPES.find(t => t.id === outputType) ?? LAB_OUTPUT_TYPES[0];
   // Pull the core-field placeholder + label from the shared lab-fields spec
   // so the mobile copy stays in sync with desktop instead of drifting.
   const spec = useMemo(() => labFieldSpec(outputType), [outputType]);
+  const pointsPh = useMemo(() => labPointsPlaceholder(spec), [spec]);
 
   return (
     <div className="px-4 py-4 pb-24 space-y-5">
-      {/* Output-type picker — large tap area, opens chip-grid below on tap */}
+      {/* ── Output-type picker — large tap area, opens chip-grid on tap ── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
           Output type
@@ -1573,17 +1742,17 @@ function LabScreen({
         )}
       </section>
 
-      {/* Core argument / topic */}
+      {/* ── Core argument / topic ─────────────────────────────────────── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
-          {spec.coreLabel}
+          {spec.coreLabel}{spec.coreRequired ? " *" : ""}
         </label>
         <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>{spec.coreDescription}</p>
         <textarea
           value={coreArg}
           onChange={e => setCoreArg(e.target.value)}
           placeholder={spec.corePlaceholder}
-          rows={6}
+          rows={Math.max(spec.coreRows ?? 4, 4)}
           className="w-full resize-none rounded-xl border px-4 py-3 text-[15px] leading-relaxed focus:outline-none"
           style={{
             borderColor:     "var(--ats-border-subtle)",
@@ -1593,7 +1762,244 @@ function LabScreen({
         />
       </section>
 
-      {/* Run / Stop button — full-width, 56-px tall */}
+      {/* ── Supporting points list (when the spec defines one) ────────── */}
+      {spec.pointsLabel != null && (
+        <section className="space-y-2">
+          <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+            {spec.pointsLabel}{spec.pointsRequired ? " *" : ""}
+          </label>
+          {spec.pointsDescription && (
+            <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>{spec.pointsDescription}</p>
+          )}
+          <div className="space-y-2">
+            {points.map((p, i) => (
+              <div key={i} className="flex gap-2">
+                <input
+                  type="text"
+                  value={p}
+                  onChange={e => setPoints(prev => prev.map((v, idx) => idx === i ? e.target.value : v))}
+                  placeholder={pointsPh(i)}
+                  className="flex-1 rounded-xl border px-4 text-[14px] outline-none"
+                  style={{
+                    borderColor:     "var(--ats-border-subtle)",
+                    backgroundColor: "var(--ats-bg-input)",
+                    color:           "var(--ats-fg-primary)",
+                    minHeight:       "48px",
+                  }}
+                />
+                {points.length > 1 && (
+                  <button
+                    onClick={() => setPoints(prev => prev.filter((_, idx) => idx !== i))}
+                    aria-label="Remove point"
+                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border active:scale-95"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-panel)",
+                      color:           "var(--ats-fg-muted)",
+                    }}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
+            ))}
+            <button
+              onClick={() => setPoints(prev => [...prev, ""])}
+              className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed text-[13px] font-semibold transition-colors active:scale-[0.99]"
+              style={{
+                borderColor: "var(--ats-border-subtle)",
+                color:       "var(--ats-fg-muted)",
+                minHeight:   "44px",
+              }}
+            >
+              <Plus size={14} />
+              <span>{spec.pointsAddLabel ?? "+ Add point"}</span>
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* ── Per-output-type extras ────────────────────────────────────── */}
+      {(spec.extras ?? []).map(field => (
+        <LabExtraFieldRow
+          key={field.key}
+          field={field}
+          value={extras[field.key] ?? ""}
+          setValue={v => setExtras(prev => ({ ...prev, [field.key]: v }))}
+          multiValue={extrasMulti[field.key] ?? []}
+          setMultiValue={updater => setExtrasMulti(prev => ({
+            ...prev,
+            [field.key]: typeof updater === "function" ? updater(prev[field.key] ?? []) : updater,
+          }))}
+          uploadBusy={!!uploadBusy[field.key]}
+          uploadError={uploadError[field.key] ?? ""}
+          onUpload={file => onUpload(field.key, file)}
+        />
+      ))}
+
+      {/* ── Settings (length / citation / language / writer model) ────── */}
+      <section className="space-y-2">
+        <button
+          onClick={() => setSettingsOpen(o => !o)}
+          className="flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left active:scale-[0.99]"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-primary)",
+            minHeight:       "52px",
+          }}
+        >
+          <span className="text-[14px] font-semibold">Output settings</span>
+          <span className="flex items-center gap-2 text-[11px]" style={{ color: "var(--ats-fg-muted)" }}>
+            <span>{LAB_LENGTHS.find(l => l.id === targetPages)?.label ?? "Medium"}</span>
+            <span>·</span>
+            <span>{citationFormat}</span>
+            <span>·</span>
+            <span>{language}</span>
+            <ChevronDown
+              size={16}
+              style={{
+                transform: settingsOpen ? "rotate(180deg)" : "rotate(0deg)",
+                transition: "transform 0.15s",
+              }}
+            />
+          </span>
+        </button>
+
+        {settingsOpen && (
+          <div className="space-y-4 rounded-xl border p-3.5"
+            style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
+          >
+            {/* Length */}
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: "var(--ats-fg-muted)" }}>
+                Length
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {LAB_LENGTHS.map(l => {
+                  const active = targetPages === l.id;
+                  return (
+                    <button
+                      key={l.id}
+                      onClick={() => setTargetPages(l.id)}
+                      aria-pressed={active}
+                      className="flex flex-col items-center justify-center rounded-xl border px-2 py-2.5 transition-colors active:scale-[0.97]"
+                      style={{
+                        borderColor:     active ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+                        backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-input)",
+                        color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                        minHeight:       "60px",
+                      }}
+                    >
+                      <span className="text-[13px] font-bold">{l.label}</span>
+                      <span
+                        className="mt-0.5 text-[10px] leading-tight text-center"
+                        style={{ color: active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
+                      >
+                        {l.blurb}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Citation format */}
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: "var(--ats-fg-muted)" }}>
+                Citation format
+              </label>
+              <div className="grid grid-cols-4 gap-2">
+                {LAB_CITATION_FORMATS.map(f => {
+                  const active = citationFormat === f;
+                  return (
+                    <button
+                      key={f}
+                      onClick={() => setCitationFormat(f)}
+                      aria-pressed={active}
+                      className="rounded-xl border text-[13px] font-bold transition-colors active:scale-[0.97]"
+                      style={{
+                        borderColor:     active ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+                        backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-input)",
+                        color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                        minHeight:       "44px",
+                      }}
+                    >
+                      {f}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Language */}
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: "var(--ats-fg-muted)" }}>
+                Language
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {LAB_LANGUAGES.map(l => {
+                  const active = language === l;
+                  return (
+                    <button
+                      key={l}
+                      onClick={() => setLanguage(l)}
+                      aria-pressed={active}
+                      className="rounded-xl border text-[14px] font-bold transition-colors active:scale-[0.97]"
+                      style={{
+                        borderColor:     active ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+                        backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-input)",
+                        color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                        minHeight:       "44px",
+                      }}
+                    >
+                      {l}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Writing model */}
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: "var(--ats-fg-muted)" }}>
+                Writer model
+              </label>
+              <div className="grid grid-cols-1 gap-2">
+                {LAB_WRITING_MODELS.map(m => {
+                  const active = writingModel === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => setWritingModel(m.id)}
+                      aria-pressed={active}
+                      className="flex items-center justify-between rounded-xl border px-3 py-2.5 text-left transition-colors active:scale-[0.99]"
+                      style={{
+                        borderColor:     active ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+                        backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-input)",
+                        color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                        minHeight:       "52px",
+                      }}
+                    >
+                      <span className="min-w-0">
+                        <span className="block text-[14px] font-bold">{m.label}</span>
+                        <span
+                          className="block truncate text-[11px] mt-0.5"
+                          style={{ color: active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)" }}
+                        >
+                          {m.tagline}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* ── Run / Stop button ─────────────────────────────────────────── */}
       <button
         onClick={generating ? onStop : onRun}
         disabled={!generating && !coreArg.trim()}
@@ -1642,6 +2048,162 @@ function LabScreen({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LabExtraFieldRow — renders one extras field (single, multi, or with file
+// upload). Centralised so LabScreen above stays readable; the shape variants
+// (multi vs single, acceptUpload vs not, rows vs no rows) all collapse here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function LabExtraFieldRow({
+  field, value, setValue, multiValue, setMultiValue,
+  uploadBusy, uploadError, onUpload,
+}: {
+  field: LabExtraField;
+  value: string;
+  setValue: (s: string) => void;
+  multiValue: string[];
+  setMultiValue: React.Dispatch<React.SetStateAction<string[]>>;
+  uploadBusy: boolean;
+  uploadError: string;
+  onUpload: (file: File) => void;
+}) {
+  return (
+    <section className="space-y-2">
+      <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+        {field.label}{field.required ? " *" : ""}
+      </label>
+      {field.description && (
+        <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>{field.description}</p>
+      )}
+
+      {/* Optional file-upload widget — present iff spec.acceptUpload */}
+      {field.acceptUpload && (
+        <div className="flex items-center gap-2">
+          <label
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 text-[12px] font-semibold transition-colors"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-input)",
+              color:           "var(--ats-fg-muted)",
+              minHeight:       "40px",
+            }}
+          >
+            <Upload size={14} />
+            <span>{uploadBusy ? "Extracting…" : "Upload .pdf / .txt / .md"}</span>
+            <input
+              type="file"
+              accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+              className="hidden"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                e.currentTarget.value = "";
+                onUpload(file);
+              }}
+            />
+          </label>
+          {value && (
+            <button
+              onClick={() => setValue("")}
+              className="text-[11px]"
+              style={{ color: "var(--ats-fg-muted)" }}
+            >
+              Clear
+            </button>
+          )}
+          {uploadError && (
+            <span className="text-[11px]" style={{ color: "var(--ats-fg-error, #d33)" }}>
+              {uploadError}
+            </span>
+          )}
+        </div>
+      )}
+
+      {field.multi ? (
+        <div className="space-y-2">
+          {(multiValue.length === 0 ? [""] : multiValue).map((entry, i) => {
+            const list = multiValue.length === 0 ? [""] : multiValue;
+            return (
+              <div key={i} className="flex gap-2">
+                <input
+                  type="text"
+                  value={entry}
+                  onChange={e => {
+                    const next = [...list];
+                    next[i] = e.target.value;
+                    setMultiValue(next);
+                  }}
+                  placeholder={field.placeholder}
+                  className="flex-1 rounded-xl border px-4 text-[14px] outline-none"
+                  style={{
+                    borderColor:     "var(--ats-border-subtle)",
+                    backgroundColor: "var(--ats-bg-input)",
+                    color:           "var(--ats-fg-primary)",
+                    minHeight:       "48px",
+                  }}
+                />
+                {list.length > 1 && (
+                  <button
+                    onClick={() => setMultiValue(list.filter((_, idx) => idx !== i))}
+                    aria-label="Remove entry"
+                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border active:scale-95"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-panel)",
+                      color:           "var(--ats-fg-muted)",
+                    }}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          <button
+            onClick={() => setMultiValue(prev => [...(prev.length === 0 ? [""] : prev), ""])}
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed text-[13px] font-semibold transition-colors active:scale-[0.99]"
+            style={{
+              borderColor: "var(--ats-border-subtle)",
+              color:       "var(--ats-fg-muted)",
+              minHeight:   "44px",
+            }}
+          >
+            <Plus size={14} />
+            <span>{field.addLabel ?? `+ Add ${field.label.toLowerCase()}`}</span>
+          </button>
+        </div>
+      ) : field.rows && field.rows > 1 ? (
+        <textarea
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          placeholder={field.placeholder}
+          rows={Math.max(field.rows, 3)}
+          className="w-full resize-none rounded-xl border px-4 py-3 text-[14px] leading-relaxed focus:outline-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+      ) : (
+        <input
+          type="text"
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          placeholder={field.placeholder}
+          className="w-full rounded-xl border px-4 text-[14px] outline-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-primary)",
+            minHeight:       "48px",
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ReviewScreen — Paper Review, mobile-streamlined
 //
 // Mirrors the same prune as Lab: paste text, pick draft level, run. Status +
@@ -1657,14 +2219,24 @@ const DRAFT_LEVELS: Array<{ id: "final" | "working" | "sketch"; label: string; b
 
 function ReviewScreen({
   text, setText,
+  contextHint, setContextHint,
+  language, setLanguage,
   draftLevel, setDraftLevel,
+  uploadBusy, uploadError, onUpload,
   generating, status, result, errorMsg,
   onRun, onStop,
 }: {
   text: string;
   setText: (s: string) => void;
+  contextHint: string;
+  setContextHint: (s: string) => void;
+  language: string;
+  setLanguage: (s: string) => void;
   draftLevel: "final" | "working" | "sketch";
   setDraftLevel: (s: "final" | "working" | "sketch") => void;
+  uploadBusy: boolean;
+  uploadError: string;
+  onUpload: (file: File) => void;
   generating: boolean;
   status: string;
   result: string;
@@ -1675,7 +2247,43 @@ function ReviewScreen({
   const charCount = text.length;
   return (
     <div className="px-4 py-4 pb-24 space-y-5">
-      {/* Draft level chips — three big targets */}
+      {/* ── Upload draft (PDF / TXT / MD) ──────────────────────────────── */}
+      <section className="space-y-2">
+        <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+          Upload draft
+        </label>
+        <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>
+          PDF, TXT, or Markdown. The text is extracted into the box below — paste also works.
+        </p>
+        <label
+          className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed text-[14px] font-semibold transition-colors active:scale-[0.99]"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-muted)",
+            minHeight:       "56px",
+          }}
+        >
+          <Upload size={16} />
+          <span>{uploadBusy ? "Extracting…" : "Choose a file"}</span>
+          <input
+            type="file"
+            accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+            className="hidden"
+            onChange={e => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              e.currentTarget.value = "";
+              onUpload(file);
+            }}
+          />
+        </label>
+        {uploadError && (
+          <p className="text-[11px]" style={{ color: "var(--ats-fg-error, #d33)" }}>{uploadError}</p>
+        )}
+      </section>
+
+      {/* ── Draft level chips ──────────────────────────────────────────── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
           Draft stage
@@ -1712,7 +2320,7 @@ function ReviewScreen({
         </div>
       </section>
 
-      {/* Paste text */}
+      {/* ── Paper text ─────────────────────────────────────────────────── */}
       <section className="space-y-2">
         <div className="flex items-end justify-between">
           <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
@@ -1737,6 +2345,56 @@ function ReviewScreen({
             color:           "var(--ats-fg-primary)",
           }}
         />
+      </section>
+
+      {/* ── Context hint (optional) ────────────────────────────────────── */}
+      <section className="space-y-2">
+        <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+          Context (optional)
+        </label>
+        <p className="text-[12px]" style={{ color: "var(--ats-fg-muted)" }}>
+          Venue, course, professor preferences, target audience — anything that should sharpen the reviewers&apos; focus.
+        </p>
+        <textarea
+          value={contextHint}
+          onChange={e => setContextHint(e.target.value)}
+          placeholder="e.g. Submitting to CHI 2026 ‧ undergraduate honours thesis ‧ professor cares about argument flow over copy edits"
+          rows={3}
+          className="w-full resize-none rounded-xl border px-4 py-3 text-[13px] leading-relaxed focus:outline-none"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-input)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+      </section>
+
+      {/* ── Language ───────────────────────────────────────────────────── */}
+      <section className="space-y-2">
+        <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+          Review language
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          {LAB_LANGUAGES.map(l => {
+            const active = language === l;
+            return (
+              <button
+                key={l}
+                onClick={() => setLanguage(l)}
+                aria-pressed={active}
+                className="rounded-xl border text-[14px] font-bold transition-colors active:scale-[0.97]"
+                style={{
+                  borderColor:     active ? "var(--ats-border-accent)"  : "var(--ats-border-subtle)",
+                  backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                  color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-primary)",
+                  minHeight:       "48px",
+                }}
+              >
+                {l}
+              </button>
+            );
+          })}
+        </div>
       </section>
 
       {/* Run / Stop */}
