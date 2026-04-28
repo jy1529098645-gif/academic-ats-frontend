@@ -32,6 +32,7 @@ import {
 } from "@/lib/stores/usage-prompt-store";
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import OnboardingTour, { type TourStep } from "@/components/onboarding/OnboardingTour";
 import UserNotificationPopup from "@/components/UserNotificationPopup";
 import { useUserNotifications } from "@/lib/hooks/use-user-notifications";
 import {
@@ -4258,94 +4259,64 @@ ${html}
         </div>
       )}
 
-      {/* ── First-run welcome modal ─────────────────────────────────────────
-          Visual style mirrors guestExhaustedOpen above so the two
-          modals read as siblings (same border, panel bg, padding,
-          backdrop). Three short feature blurbs — Search / Brief /
-          Lab+Review — keep first-timers oriented without a guided
-          DOM-spotlight tour (those tend to break when the page
-          re-flows). Dismissing writes the localStorage flag so the
-          modal never returns; "Show welcome guide" in the Help panel
-          re-opens it on demand. */}
-      {welcomeOpen && (
-        <div
-          className="fixed inset-0 z-[90] flex items-center justify-center p-6 backdrop-blur-sm"
-          style={{ backgroundColor: "rgba(0,0,0,0.45)" }}
-          onClick={() => {
-            setWelcomeOpen(false);
-            try { window.localStorage.setItem("ats-onboarding-seen-v1", "1"); } catch { /* ignore */ }
-          }}
-        >
-          <div
-            className="w-full max-w-md rounded-2xl border shadow-2xl p-6"
-            style={{
-              borderColor:     "var(--ats-border-subtle)",
-              backgroundColor: "var(--ats-bg-panel)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="welcome-title"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/Cats_01.png" alt="" className="h-14 w-14 mx-auto mb-3 select-none pointer-events-none" draggable={false} />
-            <h2 id="welcome-title" className="text-lg font-bold mb-1 text-center" style={{ color: "var(--ats-fg-primary)" }}>
-              Welcome to AcademiCats
-            </h2>
-            <p className="text-xs leading-relaxed mb-4 text-center" style={{ color: "var(--ats-fg-secondary)" }}>
-              Three things you can do here. (Re-open this any time from
-              the user menu &rarr; Help &rarr; Show welcome guide.)
-            </p>
-            <div className="space-y-2.5 mb-5">
-              <div className="rounded-lg border p-3" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>1 · Search</span>
-                </div>
-                <p className="text-[11px] leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
-                  Type a research question (or click a suggested chip below
-                  the cat). Pick <strong>Quick</strong> for a fast scan or
-                  {" "}<strong>Curated</strong> for a deeper analysis.
-                </p>
-              </div>
-              <div className="rounded-lg border p-3" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>2 · Read the Brief</span>
-                </div>
-                <p className="text-[11px] leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
-                  Results stream in with a structured Research Brief
-                  summarising what was found. Each paper card has Open
-                  Paper / Translate PDF / Add to Lab.
-                </p>
-              </div>
-              <div className="rounded-lg border p-3" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>3 · Draft &amp; Review</span>
-                </div>
-                <p className="text-[11px] leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
-                  The right panel runs <strong>Synthesis Lab</strong>
-                  {" "}(write essays, statements, proposals using selected
-                  papers) and <strong>Paper Review</strong> (multi-agent
-                  critique of your own draft).
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                setWelcomeOpen(false);
-                try { window.localStorage.setItem("ats-onboarding-seen-v1", "1"); } catch { /* ignore */ }
-              }}
-              className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold hover:brightness-110 transition-all"
-              style={{
-                backgroundColor: "var(--ats-fg-accent)",
-                color:           "#ffffff",
-                border:          "1px solid var(--ats-fg-accent)",
-              }}
-            >
-              Got it — let&apos;s start
-            </button>
-          </div>
-        </div>
-      )}
+      {/* ── First-run guided tour ───────────────────────────────────────────
+          Step-by-step spotlight tour replacing the earlier 3-card
+          welcome modal. Each step highlights an actual UI region by
+          looking up `data-tour="..."` attributes on real elements;
+          users learn by SEEING the surface, not reading a description
+          of it. Auto-opens once per browser via the localStorage flag
+          (`ats-onboarding-seen-v1`); re-openable from the Help panel.
+          The tour component (src/components/onboarding/OnboardingTour.tsx)
+          handles spotlight math, scroll/resize tracking, ESC + arrow
+          key navigation, and writing the seen-flag on dismiss. */}
+      <OnboardingTour
+        open={welcomeOpen}
+        onClose={() => {
+          setWelcomeOpen(false);
+          try { window.localStorage.setItem("ats-onboarding-seen-v1", "1"); } catch { /* ignore */ }
+        }}
+        steps={[
+          {
+            id:    "welcome",
+            title: "Welcome to AcademiCats",
+            body:  "I'll show you the workspace in 5 quick steps. Press → / Enter to advance, ← to go back, Esc to skip.",
+          },
+          {
+            id:        "search-input",
+            target:    "search-input",
+            title:     "1 · Type a research question",
+            body:      "Plain English. e.g. \"GPT-4 hallucination evaluation in clinical settings\". Or click a chip from the cat below for a one-tap topic.",
+            placement: "auto",
+          },
+          {
+            id:        "search-mode",
+            target:    "search-mode",
+            title:     "2 · Pick Quick or Curated",
+            body:      "Quick (~30 s) — fast scan across sources. Curated (~2 min) — deeper analysis with multi-agent screening. Curated costs more quota.",
+            placement: "auto",
+          },
+          {
+            id:        "right-panel",
+            target:    "right-panel",
+            title:     "3 · Draft & Review live here",
+            body:      "Once results arrive, the right panel runs Synthesis Lab (write essays / statements / proposals from selected papers) and Paper Review (multi-agent critique of your own draft).",
+            placement: "left",
+          },
+          {
+            id:        "user-menu",
+            target:    "user-menu",
+            title:     "4 · Profile, history, help",
+            body:      "Your usage, saved Lab outputs, and the Help panel (where you can re-open this tour) live behind this avatar.",
+            placement: "bottom",
+          },
+          {
+            id:    "done",
+            title: "You're set",
+            body:  "Anything unclear? Open the Help panel from the avatar menu — there's a \"Show welcome guide\" link that re-launches this tour.",
+          },
+        ] satisfies TourStep[]}
+      />
+
 
       {/* Day / Night category toggle — rendered as a sibling of the
           announcement banner so it sits in the top-right of that wrapper
@@ -4927,7 +4898,7 @@ ${html}
             </div>
 
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
-            <div className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
+            <div data-tour="search-input" className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
               <div ref={placeholderWrapperRef} className="relative" style={{ containerType: "inline-size" }}>
                 <textarea
                   ref={taRef}
@@ -5348,7 +5319,7 @@ ${html}
                 arrived. Pinning it near the textarea bottom from the
                 first frame keeps its position consistent across every
                 state — empty landing, mid-stream, post-stream. */}
-            <div className="flex flex-col items-center w-full">
+            <div data-tour="search-mode" className="flex flex-col items-center w-full">
             <Sprite
               ref={spriteRef}
               query={query}
@@ -6092,6 +6063,7 @@ ${html}
             {/* ── Right panel: Synthesis Lab ── */}
             <aside
               data-region="lab"
+              data-tour="right-panel"
               className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] ats-panel overflow-hidden"
               style={{
                 transform: analyticsVisible ? "translateX(0)" : "translateX(105%)",
@@ -7636,7 +7608,7 @@ ${html}
                   original spec — text-xs, avatar 6x6 — so the widget sits
                   quietly in the bottom-left without competing with the
                   main workspace controls. */}
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5" data-tour="user-menu">
                 <button
                   onClick={() => setUserMenuOpen(o => !o)}
                   aria-label="Open user menu"
