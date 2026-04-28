@@ -1835,30 +1835,12 @@ function DesktopWorkspace() {
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [guestSignInBusy,     setGuestSignInBusy]     = useState(false);
   const [guestSignInError,    setGuestSignInError]    = useState<string>("");
-  // Welcome tour — fires every time the user transitions from
-  // logged-out to logged-in. Per user spec: "新用户引导每次用户登录都
-  // 会重新显示一遍". The previous localStorage-gated "show once per
-  // browser" behaviour was removed in favour of this always-on
-  // post-login launch (covers fresh sign-in, sign-out → sign-in, and
-  // page reloads where session restore briefly takes authUser
-  // null → user).
-  //
-  // Why a ref instead of just `if (authUser) ...`: Supabase's auth
-  // listener can re-fire on token refresh, focus events, etc., where
-  // authUser stays non-null but the reference may change. The ref
-  // tracks the previous truthy/falsy state so we only open the tour
-  // on actual login transitions, never on mid-session re-emits.
-  const prevAuthLoggedInRef = useRef<boolean>(false);
-  useEffect(() => {
-    const wasLoggedIn = prevAuthLoggedInRef.current;
-    const isLoggedIn  = !!authUser;
-    prevAuthLoggedInRef.current = isLoggedIn;
-    // Only fire on null → user transitions. user → user (token
-    // refresh) and user → null (sign-out) both skip.
-    if (!wasLoggedIn && isLoggedIn) {
-      setWelcomeOpen(true);
-    }
-  }, [authUser]);
+  // Welcome tour trigger lives inside the supabase.auth.onAuthStateChange
+  // listener (search this file for "Tour-trigger") — that listener
+  // gets the explicit event type ("SIGNED_IN" vs "INITIAL_SESSION")
+  // which lets us distinguish a real login from a session-restore
+  // page reload. A useEffect on [authUser] alone can't tell those
+  // two cases apart since both surface as null → user transitions.
 
   // ── Tour-lifecycle effect ────────────────────────────────────────────────
   // The onboarding tour highlights real DOM regions, but several of
@@ -1875,39 +1857,33 @@ function DesktopWorkspace() {
   //      collapsed; if the user re-opens the tour later they may
   //      already have it expanded → we still capture+restore exactly.
   const tourSnapshotRef = useRef<{
-    rightCollapsed: boolean;
-    userMenuOpen:   boolean;
-    query:          string;
-    buttonStep:     0 | 1 | 2;
+    userMenuOpen: boolean;
+    query:        string;
+    buttonStep:   0 | 1 | 2;
   } | null>(null);
   useEffect(() => {
     if (welcomeOpen) {
       // Capture once per open (don't overwrite if effect re-runs).
+      // We deliberately do NOT force-expand the right panel any
+      // more — the spotlight follows the actual rendered rect of
+      // each region (whatever it is on the user's current device
+      // / layout / collapsed-state). Forcing expansion was making
+      // the panel overflow off-screen on smaller viewports because
+      // the workspace grid uses pixel tracks computed off body
+      // width, not viewport width. Per user spec: "高亮的区域就
+      // 直接按照这个区域当前显示的大小绘制不就行了".
       if (tourSnapshotRef.current === null) {
-        tourSnapshotRef.current = {
-          rightCollapsed: gridRightCollapsed,
-          userMenuOpen,
-          query,
-          buttonStep,
-        };
+        tourSnapshotRef.current = { userMenuOpen, query, buttonStep };
       }
-      // Force expand for the duration of the tour. Per-step onEnter
-      // hooks (defined alongside each step below) handle the more
-      // granular UI demos: opening the user menu, injecting a demo
-      // query so the Sprite's Quick/Curated buttons render, etc.
-      if (gridRightCollapsed) setGridRightCollapsed(false);
     } else if (tourSnapshotRef.current !== null) {
-      // Restore everything on close (any path: Skip / Got it / Esc).
+      // Restore demo state on close (any path: Skip / Got it / Esc).
       const snap = tourSnapshotRef.current;
       tourSnapshotRef.current = null;
-      if (gridRightCollapsed !== snap.rightCollapsed) {
-        setGridRightCollapsed(snap.rightCollapsed);
-      }
       if (userMenuOpen !== snap.userMenuOpen) {
         setUserMenuOpen(snap.userMenuOpen);
       }
-      // Restore the user's typed query + buttonStep, so any demo
-      // text injected for the Quick/Curated step is wiped out cleanly.
+      // Restore the user's typed query + buttonStep, so the demo
+      // placeholder injected for the Quick/Curated step is wiped.
       if (query !== snap.query) {
         setQuery(snap.query);
       }
@@ -2559,12 +2535,38 @@ function DesktopWorkspace() {
       }
       setAuthLoading(false);
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       authTokenRef.current = session?.access_token ?? null;
       setAuthUser(session?.user ?? null);
       cacheAndRegister(session);
+      // Tour-trigger: only fire on real SIGNED_IN events, not on the
+      // INITIAL_SESSION emission Supabase sends when a session is
+      // restored from cookies on page reload. sessionStorage flag
+      // prevents accidental double-fires within a tab; clearing it
+      // on SIGNED_OUT means a sign-out → sign-in pair re-shows the
+      // tour as expected. Per user spec: "每次用户登录进来的时候出现"
+      // (every login), "而不是每次刷新页面出现" (not every reload).
+      try {
+        if (typeof window !== "undefined") {
+          if (event === "SIGNED_IN") {
+            const seen = window.sessionStorage.getItem("ats-tour-shown-this-session");
+            if (!seen) {
+              setWelcomeOpen(true);
+              window.sessionStorage.setItem("ats-tour-shown-this-session", "1");
+            }
+          } else if (event === "SIGNED_OUT") {
+            window.sessionStorage.removeItem("ats-tour-shown-this-session");
+            // Defensive: if a tour happened to be open when the
+            // user signed out, close it now. The sign-in modal
+            // (z-[9400]) is also above tour (z-95) so even if we
+            // missed this, the user wouldn't be locked out — but
+            // closing here keeps state clean.
+            setWelcomeOpen(false);
+          }
+        }
+      } catch { /* sessionStorage may throw under privacy modes — ignore */ }
       if (process.env.NODE_ENV !== "production") {
-        console.debug("[auth] onAuthStateChange →", session?.user?.email ?? "signed out", "| token:", session?.access_token ? "✓" : "✗");
+        console.debug("[auth] onAuthStateChange →", event, "·", session?.user?.email ?? "signed out", "| token:", session?.access_token ? "✓" : "✗");
       }
     });
     return () => subscription.unsubscribe();
@@ -4085,7 +4087,7 @@ ${html}
           becomes non-null (via onAuthStateChange). */}
       {!authLoading && !authUser && (
         <div
-          className="fixed inset-0 z-[80] flex items-center justify-center p-6 backdrop-blur-sm"
+          className="fixed inset-0 z-[9400] flex items-center justify-center p-6 backdrop-blur-sm"
           style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
         >
           <div
@@ -4352,7 +4354,7 @@ ${html}
           {
             id:    "welcome",
             title: "Welcome to AcademiCats",
-            body:  "I'll walk you through the workspace in 4 steps. Press → / Enter to advance, ← to go back, Esc to skip.",
+            body:  "I'll walk you through the workspace in 5 steps. Press → / Enter to advance, ← to go back, Esc to skip.",
             // Each step's onEnter explicitly resets the demo-state
             // it doesn't want, so navigating with the back arrow
             // restores prior steps cleanly. Welcome card is centred,
@@ -4417,7 +4419,7 @@ ${html}
             id:        "user-menu",
             target:    "user-menu",
             title:     "Profile, history, help",
-            body:      "Your usage, saved Lab outputs, and the Help panel (where you can re-open this tour) live behind this avatar.",
+            body:      "Your usage, saved Lab outputs, and Help (which re-launches this tour) all live behind this avatar.",
             placement: "right",
             // Open the user menu so the spotlight lands on the
             // actual dropdown panel (data-tour="user-menu" is on
@@ -4432,9 +4434,24 @@ ${html}
             },
           },
           {
+            id:        "feedback-button",
+            target:    "feedback-button",
+            title:     "Send us feedback",
+            body:      "Hit the bubble at the bottom-right any time to report a bug, suggest a feature, or send a quick note. We read everything.",
+            placement: "left",
+            // Close the user menu so the floating feedback button
+            // (bottom-right of the screen) is unobstructed; the
+            // spotlight will land on its current rendered position.
+            onEnter:   () => {
+              setUserMenuOpen(false);
+              setQuery("");
+              setButtonStep(0);
+            },
+          },
+          {
             id:    "done",
             title: "You're set",
-            body:  "Anything unclear? User menu → Help → \"Show welcome guide\" re-launches this tour any time.",
+            body:  "Anything unclear later? User menu → Help re-launches this tour any time.",
             // Close the menu before the final card so it doesn't
             // overlap with the centred Got-it modal.
             onEnter: () => {
@@ -7363,6 +7380,7 @@ ${html}
       {!!authUser && (
         <>
           <button
+            data-tour="feedback-button"
             onClick={() => { setFeedbackOpen(true); setFeedbackMsg(null); }}
             className="group fixed right-4 z-50 flex items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:brightness-110 hover:scale-110 h-11 w-11"
             style={{
@@ -7645,7 +7663,20 @@ ${html}
                       ] as const).map(({ key, label, icon }) => (
                         <button
                           key={key}
-                          onClick={() => { setUserPanel(key); setUserMenuOpen(false); }}
+                          onClick={() => {
+                            // Help item directly relaunches the
+                            // onboarding tour (per user spec
+                            // "用户选项里面的help应该要触发这个
+                            // 新手引导的流程"). Other items still
+                            // open their respective user panels.
+                            if (key === "help") {
+                              setWelcomeOpen(true);
+                              setUserMenuOpen(false);
+                            } else {
+                              setUserPanel(key);
+                              setUserMenuOpen(false);
+                            }
+                          }}
                           className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm transition-colors text-left ${
                             key === "dev"
                               ? "text-amber-300 hover:bg-amber-500/10 hover:text-amber-200 border-t border-slate-700/50"
