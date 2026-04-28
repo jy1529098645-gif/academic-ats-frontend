@@ -1736,16 +1736,10 @@ function LabScreen({
 
   return (
     <div className="px-4 py-4 pb-24 space-y-5">
-      {/* AI-assistance disclaimer (mirrors desktop Synthesis Lab + ToS §4). */}
-      <div
-        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
-        role="note"
-      >
-        <strong className="font-semibold">AI-generated draft.</strong>
-        {" "}Output may contain factual errors or fabricated citations.
-        You retain full authorship responsibility — verify every claim
-        and reference before any external use. See Terms §4.
-      </div>
+      {/* AI-assistance disclaimer — small-print to match desktop. */}
+      <p className="text-[10px] italic leading-snug text-slate-500" role="note">
+        AI draft may include hallucinated facts or citations. Verify before use; you retain authorship. (Terms §4)
+      </p>
       {/* ── Output-type picker — large tap area, opens chip-grid on tap ── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
@@ -2310,16 +2304,10 @@ function ReviewScreen({
   const charCount = text.length;
   return (
     <div className="px-4 py-4 pb-24 space-y-5">
-      {/* AI-assistance disclaimer (mirrors desktop PaperReviewPanel + ToS §4). */}
-      <div
-        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
-        role="note"
-      >
-        <strong className="font-semibold">AI-assisted review.</strong>
-        {" "}Agents may miss real issues, flag false ones, or fabricate
-        citations. Verify every comment against the source paper — this
-        does not replace human peer review. See Terms §4.
-      </div>
+      {/* AI-assistance disclaimer — small-print to match desktop. */}
+      <p className="text-[10px] italic leading-snug text-slate-500" role="note">
+        AI review may miss issues or hallucinate. Verify before acting. (Terms §4)
+      </p>
       {/* ── Upload draft (PDF / TXT / MD) ──────────────────────────────── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>

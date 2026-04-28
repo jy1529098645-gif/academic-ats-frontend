@@ -1645,6 +1645,13 @@ function DesktopWorkspace() {
 
   // ── Synthesis Lab (✍️) state ───────────────────────────────────────────────
   const [labRefs,       setLabRefs]       = useState<{ key: string; paper: Paper }[]>([]);
+  // Perf: precomputed key set for O(1) "is this paper already in Lab?"
+  // lookups inside the paper-cards .map(). Without this, each of the
+  // ~50 cards rendered called labRefs.some(r => r.key === paperKey)
+  // O(labRefs.length) times — i.e. 50 × 50 = 2500 ops per parent
+  // re-render, multiplied by ~60fps during brief streaming. The Set
+  // is rebuilt only when labRefs itself changes.
+  const labRefsKeySet = useMemo(() => new Set(labRefs.map(r => r.key)), [labRefs]);
   const [labCoreArg,    setLabCoreArg]    = useState("");
   const [labPoints,     setLabPoints]     = useState<string[]>([""]);
   // Per-output-type extras — keys match LabExtraField.key from lib/lab-fields.ts.
@@ -2572,9 +2579,17 @@ function DesktopWorkspace() {
           const sorted = [...cloudItems, ...pending].sort(
             (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
           );
-          setHistoryList(sorted);
+          // Perf: cap the in-memory + on-disk history at 50 entries.
+          // Optimistic-insert path already slices to 50 (line ~3567);
+          // here we mirror that on cloud fetch so a heavy backend
+          // response can't balloon the in-memory list (every change
+          // re-renders the history panel, every storage write
+          // re-stringifies the array). Older entries stay on the
+          // server — they're just not pinned in this client's view.
+          const capped = sorted.slice(0, 50);
+          setHistoryList(capped);
           // Refresh the local mirror with the merged list so the next load is fast AND correct.
-          try { localStorage.setItem(_hKey(email), JSON.stringify(sorted)); } catch {}
+          try { localStorage.setItem(_hKey(email), JSON.stringify(capped)); } catch {}
         })
         .catch((err) => { console.warn("[history] cloud fetch failed:", err); setHistoryList([]); });
     });
@@ -3854,9 +3869,18 @@ ${html}
                   setLabAgentLog(prev => {
                     const idx = prev.findIndex(e => e.name === agentName);
                     const entry = { name: agentName, msg: agentMsg, done: isDone, error: isError, revision: isRevision };
-                    return idx >= 0
+                    const next = idx >= 0
                       ? prev.map((e, i) => i === idx ? entry : e)
                       : [...prev, entry];
+                    // FIFO cap (perf): keep only the last 100 entries.
+                    // Without this the list grows unbounded across long
+                    // sessions or repeated lab runs and starts dragging
+                    // the renderer (each render walks the array). 100
+                    // is way past anything a single run produces (a
+                    // typical synthesis run logs ~20 agent events) so
+                    // the cap only kicks in when something's already
+                    // gone wrong (or an old session is being kept open).
+                    return next.length > 100 ? next.slice(next.length - 100) : next;
                   });
                 }
               }
@@ -5549,7 +5573,7 @@ ${html}
                           <h3 className="flex-1 text-sm font-semibold leading-snug break-words text-slate-100">{index + 1}. {paper.title || "Untitled"}</h3>
                           {/* Add-to-Lab button — only in final phase */}
                           {!papersAreStreaming && (() => {
-                            const inLab = labRefs.some(r => r.key === paperKey);
+                            const inLab = labRefsKeySet.has(paperKey);
                             return (
                               <button
                                 onClick={() => inLab ? removeFromLab(paperKey) : addToLab(paper, paperKey)}
@@ -6198,20 +6222,13 @@ ${html}
               {labModule === "synthesis" && (
               <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
                 <div className="px-4 py-4 space-y-4">
-                  {/* ── AI-assistance disclaimer (mirrors PaperReviewPanel +
-                      ToS §4 added in version 1.1). Legal-sensitive surface
-                      because Lab output goes into application essays /
-                      research drafts that authorship-attribute the user;
-                      banner makes the responsibility split unambiguous. */}
-                  <div
-                    className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
-                    role="note"
-                  >
-                    <strong className="font-semibold">AI-generated draft.</strong>
-                    {" "}Output may contain factual errors or fabricated citations.
-                    You retain full authorship responsibility — verify every
-                    claim and reference before any external use. See Terms §4.
-                  </div>
+                  {/* AI-assistance disclaimer — toned down per user feedback
+                      (was an amber banner; now muted small-print). ToS §4
+                      carries the formal liability language; this line is
+                      just a daily reminder. */}
+                  <p className="text-[10px] italic leading-snug text-slate-500" role="note">
+                    AI draft may include hallucinated facts or citations. Verify before use; you retain authorship. (Terms §4)
+                  </p>
 
                   {/* References — compact header + tighter empty state for a denser top of Lab. */}
                   <div>

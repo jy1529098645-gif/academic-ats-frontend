@@ -408,22 +408,14 @@ export function PaperReviewPanel() {
   // divider pattern, same button styling.
   return (
     <div className="px-4 py-4 space-y-4" style={{ color: "var(--ats-fg-primary)" }}>
-      {/* ── AI-assistance disclaimer ─────────────────────────────────────────
-          Always-visible legal/UX note pinned at the top of the Paper Review
-          panel. Mirrors the Synthesis Lab banner and ToS Section 4 added in
-          version 1.1 — kept short here so the user sees it without
-          scrolling, with the full text in the ToS for the formal record.
-          Subtle amber palette (--ats colour tokens preserve theme parity)
-          so it reads as advisory, not an error. */}
-      <div
-        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
-        role="note"
-      >
-        <strong className="font-semibold">AI-assisted review.</strong>
-        {" "}Agents may miss real issues, flag false ones, or fabricate citations.
-        Verify every comment against the source paper — this does not replace
-        human peer review or your own scholarly judgement. See Terms §4.
-      </div>
+      {/* AI-assistance disclaimer — toned down per user feedback to match
+          the muted "small-print" aesthetic used elsewhere in the panel
+          chrome. Single italic line, slate-500, no border / bg, so it
+          reads as a footnote rather than a yellow alert. ToS §4 carries
+          the formal language; this is just a daily reminder. */}
+      <p className="text-[10px] italic leading-snug text-slate-500" role="note">
+        AI review may miss issues or hallucinate. Verify before acting. (Terms §4)
+      </p>
       {/* ── Upload ────────────────────────────────────────────────────────── */}
       <div>
         <label className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
