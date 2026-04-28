@@ -4,11 +4,21 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
 
-const DEV_ACCOUNTS = [
-  'dev01@academicats.com',
-  'dev02@academicats.com',
-  'dev03@academicats.com',
-]
+// Dev-account login is gated behind NEXT_PUBLIC_DEV_LOGIN_EMAILS so the
+// account list never ships in the production bundle. The env var is a
+// comma-separated list of emails; if it's unset (Vercel prod) the entire
+// dev-login UI is omitted from the rendered page and the dev addresses
+// are not present in the JS bundle either.
+//
+// Local dev / preview deployments opt in by setting e.g.
+//   NEXT_PUBLIC_DEV_LOGIN_EMAILS=dev01@academicats.com,dev02@academicats.com
+// in `.env.local` or the preview env. Build-time inlining means the value
+// must be referenced as `process.env.NEXT_PUBLIC_DEV_LOGIN_EMAILS`
+// directly — see node_modules/next/dist/docs/01-app/02-guides/environment-variables.md.
+const DEV_ACCOUNTS: string[] = (process.env.NEXT_PUBLIC_DEV_LOGIN_EMAILS ?? '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
 
 export default function LoginPage() {
   const [googleLoading, setGoogleLoading] = useState(false)
@@ -101,7 +111,8 @@ export default function LoginPage() {
           </button>
         </div>
 
-        {/* ── Dev accounts ── */}
+        {/* ── Dev accounts (only rendered when NEXT_PUBLIC_DEV_LOGIN_EMAILS is set) ── */}
+        {DEV_ACCOUNTS.length > 0 && (
         <div className="pt-2 border-t border-dashed border-gray-200 space-y-2">
           <p className="text-xs text-gray-400">Dev accounts</p>
 
@@ -144,6 +155,7 @@ export default function LoginPage() {
             </div>
           )}
         </div>
+        )}
 
         {message && (
           <p className="text-sm text-red-500">{message}</p>

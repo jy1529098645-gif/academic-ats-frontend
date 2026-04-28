@@ -1,0 +1,14 @@
+# AcademiCats — crawler policy
+#
+# Public marketing pages (the landing workspace) are open to indexing so
+# search engines can surface the product. The admin dashboard, login
+# screens, and API endpoints are explicitly disallowed: they contain no
+# user-facing prose worth indexing and the admin URL leaking into Google
+# results invites brute-force credential-stuffing attempts.
+
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /admin/
+Disallow: /login
+Disallow: /api/

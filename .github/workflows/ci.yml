@@ -1,0 +1,65 @@
+# Minimum-viable CI for the Next.js frontend.
+#
+# Goal: catch the obvious "this won't even start" regressions (broken
+# types, lint errors, failing unit tests, broken build) on every PR
+# and every push to main. The repo had no CI at all before public
+# beta — this is the floor, not the ceiling.
+#
+# Bumping ideas (post-beta): bundle-size budget via @next/bundle-analyzer,
+# Lighthouse CI on preview URLs, e2e via Playwright.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref so a rapid push series doesn't
+# queue 5 builds.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # next build reads NEXT_PUBLIC_* at build time; provide harmless
+      # placeholders so the build doesn't fail on missing config in CI.
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-placeholder
+      # Sentry DSN unset on purpose — without DSN the SDK init is a no-op.
+      NEXT_PUBLIC_APP_ENV: ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Lint runs but is non-blocking for now: 23 pre-existing errors
+      # in shipped files (e.g. tailwind.config.ts uses require(), some
+      # `any` usage in supabase wrappers). Cleaning them is a separate
+      # task; meanwhile this step is informational so CI doesn't block
+      # merges on tech debt that predates the workflow.
+      - name: Lint (informational)
+        continue-on-error: true
+        run: npm run lint
+
+      # Hard gates — these MUST pass to merge.
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
