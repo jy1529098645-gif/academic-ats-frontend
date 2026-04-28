@@ -1875,25 +1875,33 @@ function DesktopWorkspace() {
   //      starts fresh. Pre-search landing always has the right panel
   //      collapsed; if the user re-opens the tour later they may
   //      already have it expanded → we still capture+restore exactly.
-  const tourSnapshotRef = useRef<{ rightCollapsed: boolean } | null>(null);
+  const tourSnapshotRef = useRef<{ rightCollapsed: boolean; userMenuOpen: boolean } | null>(null);
   useEffect(() => {
     if (welcomeOpen) {
       // Capture once per open (don't overwrite if effect re-runs).
       if (tourSnapshotRef.current === null) {
-        tourSnapshotRef.current = { rightCollapsed: gridRightCollapsed };
+        tourSnapshotRef.current = {
+          rightCollapsed: gridRightCollapsed,
+          userMenuOpen,
+        };
       }
-      // Force expand for the duration of the tour.
+      // Force expand for the duration of the tour. Per-step onEnter
+      // hooks (defined alongside each step below) handle the more
+      // granular UI demos like "open the user menu".
       if (gridRightCollapsed) setGridRightCollapsed(false);
     } else if (tourSnapshotRef.current !== null) {
-      // Restore on close.
+      // Restore everything on close (any path: Skip / Got it / Esc).
       const snap = tourSnapshotRef.current;
       tourSnapshotRef.current = null;
       if (gridRightCollapsed !== snap.rightCollapsed) {
         setGridRightCollapsed(snap.rightCollapsed);
       }
+      if (userMenuOpen !== snap.userMenuOpen) {
+        setUserMenuOpen(snap.userMenuOpen);
+      }
     }
-    // We deliberately don't depend on `gridRightCollapsed` to avoid
-    // a feedback loop — the effect only fires on welcomeOpen toggle.
+    // We deliberately don't depend on `gridRightCollapsed` / `userMenuOpen`
+    // to avoid a feedback loop — the effect only fires on welcomeOpen toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [welcomeOpen]);
 
@@ -4326,6 +4334,10 @@ ${html}
             id:    "welcome",
             title: "Welcome to AcademiCats",
             body:  "I'll show you the workspace in 5 quick steps. Press → / Enter to advance, ← to go back, Esc to skip.",
+            // Welcome card is centred — make sure no demo state is
+            // lingering from a back-navigation (e.g. user advanced to
+            // step 5, opened user menu, then went all the way back).
+            onEnter: () => { setUserMenuOpen(false); },
           },
           {
             id:        "search-input",
@@ -4333,6 +4345,7 @@ ${html}
             title:     "1 · Type a research question",
             body:      "Plain English. e.g. \"GPT-4 hallucination evaluation in clinical settings\". Or click a chip from the cat below for a one-tap topic.",
             placement: "auto",
+            onEnter:   () => { setUserMenuOpen(false); },
           },
           {
             // Targeted at the recommended-chips region (always visible
@@ -4348,6 +4361,7 @@ ${html}
             title:     "2 · Or one-tap a topic",
             body:      "Click any chip below the cat to load that as your search query. After you submit (or after typing your own question), you'll see Quick (~30 s) vs Curated (~2 min) buttons appear.",
             placement: "top",
+            onEnter:   () => { setUserMenuOpen(false); },
           },
           {
             id:        "right-panel",
@@ -4355,6 +4369,10 @@ ${html}
             title:     "3 · Draft & Review live here",
             body:      "Once results arrive, the right panel runs Synthesis Lab (write essays / statements / proposals from selected papers) and Paper Review (multi-agent critique of your own draft).",
             placement: "left",
+            // The tour-lifecycle effect already forces the right
+            // panel expanded for the whole tour duration. Closing
+            // the user menu here covers the back-from-step-5 case.
+            onEnter:   () => { setUserMenuOpen(false); },
           },
           {
             id:        "user-menu",
@@ -4362,11 +4380,20 @@ ${html}
             title:     "4 · Profile, history, help",
             body:      "Your usage, saved Lab outputs, and the Help panel (where you can re-open this tour) live behind this avatar.",
             placement: "bottom",
+            // Open the user menu so the spotlight points at an actual
+            // open dropdown — the original closed-avatar version of
+            // this step left users wondering "what is this circle?".
+            // The dropdown items are clickable; if a user clicks one
+            // mid-tour they navigate as expected (tour just ends).
+            onEnter:   () => { setUserMenuOpen(true); },
           },
           {
             id:    "done",
             title: "You're set",
             body:  "Anything unclear? Open the Help panel from the avatar menu — there's a \"Show welcome guide\" link that re-launches this tour.",
+            // Close the menu before the final card so it doesn't
+            // overlap with the centred Got-it modal.
+            onEnter: () => { setUserMenuOpen(false); },
           },
         ] satisfies TourStep[]}
       />

@@ -39,6 +39,17 @@ export type TourStep = {
    *  "auto" — picks the side with the most room. Centred modal steps
    *  (no target) ignore this and always centre. */
   placement?: "top" | "bottom" | "left" | "right" | "auto";
+  /** Optional side-effect fired when this step becomes the active
+   *  one. Use to put the page into the visual state that makes the
+   *  step's body copy actually true — e.g. opening the user menu so
+   *  step 5's "Profile, history, help" callout points at an open
+   *  dropdown rather than a closed avatar. Cleanup happens via the
+   *  next step's onEnter or via the parent's tour-close handler.
+   *
+   *  Idempotent: also fires when the user navigates BACK to a step,
+   *  so each step's onEnter must restore its desired state from
+   *  whatever the previous/next step did. */
+  onEnter?: () => void;
 };
 
 type Props = {
@@ -123,6 +134,21 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   useEffect(() => {
     if (open) setStepIdx(0);
   }, [open]);
+
+  // Fire the active step's onEnter side-effect when the step changes
+  // (or on first open). Lets the parent put the page into the visual
+  // state that the step's spotlight + body copy assume — e.g. open
+  // the user menu, expand a panel. Wrapped in try/catch so a bad
+  // onEnter doesn't break tour navigation.
+  useEffect(() => {
+    if (!open) return;
+    const step = steps[stepIdx];
+    if (!step?.onEnter) return;
+    try { step.onEnter(); } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[onboarding] step.onEnter threw:", err);
+    }
+  }, [open, stepIdx, steps]);
 
   // Recompute target rect when step changes or layout shifts. We use
   // requestAnimationFrame for the scroll/resize handlers to avoid
