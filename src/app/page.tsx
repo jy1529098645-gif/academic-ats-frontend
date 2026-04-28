@@ -1874,7 +1874,12 @@ function DesktopWorkspace() {
   //      starts fresh. Pre-search landing always has the right panel
   //      collapsed; if the user re-opens the tour later they may
   //      already have it expanded → we still capture+restore exactly.
-  const tourSnapshotRef = useRef<{ rightCollapsed: boolean; userMenuOpen: boolean } | null>(null);
+  const tourSnapshotRef = useRef<{
+    rightCollapsed: boolean;
+    userMenuOpen:   boolean;
+    query:          string;
+    buttonStep:     0 | 1 | 2;
+  } | null>(null);
   useEffect(() => {
     if (welcomeOpen) {
       // Capture once per open (don't overwrite if effect re-runs).
@@ -1882,11 +1887,14 @@ function DesktopWorkspace() {
         tourSnapshotRef.current = {
           rightCollapsed: gridRightCollapsed,
           userMenuOpen,
+          query,
+          buttonStep,
         };
       }
       // Force expand for the duration of the tour. Per-step onEnter
       // hooks (defined alongside each step below) handle the more
-      // granular UI demos like "open the user menu".
+      // granular UI demos: opening the user menu, injecting a demo
+      // query so the Sprite's Quick/Curated buttons render, etc.
       if (gridRightCollapsed) setGridRightCollapsed(false);
     } else if (tourSnapshotRef.current !== null) {
       // Restore everything on close (any path: Skip / Got it / Esc).
@@ -1898,9 +1906,17 @@ function DesktopWorkspace() {
       if (userMenuOpen !== snap.userMenuOpen) {
         setUserMenuOpen(snap.userMenuOpen);
       }
+      // Restore the user's typed query + buttonStep, so any demo
+      // text injected for the Quick/Curated step is wiped out cleanly.
+      if (query !== snap.query) {
+        setQuery(snap.query);
+      }
+      if (buttonStep !== snap.buttonStep) {
+        setButtonStep(snap.buttonStep);
+      }
     }
-    // We deliberately don't depend on `gridRightCollapsed` / `userMenuOpen`
-    // to avoid a feedback loop — the effect only fires on welcomeOpen toggle.
+    // We deliberately don't depend on the snapshotted state vars —
+    // the effect should only fire on the welcomeOpen toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [welcomeOpen]);
 
@@ -4336,67 +4352,96 @@ ${html}
           {
             id:    "welcome",
             title: "Welcome to AcademiCats",
-            body:  "I'll show you the workspace in 5 quick steps. Press → / Enter to advance, ← to go back, Esc to skip.",
-            // Welcome card is centred — make sure no demo state is
-            // lingering from a back-navigation (e.g. user advanced to
-            // step 5, opened user menu, then went all the way back).
-            onEnter: () => { setUserMenuOpen(false); },
+            body:  "I'll walk you through the workspace in 4 steps. Press → / Enter to advance, ← to go back, Esc to skip.",
+            // Each step's onEnter explicitly resets the demo-state
+            // it doesn't want, so navigating with the back arrow
+            // restores prior steps cleanly. Welcome card is centred,
+            // so we just clear any lingering demo:
+            onEnter: () => {
+              setUserMenuOpen(false);
+              setQuery("");
+              setButtonStep(0);
+            },
           },
           {
             id:        "search-input",
             target:    "search-input",
-            title:     "1 · Type a research question",
-            body:      "Plain English. e.g. \"GPT-4 hallucination evaluation in clinical settings\". Or click a chip from the cat below for a one-tap topic.",
+            title:     "Type a research question",
+            body:      "Plain English. e.g. \"GPT-4 hallucination evaluation in clinical settings\". Submit with Enter — Cat below will help you pick a search depth.",
             placement: "auto",
-            onEnter:   () => { setUserMenuOpen(false); },
+            onEnter:   () => {
+              setUserMenuOpen(false);
+              setQuery("");
+              setButtonStep(0);
+            },
           },
           {
-            // Targeted at the recommended-chips region (always visible
-            // on the landing page) instead of the abstract Sprite
-            // wrapper — the Quick/Curated buttons inside Sprite only
-            // render after the user submits a question, so highlighting
-            // the empty Sprite slot pre-submission gave a confusingly
-            // tiny rectangle. The chips are the closest visible UI
-            // for "one-tap to start", so the step doubles as a
-            // discoverability boost.
-            id:        "recommended-chips",
-            target:    "recommended-chips",
-            title:     "2 · Or one-tap a topic",
-            body:      "Click any chip below the cat to load that as your search query. After you submit (or after typing your own question), you'll see Quick (~30 s) vs Curated (~2 min) buttons appear.",
+            // Replaced the previous "recommended-chips" step with a
+            // Quick/Curated demo per user spec ("第二步显示两个检索按钮").
+            // The Quick/Curated buttons inside Sprite are gated on
+            // `!hasRunSearch && trimmedQuery.length > 0 && buttonStep >= 1`
+            // (Sprite.tsx:105). We satisfy those conditions during
+            // this step by injecting a placeholder query + bumping
+            // buttonStep, then revert in every other step's onEnter
+            // (and on tour close via the snapshot) so the buttons
+            // are visible ONLY on this step.
+            id:        "search-mode",
+            target:    "search-mode",
+            title:     "Pick Quick or Curated",
+            body:      "Quick (~30 s) — fast scan across sources for a first look. Curated (~2 min) — deeper analysis with multi-agent screening, costs more quota.",
             placement: "top",
-            onEnter:   () => { setUserMenuOpen(false); },
+            onEnter:   () => {
+              setUserMenuOpen(false);
+              // Demo placeholder query — the user's real query (if
+              // any) is in the snapshot and gets restored on close.
+              setQuery("e.g. GPT-4 hallucination evaluation");
+              setButtonStep(1);
+            },
           },
           {
             id:        "right-panel",
             target:    "right-panel",
-            title:     "3 · Draft & Review live here",
+            title:     "Draft & Review live here",
             body:      "Once results arrive, the right panel runs Synthesis Lab (write essays / statements / proposals from selected papers) and Paper Review (multi-agent critique of your own draft).",
             placement: "left",
-            // The tour-lifecycle effect already forces the right
-            // panel expanded for the whole tour duration. Closing
-            // the user menu here covers the back-from-step-5 case.
-            onEnter:   () => { setUserMenuOpen(false); },
+            // Revert the Quick/Curated demo from the previous step.
+            // The right panel itself stays expanded for the whole
+            // tour via the lifecycle effect.
+            onEnter:   () => {
+              setUserMenuOpen(false);
+              setQuery("");
+              setButtonStep(0);
+            },
           },
           {
             id:        "user-menu",
             target:    "user-menu",
-            title:     "4 · Profile, history, help",
+            title:     "Profile, history, help",
             body:      "Your usage, saved Lab outputs, and the Help panel (where you can re-open this tour) live behind this avatar.",
-            placement: "bottom",
-            // Open the user menu so the spotlight points at an actual
-            // open dropdown — the original closed-avatar version of
-            // this step left users wondering "what is this circle?".
-            // The dropdown items are clickable; if a user clicks one
-            // mid-tour they navigate as expected (tour just ends).
-            onEnter:   () => { setUserMenuOpen(true); },
+            placement: "right",
+            // Open the user menu so the spotlight lands on the
+            // actual dropdown panel (data-tour="user-menu" is on
+            // the open dropdown, not the avatar button) instead
+            // of pointing at a closed circle. The double-RAF tick
+            // bump in OnboardingTour ensures the spotlight rect
+            // is recomputed AFTER the dropdown renders.
+            onEnter:   () => {
+              setQuery("");
+              setButtonStep(0);
+              setUserMenuOpen(true);
+            },
           },
           {
             id:    "done",
             title: "You're set",
-            body:  "Anything unclear? Open the Help panel from the avatar menu — there's a \"Show welcome guide\" link that re-launches this tour.",
+            body:  "Anything unclear? User menu → Help → \"Show welcome guide\" re-launches this tour any time.",
             // Close the menu before the final card so it doesn't
             // overlap with the centred Got-it modal.
-            onEnter: () => { setUserMenuOpen(false); },
+            onEnter: () => {
+              setUserMenuOpen(false);
+              setQuery("");
+              setButtonStep(0);
+            },
           },
         ] satisfies TourStep[]}
       />
@@ -7526,7 +7571,7 @@ ${html}
                 <>
                   {/* Backdrop */}
                   <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                  <div className="absolute bottom-12 left-0 z-50 w-64 rounded-2xl border border-slate-700/60 bg-slate-900/95 shadow-2xl backdrop-blur-md overflow-hidden">
+                  <div data-tour="user-menu" className="absolute bottom-12 left-0 z-50 w-64 rounded-2xl border border-slate-700/60 bg-slate-900/95 shadow-2xl backdrop-blur-md overflow-hidden">
                     {/* User info header */}
                     <div className="px-4 py-3 border-b border-slate-700/50">
                       <div className="flex items-center gap-3">
@@ -7707,7 +7752,7 @@ ${html}
                   original spec — text-xs, avatar 6x6 — so the widget sits
                   quietly in the bottom-left without competing with the
                   main workspace controls. */}
-              <div className="flex items-center gap-1.5" data-tour="user-menu">
+              <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => setUserMenuOpen(o => !o)}
                   aria-label="Open user menu"

@@ -140,6 +140,17 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   // state that the step's spotlight + body copy assume — e.g. open
   // the user menu, expand a panel. Wrapped in try/catch so a bad
   // onEnter doesn't break tour navigation.
+  //
+  // After onEnter fires, the parent's setState calls re-render new
+  // DOM (e.g. the user-menu dropdown that didn't exist before).
+  // The initial rect read on this step transition was taken BEFORE
+  // those state changes committed, so the spotlight is on a stale
+  // (or null) bounding box. We bump `tick` via a double-RAF after
+  // onEnter so the layout effect re-reads getBoundingClientRect()
+  // once the new DOM is live. Double RAF (not single) because React
+  // 19 batches commits to the next paint — one RAF lands after the
+  // commit-scheduling tick but before layout, two RAFs guarantee
+  // the new element is on screen.
   useEffect(() => {
     if (!open) return;
     const step = steps[stepIdx];
@@ -148,6 +159,14 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
       // eslint-disable-next-line no-console
       console.warn("[onboarding] step.onEnter threw:", err);
     }
+    let raf1 = 0, raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setTick(t => t + 1));
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
   }, [open, stepIdx, steps]);
 
   // Recompute target rect when step changes or layout shifts. We use
