@@ -6176,23 +6176,33 @@ ${html}
                   centring on the left pane). The buttons retain their
                   own px-3 padding so the active-tab pill still reads
                   as a discrete affordance. */}
-              <div className="shrink-0 grid grid-cols-2 items-center py-2.5 border-b border-slate-800/60">
-                {/* Paper Review — left half. Was the first tab in the
-                    old flex layout because it's the more common
-                    starting point for a user arriving with a draft
-                    they want feedback on. */}
+              {/* Right-panel header — Paper Review + Synthesis Lab tabs.
+                  Sized to match the Workspace title on the left
+                  (text-xl font-bold + size=18 icon + gap-2) because
+                  Lab + Review are core product surfaces, not
+                  secondary controls. Active tab inherits primary
+                  text colour (--ats-fg-primary, same as Workspace);
+                  inactive tab muted via --ats-fg-muted. Theme tokens
+                  instead of slate-N so contrast stays correct across
+                  every theme + day/night mode. */}
+              <div className="shrink-0 grid grid-cols-2 items-center py-3 border-b border-slate-800/60">
+                {/* Paper Review — left half. */}
                 <div className="flex items-center justify-center">
                   <button
                     onClick={() => setLabModule("review")}
                     {...helpProps("Multi-agent draft review")}
-                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
-                      labModule === "review"
-                        ? "bg-slate-900/70 text-slate-100"
-                        : "text-slate-500 hover:text-slate-300"
-                    }`}
+                    className="flex items-center gap-2 rounded-lg px-4 py-1.5 text-xl font-bold transition-colors"
+                    style={{
+                      color:           labModule === "review"
+                        ? "var(--ats-fg-primary)"
+                        : "var(--ats-fg-muted)",
+                      backgroundColor: labModule === "review"
+                        ? "var(--ats-bg-accent-soft)"
+                        : "transparent",
+                    }}
                     title="Peer review of your draft"
                   >
-                    <ShieldCheck size={14} />
+                    <ShieldCheck size={18} />
                     <span>Paper Review</span>
                   </button>
                 </div>
@@ -6201,14 +6211,18 @@ ${html}
                   <button
                     onClick={() => setLabModule("synthesis")}
                     {...helpProps("Write with collected papers")}
-                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
-                      labModule === "synthesis"
-                        ? "bg-slate-900/70 text-slate-100"
-                        : "text-slate-500 hover:text-slate-300"
-                    }`}
+                    className="flex items-center gap-2 rounded-lg px-4 py-1.5 text-xl font-bold transition-colors"
+                    style={{
+                      color:           labModule === "synthesis"
+                        ? "var(--ats-fg-primary)"
+                        : "var(--ats-fg-muted)",
+                      backgroundColor: labModule === "synthesis"
+                        ? "var(--ats-bg-accent-soft)"
+                        : "transparent",
+                    }}
                     title="Write from selected papers"
                   >
-                    <PenLine size={14} />
+                    <PenLine size={18} />
                     <span>Synthesis Lab</span>
                     {labRefs.length > 0 && (
                     // Badge uses --ats-* tokens so contrast holds across
@@ -6221,9 +6235,10 @@ ${html}
                     // bg + saturated accent text reads cleanly on every
                     // palette (cool blue, warm amber, emerald, pink…)
                     // and passes WCAG AA on the panel backgrounds we
-                    // ship.
+                    // ship. Bumped to text-xs from the previous [10px]
+                    // so it stays readable next to the larger title text.
                     <span
-                      className="ml-0.5 rounded-full px-1.5 text-[10px] font-bold tabular-nums"
+                      className="ml-0.5 rounded-full px-1.5 text-xs font-bold tabular-nums"
                       style={{
                         backgroundColor: "var(--ats-bg-accent-soft)",
                         color:           "var(--ats-fg-accent)",
