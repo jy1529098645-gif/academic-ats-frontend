@@ -225,6 +225,7 @@ export default function MobileApp() {
       setLabError("Please fill in the topic or core argument.");
       return;
     }
+    const labStartedAt = Date.now();
     void track("lab_started", {
       output_type:   labOutputType,
       is_anonymous:  !!authUser?.is_anonymous,
@@ -302,6 +303,12 @@ export default function MobileApp() {
         setLabError(e instanceof Error ? e.message : String(e));
       }
     } finally {
+      void track("lab_completed", {
+        output_type:  labOutputType,
+        elapsed_ms:   Date.now() - labStartedAt,
+        is_anonymous: !!authUser?.is_anonymous,
+        surface:      "mobile",
+      });
       setLabGenerating(false);
       setLabStatus("");
       labAbortRef.current = null;
@@ -404,6 +411,7 @@ export default function MobileApp() {
       setReviewError("Paste or upload at least a few paragraphs (≥ 200 chars).");
       return;
     }
+    const reviewStartedAt = Date.now();
     void track("review_started", {
       draft_len_chars: text.length,
       is_anonymous:    !!authUser?.is_anonymous,
@@ -461,6 +469,12 @@ export default function MobileApp() {
         setReviewError(e instanceof Error ? e.message : String(e));
       }
     } finally {
+      void track("review_completed", {
+        draft_len_chars: text.length,
+        elapsed_ms:      Date.now() - reviewStartedAt,
+        is_anonymous:    !!authUser?.is_anonymous,
+        surface:         "mobile",
+      });
       setReviewGenerating(false);
       setReviewStatus("");
       reviewAbortRef.current = null;
@@ -490,6 +504,7 @@ export default function MobileApp() {
     }
     // Funnel telemetry. Mirrors the desktop search_submitted event so
     // both platforms feed the same PostHog dashboard.
+    const searchStartedAt = Date.now();
     void track("search_submitted", {
       mode:                fastMode ? "quick" : "curated",
       is_anonymous:        !!authUser?.is_anonymous,
@@ -573,6 +588,14 @@ export default function MobileApp() {
           setProgress(100);
           setStatusMsg("Done.");
           setSearchStatus("done");
+          // Pairs with the search_submitted at the top of runSearch.
+          void track("results_loaded", {
+            mode:                fastMode ? "quick" : "curated",
+            paper_count_actual:  Array.isArray(result?.papers) ? result.papers.length : 0,
+            elapsed_ms:          Date.now() - searchStartedAt,
+            is_anonymous:        !!authUser?.is_anonymous,
+            surface:             "mobile",
+          });
         } else if (eventName === "error") {
           const err = (data as { error?: string; message?: string }).error
             ?? (data as { message?: string }).message

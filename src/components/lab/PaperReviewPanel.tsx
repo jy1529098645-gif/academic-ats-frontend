@@ -276,6 +276,7 @@ export function PaperReviewPanel() {
     if (generating) return;
     // Funnel telemetry — fires before any LLM call. No-op without
     // NEXT_PUBLIC_POSTHOG_KEY (see analytics.ts).
+    const reviewStartedAt = Date.now();
     void track("review_started", {
       draft_len_chars: text.length,
       draft_type:      draftType,
@@ -383,6 +384,13 @@ export function PaperReviewPanel() {
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
+      // Funnel completion — pairs with review_started above. Fires for
+      // both success and error paths (see lab_completed for rationale).
+      void track("review_completed", {
+        draft_len_chars: text.length,
+        draft_type:      draftType,
+        elapsed_ms:      Date.now() - reviewStartedAt,
+      });
       abortRef.current = null;
       setGenerating(false);
       setStatus("");

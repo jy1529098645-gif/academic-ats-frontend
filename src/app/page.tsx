@@ -976,6 +976,12 @@ function DesktopWorkspace() {
   const leftSectionRef = useRef<HTMLElement>(null);
   const centerSectionRef = useRef<HTMLElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Timestamp refs for the analytics elapsed_ms computation. Captured
+  // at handler entry, read in the matching SSE / loop "done" branch.
+  // Refs (not state) so timestamp updates don't trigger re-renders.
+  const searchStartedAtRef = useRef<number>(0);
+  const labStartedAtRef    = useRef<number>(0);
+  const reviewStartedAtRef = useRef<number>(0);
   const labAbortRef = useRef<AbortController | null>(null);
 
   // Theme state is owned by the Zustand store (see src/lib/stores/theme-store).
@@ -1812,8 +1818,32 @@ function DesktopWorkspace() {
   })();
   // Sign-in popup that takes over once a guest exhausts their cap.
   const [guestExhaustedOpen,  setGuestExhaustedOpen]  = useState(false);
+  // First-run welcome modal. Shows once per browser (localStorage flag).
+  // Re-openable from the Help panel (look for `setWelcomeOpen(true)`
+  // wired into the "Show welcome guide" link further down). Default
+  // false until the mount-time effect resolves the localStorage check
+  // — that way SSR + the first client render always agree (no hydration
+  // mismatch) and the modal only flashes in for genuinely new users.
+  const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [guestSignInBusy,     setGuestSignInBusy]     = useState(false);
   const [guestSignInError,    setGuestSignInError]    = useState<string>("");
+  // First-run welcome modal — open exactly once per browser then never
+  // again unless the user clicks "Show welcome guide" in the Help
+  // panel. localStorage is the persistence layer so the same person
+  // returning on Day 2 isn't re-onboarded; clearing site data resets.
+  // Versioned key (`v1`) so we can re-prompt every user if the tour
+  // copy changes materially (bump to `v2`).
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined") return;
+      const seen = window.localStorage.getItem("ats-onboarding-seen-v1");
+      if (!seen) setWelcomeOpen(true);
+    } catch {
+      // localStorage may throw under privacy modes / disk-full / Safari
+      // ITP — silently skip the modal rather than crash the workspace.
+    }
+  }, []);
+
   // Hydrate the guest counters once on mount — same pattern as the
   // theme store. Done in its own effect so it runs even when there
   // is no Supabase session yet (the auth gate needs the counters
@@ -3261,6 +3291,11 @@ ${html}
     // Funnel telemetry — fires before any preflight gate so we can see
     // dropoff between "user clicked search" and "search actually ran".
     // No-op without NEXT_PUBLIC_POSTHOG_KEY (see analytics.ts).
+    // Stash the start timestamp on a ref so the matching results_loaded
+    // event (fired in the SSE "done" branch further down) can compute
+    // elapsed_ms across the async lifecycle. Ref instead of state
+    // because nothing renders against this value.
+    searchStartedAtRef.current = Date.now();
     void track("search_submitted", {
       mode:                isFast ? "quick" : "curated",
       is_anonymous:        !!authUser?.is_anonymous,
@@ -3492,6 +3527,17 @@ ${html}
               result: data.result ?? null,
               finished_at: Date.now() / 1000,
             }));
+            // Funnel completion — pairs with the search_submitted event
+            // fired at the top of handleSearch. searchStartedAtRef is 0
+            // if somehow we land here without a captured start (defensive
+            // — should never happen, but the ms calc would underflow).
+            const _searchStart = searchStartedAtRef.current;
+            void track("results_loaded", {
+              mode:                fastModeRef.current ? "quick" : "curated",
+              is_anonymous:        !!authUser?.is_anonymous,
+              paper_count_actual:  Array.isArray(data.result?.papers) ? data.result.papers.length : 0,
+              elapsed_ms:          _searchStart ? (Date.now() - _searchStart) : 0,
+            });
             // Metered action finished server-side; refresh the quota snapshot
             // so subscription + user-menu counters update without a reload.
             void usage.refresh();
@@ -3578,13 +3624,19 @@ ${html}
       }
     } catch (error) {
       if ((error as Error)?.name !== "AbortError") {
-        const baseMsg = explainFetchError(error);
-        // Deep mode runs for 3-5 min; connection drops are common on proxies with short idle
-        // timeouts.  Surface a helpful message so the user knows to retry rather than reload.
-        const deepHint = !isFast
-          ? " Deep analysis can take 3-5 min. If the connection was cut by a proxy, please run the search again."
-          : "";
-        setUiError(baseMsg + deepHint);
+        // The dev-oriented `explainFetchError` output ("Cannot reach
+        // backend at... uvicorn...") leaks engineering detail to
+        // production users on a mid-stream SSE drop. Use a calmer,
+        // user-targeted message and rely on the inline Retry button
+        // (rendered next to uiError below) as the recovery action.
+        // Devs still see the underlying error in the browser console.
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[search] aborted with error:", error);
+        }
+        const friendly = !isFast
+          ? "The search was interrupted. Curated mode runs for 1-3 minutes — proxies and corporate networks sometimes cut the connection during long streams. Click Retry to run it again."
+          : "The search was interrupted. This usually means the connection dropped mid-stream — click Retry to run it again.";
+        setUiError(friendly);
       }
     } finally {
       setIsSubmitting(false);
@@ -3712,6 +3764,7 @@ ${html}
     if (labRefs.length === 0) return;
     if (!ensureQuota("synthesis")) return;
     // Funnel telemetry — see search_submitted in handleSearch.
+    labStartedAtRef.current = Date.now();
     void track("lab_started", {
       output_type:           labOutputType,
       paper_count_attached:  labRefs.length,
@@ -3818,6 +3871,16 @@ ${html}
         setLabError(e instanceof Error ? e.message : String(e));
       }
     } finally {
+      // Funnel completion — pairs with the lab_started event at handler
+      // entry. Fires for both success and error paths because we want
+      // to see drop-off in the Lab funnel regardless of outcome (an
+      // event_status field would let us split that downstream).
+      const _labStart = labStartedAtRef.current;
+      void track("lab_completed", {
+        output_type:   labOutputType,
+        elapsed_ms:    _labStart ? (Date.now() - _labStart) : 0,
+        is_anonymous:  !!authUser?.is_anonymous,
+      });
       labAbortRef.current = null;
       setLabGenerating(false);
       setLabStatus("");
@@ -4171,6 +4234,95 @@ ${html}
         </div>
       )}
 
+      {/* ── First-run welcome modal ─────────────────────────────────────────
+          Visual style mirrors guestExhaustedOpen above so the two
+          modals read as siblings (same border, panel bg, padding,
+          backdrop). Three short feature blurbs — Search / Brief /
+          Lab+Review — keep first-timers oriented without a guided
+          DOM-spotlight tour (those tend to break when the page
+          re-flows). Dismissing writes the localStorage flag so the
+          modal never returns; "Show welcome guide" in the Help panel
+          re-opens it on demand. */}
+      {welcomeOpen && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center p-6 backdrop-blur-sm"
+          style={{ backgroundColor: "rgba(0,0,0,0.45)" }}
+          onClick={() => {
+            setWelcomeOpen(false);
+            try { window.localStorage.setItem("ats-onboarding-seen-v1", "1"); } catch { /* ignore */ }
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border shadow-2xl p-6"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-panel)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="welcome-title"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/Cats_01.png" alt="" className="h-14 w-14 mx-auto mb-3 select-none pointer-events-none" draggable={false} />
+            <h2 id="welcome-title" className="text-lg font-bold mb-1 text-center" style={{ color: "var(--ats-fg-primary)" }}>
+              Welcome to AcademiCats
+            </h2>
+            <p className="text-xs leading-relaxed mb-4 text-center" style={{ color: "var(--ats-fg-secondary)" }}>
+              Three things you can do here. (Re-open this any time from
+              the user menu &rarr; Help &rarr; Show welcome guide.)
+            </p>
+            <div className="space-y-2.5 mb-5">
+              <div className="rounded-lg border p-3" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>1 · Search</span>
+                </div>
+                <p className="text-[11px] leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
+                  Type a research question (or click a suggested chip below
+                  the cat). Pick <strong>Quick</strong> for a fast scan or
+                  {" "}<strong>Curated</strong> for a deeper analysis.
+                </p>
+              </div>
+              <div className="rounded-lg border p-3" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>2 · Read the Brief</span>
+                </div>
+                <p className="text-[11px] leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
+                  Results stream in with a structured Research Brief
+                  summarising what was found. Each paper card has Open
+                  Paper / Translate PDF / Add to Lab.
+                </p>
+              </div>
+              <div className="rounded-lg border p-3" style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-base)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>3 · Draft &amp; Review</span>
+                </div>
+                <p className="text-[11px] leading-snug" style={{ color: "var(--ats-fg-secondary)" }}>
+                  The right panel runs <strong>Synthesis Lab</strong>
+                  {" "}(write essays, statements, proposals using selected
+                  papers) and <strong>Paper Review</strong> (multi-agent
+                  critique of your own draft).
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setWelcomeOpen(false);
+                try { window.localStorage.setItem("ats-onboarding-seen-v1", "1"); } catch { /* ignore */ }
+              }}
+              className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold hover:brightness-110 transition-all"
+              style={{
+                backgroundColor: "var(--ats-fg-accent)",
+                color:           "#ffffff",
+                border:          "1px solid var(--ats-fg-accent)",
+              }}
+            >
+              Got it — let&apos;s start
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Day / Night category toggle — rendered as a sibling of the
           announcement banner so it sits in the top-right of that wrapper
           and feels like part of the banner chrome. See the top-bar
@@ -4401,8 +4553,8 @@ ${html}
               <span className="flex-1 min-w-0">{message}</span>
               <button
                 onClick={() => { setUiError(""); void handleSearch(); }}
-                className="shrink-0 rounded-lg border border-red-400/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors"
-              >↺ Retry</button>
+                className="shrink-0 rounded-lg border border-red-300/60 bg-red-500/30 px-4 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-red-500/50 hover:border-red-200 transition-all"
+              >↺ Retry search</button>
             </div>
           );
         })()}
@@ -4750,23 +4902,6 @@ ${html}
               </div>
             </div>
 
-            {/* First-run "what is this" hint — only shown on the very
-                first visit to an empty workspace. Sprite already proposes
-                a daily-rotated set of recommended-term chips, but it
-                trusts the user to know WHAT to do with the workspace
-                first. This one-liner closes the gap for first-timers
-                without competing with Sprite's adaptive copy. Hidden
-                forever once the user has run any search. */}
-            {!hasRunSearch && !isSubmitting && (
-              <div className="mb-3 rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] leading-snug text-slate-400">
-                <span className="font-semibold text-blue-300">New here?</span>
-                {" "}Type a research question below (or pick a chip Cat suggests),
-                then choose <span className="font-semibold">Quick</span> for a fast scan
-                or <span className="font-semibold">Curated</span> for a deeper analysis.
-                When results come in, the right panel runs Synthesis Lab
-                drafts and Paper Review on top of them.
-              </div>
-            )}
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
             <div className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
               <div ref={placeholderWrapperRef} className="relative" style={{ containerType: "inline-size" }}>
@@ -8622,6 +8757,23 @@ ${html}
                       <p className="text-xs text-slate-400">{desc}</p>
                     </div>
                   ))}
+                  {/* Re-launcher for the first-run welcome modal. The
+                      modal auto-opens once on first visit and writes
+                      a localStorage flag; this button is the canonical
+                      way to see it again later (referenced in the
+                      modal's body copy). Bypasses + re-arms nothing —
+                      just opens the same component, doesn't clear the
+                      flag, so this stays one click away. */}
+                  <button
+                    onClick={() => { setWelcomeOpen(true); setUserPanel(null); }}
+                    className="w-full text-left rounded-xl bg-slate-800/50 px-4 py-3 hover:bg-slate-800/80 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-slate-400"><HelpCircle size={14} /></span>
+                      <p className="text-sm font-semibold text-slate-200">Show welcome guide</p>
+                    </div>
+                    <p className="text-xs text-slate-400">Re-open the 3-step intro shown to first-time visitors.</p>
+                  </button>
                 </div>
               )}
 
