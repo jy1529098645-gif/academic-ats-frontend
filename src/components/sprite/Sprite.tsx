@@ -393,6 +393,7 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
           the chip strip never blinks in/out as the user types. */}
       {!hasRunSearch && (
       <div
+        data-tour="recommended-chips"
         className="flex flex-row flex-wrap items-center justify-center gap-x-3 gap-y-0.5 w-full max-w-3xl px-3 leading-tight"
         style={{
           opacity:       showRecommendedTerms ? 1 : 0,

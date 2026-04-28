@@ -1852,6 +1852,42 @@ function DesktopWorkspace() {
     }
   }, []);
 
+  // ── Tour-lifecycle effect ────────────────────────────────────────────────
+  // The onboarding tour highlights real DOM regions, but several of
+  // those regions (like the right panel) are collapsed by default on
+  // the landing page — so the spotlight would land on a 36-px sliver
+  // and miss the point. This effect watches `welcomeOpen` and:
+  //   1. On open: snapshots the current panel state, then forces the
+  //      right panel expanded so step 4 ("Draft & Review live here")
+  //      actually shows the panel users will use.
+  //   2. On close (any path: Skip, Got it, Esc, backdrop click): puts
+  //      the panel back to whatever the user had before. The snapshot
+  //      lives in a ref so a tour re-open later (from the Help menu)
+  //      starts fresh. Pre-search landing always has the right panel
+  //      collapsed; if the user re-opens the tour later they may
+  //      already have it expanded → we still capture+restore exactly.
+  const tourSnapshotRef = useRef<{ rightCollapsed: boolean } | null>(null);
+  useEffect(() => {
+    if (welcomeOpen) {
+      // Capture once per open (don't overwrite if effect re-runs).
+      if (tourSnapshotRef.current === null) {
+        tourSnapshotRef.current = { rightCollapsed: gridRightCollapsed };
+      }
+      // Force expand for the duration of the tour.
+      if (gridRightCollapsed) setGridRightCollapsed(false);
+    } else if (tourSnapshotRef.current !== null) {
+      // Restore on close.
+      const snap = tourSnapshotRef.current;
+      tourSnapshotRef.current = null;
+      if (gridRightCollapsed !== snap.rightCollapsed) {
+        setGridRightCollapsed(snap.rightCollapsed);
+      }
+    }
+    // We deliberately don't depend on `gridRightCollapsed` to avoid
+    // a feedback loop — the effect only fires on welcomeOpen toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [welcomeOpen]);
+
   // Hydrate the guest counters once on mount — same pattern as the
   // theme store. Done in its own effect so it runs even when there
   // is no Supabase session yet (the auth gate needs the counters
@@ -4289,11 +4325,19 @@ ${html}
             placement: "auto",
           },
           {
-            id:        "search-mode",
-            target:    "search-mode",
-            title:     "2 · Pick Quick or Curated",
-            body:      "Quick (~30 s) — fast scan across sources. Curated (~2 min) — deeper analysis with multi-agent screening. Curated costs more quota.",
-            placement: "auto",
+            // Targeted at the recommended-chips region (always visible
+            // on the landing page) instead of the abstract Sprite
+            // wrapper — the Quick/Curated buttons inside Sprite only
+            // render after the user submits a question, so highlighting
+            // the empty Sprite slot pre-submission gave a confusingly
+            // tiny rectangle. The chips are the closest visible UI
+            // for "one-tap to start", so the step doubles as a
+            // discoverability boost.
+            id:        "recommended-chips",
+            target:    "recommended-chips",
+            title:     "2 · Or one-tap a topic",
+            body:      "Click any chip below the cat to load that as your search query. After you submit (or after typing your own question), you'll see Quick (~30 s) vs Curated (~2 min) buttons appear.",
+            placement: "top",
           },
           {
             id:        "right-panel",
