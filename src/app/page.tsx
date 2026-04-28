@@ -3045,6 +3045,27 @@ function DesktopWorkspace() {
     return { accessible: true, reason: "" };
   };
 
+  // Render an error string but bold every literal occurrence of
+  // "Open Paper" so the next-best action stands out visually without
+  // needing markdown support in the rendered surface. Used for the
+  // PDF-download / translate-PDF "couldn't fetch" messages, where the
+  // backend always emits the phrase verbatim. Plain split-and-rejoin
+  // — no regex, no HTML parsing, no XSS surface (nothing in the
+  // message is treated as markup).
+  function renderErrorWithBoldOpenPaper(text: string): React.ReactNode {
+    const target = "Open Paper";
+    const parts = text.split(target);
+    if (parts.length === 1) return text;
+    const out: React.ReactNode[] = [];
+    parts.forEach((p, i) => {
+      out.push(p);
+      if (i < parts.length - 1) {
+        out.push(<strong key={i} className="font-semibold text-slate-200">{target}</strong>);
+      }
+    });
+    return out;
+  }
+
   // Soft-classify an error message returned by the deep-read / download /
   // translate endpoints. When the failure is "publisher didn't give us a
   // PDF" (paywall, anti-bot, stale OA, no direct download) we want to
@@ -5642,18 +5663,18 @@ ${html}
                             always means "the publisher, not us". */}
                         {deepReadErrors[paperKey] && (
                           isSoftAccessError(deepReadErrors[paperKey])
-                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{deepReadErrors[paperKey]}</div>
-                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{deepReadErrors[paperKey]}</div>
+                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{renderErrorWithBoldOpenPaper(deepReadErrors[paperKey])}</div>
+                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{renderErrorWithBoldOpenPaper(deepReadErrors[paperKey])}</div>
                         )}
                         {originalErrors[paperKey] && (
                           isSoftAccessError(originalErrors[paperKey])
-                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{originalErrors[paperKey]}</div>
-                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{originalErrors[paperKey]}</div>
+                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{renderErrorWithBoldOpenPaper(originalErrors[paperKey])}</div>
+                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{renderErrorWithBoldOpenPaper(originalErrors[paperKey])}</div>
                         )}
                         {translateErrors[paperKey] && (
                           isSoftAccessError(translateErrors[paperKey])
-                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{translateErrors[paperKey]}</div>
-                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{translateErrors[paperKey]}</div>
+                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{renderErrorWithBoldOpenPaper(translateErrors[paperKey])}</div>
+                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{renderErrorWithBoldOpenPaper(translateErrors[paperKey])}</div>
                         )}
 
                         {/* Abstract — collapsed by default.
