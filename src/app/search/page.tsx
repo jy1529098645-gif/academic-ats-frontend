@@ -2,62 +2,56 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL } from "@/lib/api";
+import type { Paper, WorkflowItem } from "@/lib/types";
 
+// Local-only — `label` and `search_query` are required here (the
+// renderer assumes them without null-checks), so this can't share the
+// optional-keyed shape used in src/app/page.tsx.
 type IntentProfile = {
-  include?: string[];
-  exclude?: string[];
+  include?:     string[];
+  exclude?:     string[];
   domain_bias?: string;
 };
 
 type QueryOption = {
-  label: string;
-  search_query: string;
-  reason?: string;
-  confidence?: number;
+  label:           string;
+  search_query:    string;
+  reason?:         string;
+  confidence?:     number;
   intent_profile?: IntentProfile;
 };
 
 type QueryOptionsResponse = {
-  original_query?: string;
+  original_query?:    string;
   recommended_index?: number;
-  options?: QueryOption[];
-  error?: string;
-  cache_hit?: boolean;
+  options?:           QueryOption[];
+  error?:             string;
+  cache_hit?:         boolean;
 };
 
 type SearchSettings = {
-  paper_count: number;
-  sort_mode: string;
+  paper_count:      number;
+  sort_mode:        string;
   prefer_abstracts: boolean;
   strict_core_only: boolean;
   open_access_only: boolean;
-  use_year_range: boolean;
-  year_start: number;
-  year_end: number;
-  source_filters: string[];
-  fast_mode: boolean;
+  use_year_range:   boolean;
+  year_start:       number;
+  year_end:         number;
+  source_filters:   string[];
+  fast_mode:        boolean;
 };
 
-type WorkflowItem = {
-  agent?: string;
-  action?: string;
-  details?: string;
-};
-
-type Paper = {
-  title: string;
-  authors?: string;
-  year?: string;
-  source?: string;
-  summary?: string;
-  recommendation_reason?: string;
-};
-
+// Loose response shape — the SSE envelope wraps a backend dict whose
+// non-core fields evolve faster than this type can. The catch-all
+// `[key: string]: unknown` was previously `any`; tightening it to
+// `unknown` keeps the same flexibility but forces callers to narrow
+// before consuming, which is what they were already doing implicitly.
 type SearchResponse = {
-  brief?: string;
-  papers?: Paper[];
+  brief?:               string;
+  papers?:              Paper[];
   collaboration_trace?: WorkflowItem[];
-  [key: string]: any;
+  [key: string]:        unknown;
 };
 
 type StreamState = {
@@ -319,6 +313,15 @@ export default function SearchPage() {
       let buffer = "";
 
       const applyEvent = (eventName: string, dataText: string) => {
+        // `any` is intentional here — the SSE envelope from the search
+        // backend has ~12 distinct event shapes and the consumer below
+        // already narrows each field individually with typeof /
+        // Array.isArray / Number(...) before use. Tightening to
+        // `Record<string, unknown>` would force a per-site cast at every
+        // `parsed?.foo` access without strengthening any actual runtime
+        // check. The boundary is the JSON.parse — beyond that, narrowing
+        // is structural.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let parsed: any;
         try { parsed = JSON.parse(dataText); } catch { return; }
 
@@ -425,7 +428,11 @@ export default function SearchPage() {
       buffer += decoder.decode();
       consumeSseBlocks(buffer, applyEvent);
     } catch (error) {
-      if ((error as any)?.name !== "AbortError") {
+      // AbortError is normal — fired when the user cancels mid-stream
+      // by clicking Stop or starting a new query. Anything else is a
+      // real failure that needs to surface in the UI.
+      const errName = error instanceof Error ? error.name : "";
+      if (errName !== "AbortError") {
         const message = error instanceof Error ? error.message : "Streaming search failed.";
         setUiError(message);
         setStream((prev) => ({ ...prev, status: "error", progress: 100, message: "❌ Failed.", error: message }));
@@ -809,7 +816,16 @@ export default function SearchPage() {
                   // we always surface the biggest candidate pool we ever
                   // saw (typically retrieved_total: raw hits from all
                   // upstream sources before dedup + filters + re-ranking).
-                  const f = (stream.result?.diagnostics as any)?.retrieval_funnel || {};
+                  // SearchResponse.diagnostics is `unknown` at the type
+                  // level (loose backend payload); narrow to a Record
+                  // here so the four numeric reads below stay simple.
+                  const diag = stream.result?.diagnostics;
+                  const fr = (diag && typeof diag === "object")
+                    ? (diag as Record<string, unknown>).retrieval_funnel
+                    : null;
+                  const f = (fr && typeof fr === "object")
+                    ? fr as Record<string, unknown>
+                    : {};
                   const poolSize = Math.max(
                     Number(f.retrieved_total) || 0,
                     Number(f.after_filters)   || 0,

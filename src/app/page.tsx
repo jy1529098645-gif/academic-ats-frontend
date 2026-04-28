@@ -16,10 +16,10 @@ import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
 import { useHoverHelpStore } from "@/lib/stores/hover-help-store";
 import {
   useGuestQuotaStore,
-  GUEST_QUICK_MAX,
-  GUEST_CURATED_MAX,
   selectGuestQuickRemaining,
   selectGuestCuratedRemaining,
+  selectGuestQuickLimit,
+  selectGuestCuratedLimit,
 } from "@/lib/stores/guest-quota-store";
 import {
   usePrefsStore, hydratePrefsStore, applyServerWorkspaceCharLimit,
@@ -56,6 +56,7 @@ import { PaperReviewPanel } from "@/components/lab/PaperReviewPanel";
 import { TOS_SECTIONS, TOS_VERSION, APP_VERSION } from "@/lib/tos-content";
 import { useIsMobile } from "@/lib/hooks/use-is-mobile";
 import MobileApp from "@/components/mobile/MobileApp";
+import type { Paper, WorkflowItem } from "@/lib/types";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
   Zap, FlaskConical, SlidersHorizontal, BookOpen, Upload, FolderOpen,
@@ -147,37 +148,9 @@ type QueryOptionsResponse = {
   error?: string;
 };
 
-type WorkflowItem = {
-  agent?: string;
-  action?: string;
-  details?: string;
-};
-
-type Paper = {
-  title: string;
-  authors?: string;
-  year?: string;
-  source?: string;
-  score?: number | string;
-  summary?: string;
-  url?: string;
-  is_oa?: boolean;
-  oa_url?: string;
-  pdf_url?: string;
-  doi?: string;
-  evidence_strength?: string;
-  evidence_score?: number | string;
-  recommendation_reason?: string;
-  research_fit_score?: number;
-  domain_fit_label?: string;
-  paper_type_label?: string;
-  off_target_risk_score?: number;
-  ranking_reason?: string;
-  citation_count?: number | string;
-  evidence_breakdown?: Record<string, number>;
-  word_count?: number;
-  raw?: Record<string, any>;
-};
+// `Paper` and `WorkflowItem` are now imported from "@/lib/types" — see
+// the import above. The previous local definitions duplicated the shape
+// across page.tsx, search/page.tsx, and MobileApp.tsx and were drifting.
 
 type AgentPayload = Record<string, unknown>;
 
@@ -976,8 +949,24 @@ export default function HomePage() {
   // the server-rendered HTML doesn't lock us into the wrong tree before the
   // matchMedia listener fires on the client.
   if (isMobile === null) return null;
-  if (isMobile) return <MobileApp />;
-  return <DesktopWorkspace />;
+  // Mobile and desktop trees each get a top-level boundary so a render
+  // crash anywhere inside their subtree falls back to the compact
+  // ErrorBoundary panel with a "Reload this panel" button instead of
+  // bubbling all the way up to /app/error.tsx (which blanks the screen
+  // and forces a full reload). The DesktopWorkspace internals already
+  // have finer-grained boundaries around Brief, Workspace, Synthesis
+  // Lab, and Paper Review; this one is the safety net for everything
+  // else (header, nav, modals).
+  if (isMobile) return (
+    <ErrorBoundary label="Mobile workspace">
+      <MobileApp />
+    </ErrorBoundary>
+  );
+  return (
+    <ErrorBoundary label="Desktop workspace">
+      <DesktopWorkspace />
+    </ErrorBoundary>
+  );
 }
 
 function DesktopWorkspace() {
@@ -1739,47 +1728,12 @@ function DesktopWorkspace() {
   const [labDownloadFormat, setLabDownloadFormat] = useState<"pdf"|"html"|"txt"|"md">("pdf");
   const [briefDownloadFmt, setBriefDownloadFmt]   = useState<"pdf"|"html"|"txt"|"md">("pdf");
 
-  // ── Brief translation (SSE) ──────────────────────────────────────────────
-  // Google Translate can't safely translate the streaming brief (DOM
-  // rewrite collides with React's streaming commits). This state backs
-  // an in-app translate button that asks the backend to stream a
-  // translation via /api/brief/translate — the user sees tokens appear
-  // progressively, and can toggle back to the original at any time.
-  //
-  // The `requestBriefTranslation` callback itself is defined further
-  // down in the component, after `result` has been derived from `job`
-  // (order of declarations matters — a useCallback closing over `result`
-  // that's mounted above its declaration would error under TS).
-  const [briefTranslated,  setBriefTranslated]  = useState("");
-  const [briefTranslating, setBriefTranslating] = useState(false);
-  const [briefShowTrans,   setBriefShowTrans]   = useState(false);
-  const [briefTransError,  setBriefTransError]  = useState("");
-  const briefTransAbortRef = useRef<AbortController | null>(null);
-  // Target language for the Translate button. Hydrated from
-  // navigator.language on first render (see effect below); user can
-  // override via the dropdown next to the button. Cached translations
-  // are keyed by (brief_text, target_language) via briefTranslatedLang
-  // so switching language triggers a fresh request rather than showing
-  // a stale result in the wrong language.
-  const [briefTargetLang,  setBriefTargetLang]  = useState("Chinese (Simplified)");
-  const [briefTranslatedLang, setBriefTranslatedLang] = useState("");
-
-  // The languages offered in the picker — curated common set. Add more
-  // here and the LLM will happily translate; the backend prompt just
-  // interpolates the string.
-  const BRIEF_LANG_OPTIONS: { value: string; label: string }[] = [
-    { value: "Chinese (Simplified)",  label: "简体中文" },
-    { value: "Chinese (Traditional)", label: "繁體中文" },
-    { value: "English",               label: "English"  },
-    { value: "Japanese",              label: "日本語"    },
-    { value: "Korean",                label: "한국어"    },
-    { value: "Spanish",               label: "Español"  },
-    { value: "French",                label: "Français" },
-    { value: "German",                label: "Deutsch"  },
-    { value: "Portuguese",            label: "Português"},
-    { value: "Russian",               label: "Русский"  },
-    { value: "Arabic",                label: "العربية"   },
-  ];
+  // (Brief translation feature removed 2026-04-28. The in-app LLM
+  // translate button + 11-language picker were dropped before public
+  // beta — Google Translate's in-page rendering covers non-English
+  // readers, and removing the LLM round-trip simplifies the brief
+  // pipeline. The `/api/brief/translate` backend route is currently
+  // orphaned; safe to remove in a follow-up cleanup.)
   const [labAgentLogOpen,   setLabAgentLogOpen]   = useState(true);
   const [labReviewerNotes,  setLabReviewerNotes]  = useState<{
     missing_inputs?: string[];
@@ -1811,6 +1765,13 @@ function DesktopWorkspace() {
   const [translateLoading, setTranslateLoading] = useState<Record<string, boolean>>({});
   const [translateErrors, setTranslateErrors] = useState<Record<string, string>>({});
   const [translationLanguages, setTranslationLanguages] = useState<Record<string, string[]>>({});
+  // Per-paper AbortController for the Translate-PDF flow. Keyed by the
+  // same `${paperKey}-translate` string used by translateLoading so
+  // the click handler can resolve "is this paper translating right
+  // now → which controller do I call .abort() on?" in O(1). Refs (not
+  // state) because controller identity changes don't affect render
+  // output — render branches on translateLoading instead.
+  const translateAbortRefs = useRef<Record<string, AbortController | null>>({});
 
   // ── Auth state ─────────────────────────────────────────────────────────────
   // `is_anonymous` is set by Supabase when the session was created via
@@ -1830,6 +1791,11 @@ function DesktopWorkspace() {
   const isGuest               = !!authUser?.is_anonymous;
   const guestQuickRemaining   = useGuestQuotaStore(selectGuestQuickRemaining);
   const guestCuratedRemaining = useGuestQuotaStore(selectGuestCuratedRemaining);
+  // Effective server-sourced caps. Initialised to the compile-time
+  // defaults so SSR + first paint match the existing behaviour, then
+  // updated once `/api/quota-limits` resolves.
+  const guestQuickLimit       = useGuestQuotaStore(selectGuestQuickLimit);
+  const guestCuratedLimit     = useGuestQuotaStore(selectGuestCuratedLimit);
   // Short human-readable form of the guest's Supabase user UUID. Shown
   // anywhere a guest might want to quote their identity (title-bar pill,
   // quota-exhausted popup, feedback modal) so support / admin can map it
@@ -1851,7 +1817,14 @@ function DesktopWorkspace() {
   // theme store. Done in its own effect so it runs even when there
   // is no Supabase session yet (the auth gate needs the counters
   // to know whether the "try as guest" pitch is still relevant).
-  useEffect(() => { useGuestQuotaStore.getState().hydrate(); }, []);
+  useEffect(() => {
+    useGuestQuotaStore.getState().hydrate();
+    // Pull effective per-tier caps from the server so a backend admin
+    // edit (or a tier_limits DB override) takes effect on next page load
+    // without redeploying the frontend. Fire-and-forget — the store
+    // never throws and falls back to compile-time defaults on failure.
+    useGuestQuotaStore.getState().loadServerLimits();
+  }, []);
   const [authLoading, setAuthLoading] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [userPanel, setUserPanel] = useState<"profile" | "settings" | "subscription" | "help" | "accounts" | "legal" | "usage" | "dev" | null>(null);
@@ -1919,7 +1892,10 @@ function DesktopWorkspace() {
   // ── Role & multi-account management ───────────────────────────────────────
   // Single source of truth for developer emails — used for role checks everywhere.
   const DEV_ACCTS = ["dev01@academicats.com", "dev02@academicats.com", "dev03@academicats.com"];
-  const DEV_PWD   = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "";
+  // Note: dev passwords are NEVER stored client-side. Adding / switching to a
+  // dev account routes through the manual <DevLogin> overlay where the dev
+  // types the password each time. (Earlier versions read NEXT_PUBLIC_DEV_PASSWORD
+  // from env, which leaked into the public JS bundle — view-source could read it.)
   // userRole: "guest" | "user" | "dev"
   const userRole = !authUser ? "guest" : DEV_ACCTS.includes(authUser.email ?? "") ? "dev" : "user";
   const isDeveloper = userRole === "dev";
@@ -1956,28 +1932,16 @@ function DesktopWorkspace() {
       setAcctSwitchMsg({ text: `${email} is already mounted.` });
       return;
     }
+    // Open the dev-login overlay pre-filled with this email. The dev types
+    // the password manually each time — we no longer ship NEXT_PUBLIC_DEV_PASSWORD
+    // in the client bundle. Once login succeeds, onAuthStateChange fires
+    // cacheAndRegister which adds the account to savedAccounts automatically.
     setAddAcctInput("");
     setAcctSwitchMsg(null);
-    setAcctSwitching(email);
-    try {
-      // Persist into the list first so the pill appears even if login
-      // is slow; the status pill will update to "Mounted" once the
-      // session lands via cacheAndRegister.
-      persistAccounts([...savedAccounts, { email, type: "dev" }]);
-      const { error } = await supabase.auth.signInWithPassword({ email, password: DEV_PWD });
-      if (error) {
-        // Roll back the list entry — login failed, don't keep a ghost.
-        persistAccounts(savedAccounts.filter(a => a.email !== email));
-        setAcctSwitchMsg({ text: error.message, error: true });
-      } else {
-        setAcctSwitchMsg({ text: `${email} mounted. Admin access is now available.` });
-      }
-    } catch (e) {
-      persistAccounts(savedAccounts.filter(a => a.email !== email));
-      setAcctSwitchMsg({ text: e instanceof Error ? e.message : String(e), error: true });
-    } finally {
-      setAcctSwitching(null);
-    }
+    setDevLoginEmail(email);
+    setDevLoginPassword("");
+    setDevLoginErr("");
+    setDevLoginOpen(true);
   };
   const removeSavedAccount = (email: string) => {
     // Dropping the account also drops its cached session — no point
@@ -2123,9 +2087,14 @@ function DesktopWorkspace() {
       // can only come back via their provider redirect, so we surface
       // a hint instead of silently doing nothing.
       if (acct.type === "dev") {
-        const { error } = await supabase.auth.signInWithPassword({ email: acct.email, password: DEV_PWD });
-        if (error) { setAcctSwitchMsg({ text: error.message, error: true }); }
-        else { setUserPanel(null); setUserMenuOpen(false); }
+        // Open the dev-login overlay pre-filled with this email. The dev
+        // types the password each time — never read from env.
+        setUserPanel(null);
+        setUserMenuOpen(false);
+        setDevLoginEmail(acct.email);
+        setDevLoginPassword("");
+        setDevLoginErr("");
+        setDevLoginOpen(true);
       } else if (acct.type === "oauth") {
         setAcctSwitchMsg({
           text: `Session for ${acct.email} expired — please sign in again via Google.`,
@@ -2137,8 +2106,8 @@ function DesktopWorkspace() {
         if (error) { setAcctSwitchMsg({ text: error.message, error: true }); }
         else { setAcctSwitchMsg({ text: `Magic link sent to ${acct.email} — check your inbox.` }); }
       }
-    } catch (e: any) {
-      setAcctSwitchMsg({ text: e?.message ?? "Unknown error", error: true });
+    } catch (e: unknown) {
+      setAcctSwitchMsg({ text: e instanceof Error ? e.message : "Unknown error", error: true });
     }
     setAcctSwitching(null);
   };
@@ -2860,92 +2829,7 @@ function DesktopWorkspace() {
   }, [fastMode, isSubmitting, progress, streamPapers, job, retrievalCount, candidateLimit]);
   const result = job?.result || null;
 
-  // ── Brief translation logic (continued from the state declarations above) ──
-  // Defined here (after `result` is derived from `job`) so the
-  // useCallback below can safely close over `result?.brief`.
-  // On first mount, infer the user's preferred translation language from
-  // navigator.language so the dropdown isn't always sitting on Chinese
-  // (Simplified) for English speakers.
-  useEffect(() => {
-    if (typeof navigator === "undefined") return;
-    const lang = (navigator.language || "").toLowerCase();
-    let inferred = "Chinese (Simplified)";
-    if (lang.startsWith("zh-tw") || lang.startsWith("zh-hk")) inferred = "Chinese (Traditional)";
-    else if (lang.startsWith("zh"))    inferred = "Chinese (Simplified)";
-    else if (lang.startsWith("ja"))    inferred = "Japanese";
-    else if (lang.startsWith("ko"))    inferred = "Korean";
-    else if (lang.startsWith("es"))    inferred = "Spanish";
-    else if (lang.startsWith("fr"))    inferred = "French";
-    else if (lang.startsWith("de"))    inferred = "German";
-    else if (lang.startsWith("pt"))    inferred = "Portuguese";
-    else if (lang.startsWith("ru"))    inferred = "Russian";
-    else if (lang.startsWith("ar"))    inferred = "Arabic";
-    else if (lang.startsWith("en"))    inferred = "English";
-    setBriefTargetLang(inferred);
-  }, []);
-
-  // Blocking translation: POST the brief text + target language, wait
-  // for the full translated markdown in one JSON response. Button
-  // shows "Translating…" until the response arrives, then we swap
-  // the rendered markdown block in one atomic update. Aborts cleanly
-  // on new requests or unmount. After completion, briefTranslatedLang
-  // is set so UI can detect "cached translation for current language".
-  const requestBriefTranslation = useCallback(async () => {
-    const source = (result?.brief || "").trim();
-    if (!source) return;
-    briefTransAbortRef.current?.abort();
-    const ac = new AbortController();
-    briefTransAbortRef.current = ac;
-    setBriefTranslated("");
-    setBriefTransError("");
-    setBriefTranslating(true);
-    setBriefShowTrans(true);
-    const targetLang = briefTargetLang;
-    try {
-      const token = await getAuthToken();
-      const res = await fetch(buildApiUrl("/api/brief/translate"), {
-        method: "POST",
-        signal: ac.signal,
-        headers: {
-          "Content-Type":  "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          brief_text:      source,
-          target_language: targetLang,
-        }),
-      });
-      if (!res.ok) {
-        const bodyText = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
-      }
-      const data = await res.json() as { translated?: string; target_language?: string };
-      if (!data?.translated || !data.translated.trim()) {
-        throw new Error("Empty translation — try again or pick another language.");
-      }
-      setBriefTranslated(data.translated);
-      setBriefTranslatedLang(targetLang);
-    } catch (e) {
-      if ((e as { name?: string })?.name !== "AbortError") {
-        setBriefTransError(e instanceof Error ? e.message : String(e));
-      }
-    } finally {
-      setBriefTranslating(false);
-    }
-  }, [result?.brief, briefTargetLang]);
-
-  // Reset translation state whenever a new brief arrives (new search).
-  // Prevents a stale translation from leaking under the toggle for the
-  // next query's brief.
-  useEffect(() => {
-    setBriefTranslated("");
-    setBriefShowTrans(false);
-    setBriefTransError("");
-    setBriefTranslatedLang("");
-    briefTransAbortRef.current?.abort();
-  }, [result?.brief]);
-
-  // Run-time label: ticks while isSubmitting, freezes when job finishes
+// Run-time label: ticks while isSubmitting, freezes when job finishes
   const runTimeLabel = (() => {
     const startedAt = job?.started_at;
     if (!startedAt) return null;
@@ -3199,7 +3083,10 @@ function DesktopWorkspace() {
 
   const triggerDownload = async (
     url: string,
-    body: Record<string, any>,
+    // `unknown` instead of `any` — JSON.stringify accepts unknown, and
+    // every call site already constructs a literal object so no consumer
+    // narrowing was relying on the looser type.
+    body: Record<string, unknown>,
     fallbackFilename: string,
     key: string,
     signal?: AbortSignal,
@@ -3240,6 +3127,15 @@ function DesktopWorkspace() {
       anchor.remove();
       window.URL.revokeObjectURL(objectUrl);
     } catch (error) {
+      // User-initiated abort (Stop button on the Translate PDF flow,
+      // or an unmount-time cleanup that calls .abort()) surfaces here
+      // as a DOMException with name="AbortError". Treat it as a
+      // silent cancel — no UiError toast, no per-paper error pill —
+      // so the only visible effect is the loading state clearing in
+      // the finally branch and the button snapping back to idle.
+      if ((error as { name?: string })?.name === "AbortError") {
+        return;
+      }
       const message = explainFetchError(error);
       if (key.includes("-translate")) {
         setTranslateErrors((prev) => ({ ...prev, [key.replace("-translate","")]: message }));
@@ -4046,7 +3942,7 @@ ${html}
             >
               {guestSignInBusy
                 ? "Starting guest session…"
-                : `Try without signing in · ${GUEST_QUICK_MAX} Quick + ${GUEST_CURATED_MAX} Curated`}
+                : `Try without signing in · ${guestQuickLimit} Quick + ${guestCuratedLimit} Curated`}
             </button>
             {guestSignInError && (
               <p
@@ -4190,11 +4086,11 @@ ${html}
             }}>
               <div className="flex items-center justify-between">
                 <span>Quick searches</span>
-                <span className="tabular-nums">{GUEST_QUICK_MAX - guestQuickRemaining} / {GUEST_QUICK_MAX}</span>
+                <span className="tabular-nums">{guestQuickLimit - guestQuickRemaining} / {guestQuickLimit}</span>
               </div>
               <div className="flex items-center justify-between mt-0.5">
                 <span>Curated</span>
-                <span className="tabular-nums">{GUEST_CURATED_MAX - guestCuratedRemaining} / {GUEST_CURATED_MAX}</span>
+                <span className="tabular-nums">{guestCuratedLimit - guestCuratedRemaining} / {guestCuratedLimit}</span>
               </div>
               {shortGuestId && (
                 <div className="mt-1.5 pt-1.5 flex items-center justify-between border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
@@ -4567,102 +4463,11 @@ ${html}
               <div ref={leftSectionRef as React.RefObject<HTMLDivElement>} className={`flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5 ${leftTab === "brief" ? "" : "hidden"}`}>
                 {/* Research Brief section header — hidden while the panel is in
                     its idle empty state so the centred copy below can use the
-                    full panel height (matches the Synthesis Lab empty state).
-                    The Translate button sits INSIDE this title row (right of
-                    the title text) so it reads as a header control, not a
-                    footer action. It only appears once streaming has finished
-                    AND a brief is present — translating a half-written brief
-                    would give half-translated output. */}
+                    full panel height (matches the Synthesis Lab empty state). */}
                 {(researchBriefMarkdown || isSubmitting) && (
                   <div className="mb-3 flex items-center gap-2 text-base font-bold flex-wrap">
                     <FileText size={16} />
                     <span>Research Brief</span>
-                    {!isStreamingBrief && !!result?.brief && (
-                      <div className="ml-2 inline-flex items-stretch rounded-lg border overflow-hidden"
-                        style={{ borderColor: "var(--ats-border-accent)" }}
-                      >
-                        {/* Language picker — changes the target locale.
-                            Changing it while a cached translation exists
-                            in a DIFFERENT language automatically flips the
-                            button back to "Translate" (see comparison
-                            below) so the user knows they need to refetch. */}
-                        <select
-                          value={briefTargetLang}
-                          onChange={(e) => setBriefTargetLang(e.target.value)}
-                          disabled={briefTranslating}
-                          title="Target language"
-                          className="bg-[var(--ats-bg-accent-soft)] text-xs font-semibold px-2 py-1 outline-none border-r disabled:opacity-60"
-                          style={{
-                            borderColor: "var(--ats-border-accent)",
-                            color:       "var(--ats-fg-accent)",
-                          }}
-                        >
-                          {BRIEF_LANG_OPTIONS.map(opt => (
-                            <option key={opt.value} value={opt.value} className="bg-slate-900 text-slate-100">
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={() => {
-                            // Four paths:
-                            //  a) IN FLIGHT → clicking again cancels the
-                            //     translation (AbortController). Label
-                            //     flips to "Stop" while translating so
-                            //     the affordance is clear.
-                            //  b) Currently viewing translation in the
-                            //     selected language → flip back to original.
-                            //  c) Have a cached translation in the selected
-                            //     language but viewing original → flip to it.
-                            //  d) Otherwise → fire a fresh request.
-                            if (briefTranslating) {
-                              briefTransAbortRef.current?.abort();
-                              return;
-                            }
-                            const cachedMatches =
-                              !!briefTranslated && briefTranslatedLang === briefTargetLang;
-                            if (briefShowTrans && cachedMatches) {
-                              setBriefShowTrans(false);
-                              return;
-                            }
-                            if (cachedMatches) {
-                              setBriefShowTrans(true);
-                              return;
-                            }
-                            void requestBriefTranslation();
-                          }}
-                          title={
-                            briefTranslating ? "Stop translation" :
-                            briefShowTrans  ? "Show original brief" :
-                                              "Translate this brief"
-                          }
-                          // No `disabled` while translating — we want the
-                          // click to cancel. cursor-default + animated
-                          // feedback make it clear work is happening.
-                          className="relative inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold transition-all hover:brightness-110 overflow-hidden"
-                          style={{
-                            backgroundColor: "var(--ats-bg-accent-soft)",
-                            color:           "var(--ats-fg-accent)",
-                          }}
-                        >
-                          {briefTranslating ? (
-                            <Square size={10} fill="currentColor" />
-                          ) : (
-                            <Globe size={12} />
-                          )}
-                          <span>
-                            {briefTranslating
-                              ? "Stop"
-                              : (briefShowTrans && briefTranslatedLang === briefTargetLang)
-                                ? "Show Original"
-                                : (briefTranslated && briefTranslatedLang === briefTargetLang)
-                                  ? "Show Translation"
-                                  : "Translate"}
-                          </span>
-                          <ProgressStrip active={briefTranslating} />
-                        </button>
-                      </div>
-                    )}
                   </div>
                 )}
                 {researchBriefMarkdown && (briefStatus === "draft" || briefStatus === "final") && (
@@ -4693,9 +4498,11 @@ ${html}
                         diff. After real-world testing that never
                         materialised, so we let Google Translate handle
                         this container — users reading in a non-English
-                        locale get an auto-translated brief for free,
-                        and our in-app Translate button below still
-                        handles the higher-quality LLM translation.
+                        locale get an auto-translated brief for free.
+                        (The previous in-app LLM Translate button was
+                        removed 2026-04-28 — Google Translate's
+                        in-page rendering covers the public-beta UX
+                        well enough.)
                         Body text at 0.78rem — one step below the
                         previous 0.85rem — with tighter line-height /
                         margins so the brief reads more densely without
@@ -4707,84 +4514,63 @@ ${html}
                       prose-li:text-[0.78rem] prose-li:leading-[1.4] prose-li:text-slate-300 prose-li:my-0
                       prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4">
                       <ReactMarkdown components={mdComponents}>
-                        {briefShowTrans ? (briefTranslated || " ") : researchBriefMarkdown}
+                        {researchBriefMarkdown}
                       </ReactMarkdown>
-                      {((isStreamingBrief && !briefShowTrans) || (briefShowTrans && briefTranslating)) && (
+                      {isStreamingBrief && (
                         <span className="inline-block h-[1.1em] w-[2px] animate-pulse rounded-sm bg-blue-400 align-text-bottom ml-0.5" />
                       )}
-                      {briefShowTrans && briefTransError && (
-                        <p className="mt-2 text-xs text-red-400">Translation failed: {briefTransError}</p>
-                      )}
                     </div>
-                    {!isStreamingBrief && result?.brief && (
-                      <div className="mt-6 flex flex-nowrap items-center gap-2 overflow-hidden">
-                        {/* Copy / Download act on whatever the user is
-                            currently looking at — translated text when
-                            the translation is on screen, original brief
-                            otherwise. Matches the user's ask: "下载的是
-                            当前显示的内容". The filename slug is
-                            suffixed with the language tag when exporting
-                            a translation so the file name announces
-                            itself. */}
-                        {(() => {
-                          const showingTrans = briefShowTrans && briefTranslated
-                            && briefTranslatedLang === briefTargetLang;
-                          const downloadText = showingTrans ? briefTranslated : (result?.brief || "");
-                          const langSlug = showingTrans
-                            ? "_" + briefTranslatedLang.replace(/[^\w]+/g, "_").replace(/_+$/, "")
-                            : "";
-                          const slug = (result?.original_query || query || "brief")
-                            .replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
-                          const filename = `research_brief_${slug}${langSlug}`;
-                          return (
-                            <>
-                              <button
-                                onClick={() => void navigator.clipboard.writeText(downloadText)}
-                                className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
-                                title={showingTrans ? "Copy the displayed translation" : "Copy the original brief"}
-                              ><ClipboardList size={13} className="shrink-0" /><span className="truncate">
-                                Copy {showingTrans ? "Translation" : "Brief"}
-                              </span></button>
-                              <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
-                                <select
-                                  value={briefDownloadFmt}
-                                  onChange={e => setBriefDownloadFmt(e.target.value as "pdf"|"html"|"txt"|"md")}
-                                  className="shrink-0 rounded-lg border border-slate-600 bg-slate-900 px-2 py-2 text-sm text-slate-400 focus:outline-none focus:border-blue-500/60"
-                                >
-                                  <option value="pdf">PDF</option>
-                                  <option value="html">HTML</option>
-                                  <option value="md">Markdown</option>
-                                  <option value="txt">TXT</option>
-                                </select>
-                                <button
-                                  onClick={() => {
-                                    if (briefDownloadFmt === "pdf") {
-                                      void triggerDownload(buildApiUrl("/api/brief/download"), {
-                                        brief_text:         downloadText,
-                                        original_query:     result?.original_query || query,
-                                        final_search_query: result?.final_search_query || query,
-                                        // Language hint → backend picks a CJK-capable
-                                        // CID font. Empty string when downloading the
-                                        // original (English) brief → Helvetica.
-                                        language:           showingTrans ? briefTranslatedLang : "",
-                                      }, `${filename}.pdf`, "brief-download");
-                                    } else {
-                                      downloadTextAs(downloadText, filename, briefDownloadFmt as "html"|"txt"|"md");
-                                    }
-                                  }}
-                                  className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 transition-colors"
-                                  title={showingTrans
-                                    ? `Download the ${briefTranslatedLang} translation`
-                                    : "Download the original brief"}
-                                ><Download size={14} className="shrink-0" /><span className="truncate">
-                                  Download {showingTrans ? "Translation" : "Brief"}
-                                </span></button>
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-                    )}
+                    {!isStreamingBrief && result?.brief && (() => {
+                      // Copy/Download always operate on the original brief.
+                      // (The in-app translate button used to swap this for
+                      // a translated string; that feature was removed
+                      // 2026-04-28 — Google Translate handles in-page
+                      // translation good-enough for the public-beta UX.)
+                      const downloadText = result?.brief || "";
+                      const slug = (result?.original_query || query || "brief")
+                        .replace(/\s+/g, "_").replace(/[^\w_]/g, "").slice(0, 40);
+                      const filename = `research_brief_${slug}`;
+                      return (
+                        <div className="mt-6 flex flex-nowrap items-center gap-2 overflow-hidden">
+                          <button
+                            onClick={() => void navigator.clipboard.writeText(downloadText)}
+                            className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-400 hover:text-blue-300 hover:border-blue-500/50 transition-colors"
+                            title="Copy the brief"
+                          ><ClipboardList size={13} className="shrink-0" /><span className="truncate">
+                            Copy Brief
+                          </span></button>
+                          <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
+                            <select
+                              value={briefDownloadFmt}
+                              onChange={e => setBriefDownloadFmt(e.target.value as "pdf"|"html"|"txt"|"md")}
+                              className="shrink-0 rounded-lg border border-slate-600 bg-slate-900 px-2 py-2 text-sm text-slate-400 focus:outline-none focus:border-blue-500/60"
+                            >
+                              <option value="pdf">PDF</option>
+                              <option value="html">HTML</option>
+                              <option value="md">Markdown</option>
+                              <option value="txt">TXT</option>
+                            </select>
+                            <button
+                              onClick={() => {
+                                if (briefDownloadFmt === "pdf") {
+                                  void triggerDownload(buildApiUrl("/api/brief/download"), {
+                                    brief_text:         downloadText,
+                                    original_query:     result?.original_query || query,
+                                    final_search_query: result?.final_search_query || query,
+                                  }, `${filename}.pdf`, "brief-download");
+                                } else {
+                                  downloadTextAs(downloadText, filename, briefDownloadFmt as "html"|"txt"|"md");
+                                }
+                              }}
+                              className="shrink min-w-0 inline-flex items-center gap-1 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 transition-colors"
+                              title="Download the brief"
+                            ><Download size={14} className="shrink-0" /><span className="truncate">
+                              Download Brief
+                            </span></button>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </>
                 ) : !isSubmitting ? (
                   // Mirrors the right-panel Synthesis Lab empty-state spec so both
@@ -4831,7 +4617,7 @@ ${html}
                     <p className="mb-4 text-sm text-[var(--ats-fg-secondary)]">How the search was run, filtered, and ranked.</p>
                     <div className="space-y-2 text-xs text-[var(--ats-fg-secondary)]">
                       {Array.isArray(result?.strategy_summary?.strategy_points) &&
-                        result.strategy_summary.strategy_points.map((item: any, idx: number) => (
+                        result.strategy_summary.strategy_points.map((item: unknown, idx: number) => (
                           <div key={idx} className="break-words">• {String(item)}</div>
                         ))}
                     </div>
@@ -4881,30 +4667,43 @@ ${html}
           <ErrorBoundary label="Workspace">
           <section data-region="workspace" className="min-w-0 h-full rounded-xl bg-[var(--ats-bg-section)] ats-panel flex flex-col overflow-hidden transition-[width] duration-200">
             <div ref={centerSectionRef as React.RefObject<HTMLDivElement>} className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-5">
-            <div className="mb-4 flex items-center gap-2 text-xl font-bold">
-              <LayoutGrid size={18} /><span>Workspace</span>
-              {/* Start over — clears query, sprite results, layout, and
-                  any in-flight search to drop the user back at the
-                  pristine landing. Hidden on the initial landing so it
-                  doesn't clutter the empty workspace; only surfaces once
-                  the user has actually run a search and might want a way
-                  back to the start. Fades in when it appears. */}
-              {(hasRunSearch || isSubmitting) && (
-                <button
-                  onClick={handleStartOver}
-                  title="Start over — clear query, directions, and any in-flight search"
-                  {...helpProps("clear — start fresh")}
-                  className="stage-reveal ml-auto inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-all hover:brightness-110"
-                  style={{
-                    borderColor:     "var(--ats-border-subtle)",
-                    backgroundColor: "var(--ats-bg-panel)",
-                    color:           "var(--ats-fg-muted)",
-                  }}
-                >
-                  <RotateCcw size={12} />
-                  <span>Start over</span>
-                </button>
-              )}
+            {/* 3-column grid: empty / centred title / right-aligned
+                Start-over slot. Using a grid (rather than the prior
+                `flex items-center` with `ml-auto` on the button)
+                guarantees the LayoutGrid icon + "Workspace" label sit
+                at the *true* horizontal centre of the panel regardless
+                of whether the Start-over button is rendered. Without
+                this, removing the button would cause the title to
+                drift left of centre. */}
+            <div className="mb-4 grid grid-cols-3 items-center text-xl font-bold">
+              <span aria-hidden="true" />
+              <div className="flex items-center justify-center gap-2">
+                <LayoutGrid size={18} /><span>Workspace</span>
+              </div>
+              <div className="flex justify-end">
+                {/* Start over — clears query, sprite results, layout, and
+                    any in-flight search to drop the user back at the
+                    pristine landing. Hidden on the initial landing so it
+                    doesn't clutter the empty workspace; only surfaces once
+                    the user has actually run a search and might want a way
+                    back to the start. Fades in when it appears. */}
+                {(hasRunSearch || isSubmitting) && (
+                  <button
+                    onClick={handleStartOver}
+                    title="Start over — clear query, directions, and any in-flight search"
+                    {...helpProps("clear — start fresh")}
+                    className="stage-reveal inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition-all hover:brightness-110"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-panel)",
+                      color:           "var(--ats-fg-muted)",
+                    }}
+                  >
+                    <RotateCcw size={12} />
+                    <span>Start over</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
@@ -5709,21 +5508,65 @@ ${html}
                             <span className="truncate">{originalLoading[`${paperKey}-original`] ? "Downloading…" : "Download PDF"}</span>
                             <ProgressStrip active={!!originalLoading[`${paperKey}-original`]} />
                           </button>
-                          {/* Translate PDF + inline language selector */}
+                          {/* Translate PDF + inline language selector.
+                              Click toggles: start translation OR (when
+                              already running) abort the in-flight POST
+                              via the per-paper AbortController. The
+                              backend route is plain blocking POST — no
+                              streaming — so cancelling client-side
+                              just severs the response stream; the
+                              server keeps churning until it notices
+                              the dropped connection. That's good
+                              enough for UX (user sees instant button
+                              reset) and matches how labTranslateAbortRef
+                              already cancels the lab's translation
+                              flow. */}
                           <button
-                            onClick={() => void triggerDownload(buildApiUrl("/api/papers/translate-pdf"), { paper: toBackendPaper(paper), target_languages: langs }, `${paper.title || "paper"}_${(langs[0] || "translated").replace(/\s*\(.*?\)/g, "").trim()}.pdf`, `${paperKey}-translate`)}
-                            disabled={isBlocked || translateLoading[`${paperKey}-translate`]}
-                            title={blockedTooltip}
+                            onClick={() => {
+                              const abortKey = `${paperKey}-translate`;
+                              if (translateLoading[abortKey]) {
+                                // Second click → abort. The catch
+                                // branch in triggerDownload skips
+                                // setting an error message for
+                                // AbortError, so the user just sees
+                                // the button bounce back to idle.
+                                translateAbortRefs.current[abortKey]?.abort();
+                                translateAbortRefs.current[abortKey] = null;
+                                setTranslateLoading(prev => ({ ...prev, [abortKey]: false }));
+                                return;
+                              }
+                              const ac = new AbortController();
+                              translateAbortRefs.current[abortKey] = ac;
+                              void triggerDownload(
+                                buildApiUrl("/api/papers/translate-pdf"),
+                                { paper: toBackendPaper(paper), target_languages: langs },
+                                `${paper.title || "paper"}_${(langs[0] || "translated").replace(/\s*\(.*?\)/g, "").trim()}.pdf`,
+                                abortKey,
+                                ac.signal,
+                              );
+                            }}
+                            disabled={isBlocked}
+                            title={
+                              isBlocked
+                                ? blockedTooltip
+                                : translateLoading[`${paperKey}-translate`]
+                                ? "Stop translation"
+                                : undefined
+                            }
                             className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
                               isBlocked
                                 ? blockedClasses
                                 : translateLoading[`${paperKey}-translate`]
-                                ? "border-purple-500/60 bg-purple-500/10 text-purple-300"
+                                ? "border-purple-500/60 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20 cursor-pointer"
                                 : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                             }`}
                           >
-                            <Globe size={12} className={`shrink-0 ${translateLoading[`${paperKey}-translate`] ? "animate-spin" : ""}`} />
-                            <span className="truncate">{translateLoading[`${paperKey}-translate`] ? "Translating…" : "Translate PDF"}</span>
+                            {translateLoading[`${paperKey}-translate`] ? (
+                              <Square size={10} fill="currentColor" className="shrink-0" />
+                            ) : (
+                              <Globe size={12} className="shrink-0" />
+                            )}
+                            <span className="truncate">{translateLoading[`${paperKey}-translate`] ? "Stop" : "Translate PDF"}</span>
                             <ProgressStrip active={!!translateLoading[`${paperKey}-translate`]} />
                           </button>
                           <select
@@ -6050,38 +5893,51 @@ ${html}
                   the rest of the product so users don't read this as a
                   different control than the left panel's tabs. Trailing
                   padding reserves space for the absolute collapse button. */}
-              <div className="shrink-0 flex items-center gap-1.5 pl-3 pr-12 py-2.5 border-b border-slate-800/60">
-                {/* Paper Review is the first tab — it's the more common
-                    starting point for a user arriving with a draft they
-                    want feedback on. Synthesis Lab still follows right
-                    after for users who came through the search → papers
-                    flow. */}
-                <button
-                  onClick={() => setLabModule("review")}
-                  {...helpProps("Multi-agent draft review")}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
-                    labModule === "review"
-                      ? "bg-slate-900/70 text-slate-100"
-                      : "text-slate-500 hover:text-slate-300"
-                  }`}
-                  title="Peer review of your draft"
-                >
-                  <ShieldCheck size={14} />
-                  <span>Paper Review</span>
-                </button>
-                <button
-                  onClick={() => setLabModule("synthesis")}
-                  {...helpProps("Write with collected papers")}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
-                    labModule === "synthesis"
-                      ? "bg-slate-900/70 text-slate-100"
-                      : "text-slate-500 hover:text-slate-300"
-                  }`}
-                  title="Write from selected papers"
-                >
-                  <PenLine size={14} />
-                  <span>Synthesis Lab</span>
-                  {labRefs.length > 0 && (
+              {/* Right-pane title bar split into two equal halves —
+                  the Paper Review tab is centred in the left half and
+                  the Synthesis Lab tab in the right half. Previously
+                  both buttons hugged the left edge with a flex/gap
+                  layout and a stray pr-12 on the outer container; the
+                  symmetric grid puts each title at the visual centre
+                  of its own region (matches the Workspace title
+                  centring on the left pane). The buttons retain their
+                  own px-3 padding so the active-tab pill still reads
+                  as a discrete affordance. */}
+              <div className="shrink-0 grid grid-cols-2 items-center py-2.5 border-b border-slate-800/60">
+                {/* Paper Review — left half. Was the first tab in the
+                    old flex layout because it's the more common
+                    starting point for a user arriving with a draft
+                    they want feedback on. */}
+                <div className="flex items-center justify-center">
+                  <button
+                    onClick={() => setLabModule("review")}
+                    {...helpProps("Multi-agent draft review")}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                      labModule === "review"
+                        ? "bg-slate-900/70 text-slate-100"
+                        : "text-slate-500 hover:text-slate-300"
+                    }`}
+                    title="Peer review of your draft"
+                  >
+                    <ShieldCheck size={14} />
+                    <span>Paper Review</span>
+                  </button>
+                </div>
+                {/* Synthesis Lab — right half. */}
+                <div className="flex items-center justify-center">
+                  <button
+                    onClick={() => setLabModule("synthesis")}
+                    {...helpProps("Write with collected papers")}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                      labModule === "synthesis"
+                        ? "bg-slate-900/70 text-slate-100"
+                        : "text-slate-500 hover:text-slate-300"
+                    }`}
+                    title="Write from selected papers"
+                  >
+                    <PenLine size={14} />
+                    <span>Synthesis Lab</span>
+                    {labRefs.length > 0 && (
                     // Badge uses --ats-* tokens so contrast holds across
                     // every theme. Previous slate-* classes had no day-
                     // mode override for the /70 alpha variant, which made
@@ -6101,7 +5957,8 @@ ${html}
                       }}
                     >{labRefs.length}</span>
                   )}
-                </button>
+                  </button>
+                </div>
               </div>
 
               {/* ── Paper Review module ─────────────────────────────────
@@ -6122,7 +5979,14 @@ ${html}
                 className="flex-1 min-h-0 overflow-y-auto thin-scrollbar"
                 style={{ display: labModule === "review" ? "block" : "none" }}
               >
-                <PaperReviewPanel />
+                {/* PaperReviewPanel runs its own SSE stream + multi-stage
+                    LLM workflow; a render fault inside it shouldn't take
+                    down the rest of the workspace (Brief, search results,
+                    Synthesis Lab below). Mirrors the existing boundaries
+                    around Brief / Workspace / Synthesis Lab. */}
+                <ErrorBoundary label="Paper Review panel">
+                  <PaperReviewPanel />
+                </ErrorBoundary>
               </div>
 
               {/* ── Synthesis Lab content — always renders the full form.
@@ -6138,6 +6002,20 @@ ${html}
               {labModule === "synthesis" && (
               <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
                 <div className="px-4 py-4 space-y-4">
+                  {/* ── AI-assistance disclaimer (mirrors PaperReviewPanel +
+                      ToS §4 added in version 1.1). Legal-sensitive surface
+                      because Lab output goes into application essays /
+                      research drafts that authorship-attribute the user;
+                      banner makes the responsibility split unambiguous. */}
+                  <div
+                    className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
+                    role="note"
+                  >
+                    <strong className="font-semibold">AI-generated draft.</strong>
+                    {" "}Output may contain factual errors or fabricated citations.
+                    You retain full authorship responsibility — verify every
+                    claim and reference before any external use. See Terms §4.
+                  </div>
 
                   {/* References — compact header + tighter empty state for a denser top of Lab. */}
                   <div>

@@ -46,9 +46,16 @@ import {
 import { supabase } from "@/lib/supabase/client";
 import { fetchWithApiFallback, getAuthToken } from "@/lib/api";
 import { useThemeStore } from "@/lib/stores/theme-store";
-import { useGuestQuotaStore, GUEST_QUICK_MAX, GUEST_CURATED_MAX } from "@/lib/stores/guest-quota-store";
+import {
+  useGuestQuotaStore,
+  selectGuestQuickLimit,
+  selectGuestCuratedLimit,
+  selectGuestQuickRemaining,
+  selectGuestCuratedRemaining,
+} from "@/lib/stores/guest-quota-store";
 import { APP_VERSION } from "@/lib/tos-content";
 import { labFieldSpec, labPointsPlaceholder, type LabExtraField } from "@/lib/lab-fields";
+import type { Paper } from "@/lib/types";
 import { PaperCharts } from "@/app/charts";
 import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
 import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
@@ -72,20 +79,11 @@ type SectionMeta = {
   hideUntilResults?: boolean; // Results — only show once the user has run
 };
 
-type Paper = {
-  title: string;
-  authors?: string;
-  year?: string | number;
-  source?: string;
-  evidence_score?: number | string;
-  score?: number | string;
-  url?: string;
-  oa_url?: string;
-  pdf_url?: string;
-  is_oa?: boolean;
-  summary?: string;
-  recommendation_reason?: string;
-};
+// `Paper` is now imported from "@/lib/types" — the canonical superset
+// covers every field this file uses (title, authors, year, source,
+// evidence_score, score, url, oa_url, pdf_url, is_oa, summary,
+// recommendation_reason) plus extras the mobile UI ignores. No call
+// sites change.
 
 type AuthUser = {
   id?: string;
@@ -137,10 +135,16 @@ export default function MobileApp() {
   }, [theme, themeMode]);
 
   // ── Guest quota ─────────────────────────────────────────────────────────
-  useEffect(() => { useGuestQuotaStore.getState().hydrate(); }, []);
+  useEffect(() => {
+    useGuestQuotaStore.getState().hydrate();
+    // Refresh effective per-tier limits from the server. See the
+    // matching call in src/app/page.tsx for the rationale — keeps the
+    // guest trial caps in sync with backend admin overrides.
+    useGuestQuotaStore.getState().loadServerLimits();
+  }, []);
   const isGuest = !!authUser?.is_anonymous;
-  const guestQuickRemaining   = useGuestQuotaStore(s => Math.max(0, GUEST_QUICK_MAX   - s.quickUsed));
-  const guestCuratedRemaining = useGuestQuotaStore(s => Math.max(0, GUEST_CURATED_MAX - s.curatedUsed));
+  const guestQuickRemaining   = useGuestQuotaStore(selectGuestQuickRemaining);
+  const guestCuratedRemaining = useGuestQuotaStore(selectGuestCuratedRemaining);
 
   // ── Tab state ───────────────────────────────────────────────────────────
   // The bottom TabBar drives section navigation. Six tabs is the upper end
@@ -1689,6 +1693,16 @@ function LabScreen({
 
   return (
     <div className="px-4 py-4 pb-24 space-y-5">
+      {/* AI-assistance disclaimer (mirrors desktop Synthesis Lab + ToS §4). */}
+      <div
+        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
+        role="note"
+      >
+        <strong className="font-semibold">AI-generated draft.</strong>
+        {" "}Output may contain factual errors or fabricated citations.
+        You retain full authorship responsibility — verify every claim
+        and reference before any external use. See Terms §4.
+      </div>
       {/* ── Output-type picker — large tap area, opens chip-grid on tap ── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
@@ -2253,6 +2267,16 @@ function ReviewScreen({
   const charCount = text.length;
   return (
     <div className="px-4 py-4 pb-24 space-y-5">
+      {/* AI-assistance disclaimer (mirrors desktop PaperReviewPanel + ToS §4). */}
+      <div
+        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200"
+        role="note"
+      >
+        <strong className="font-semibold">AI-assisted review.</strong>
+        {" "}Agents may miss real issues, flag false ones, or fabricate
+        citations. Verify every comment against the source paper — this
+        does not replace human peer review. See Terms §4.
+      </div>
       {/* ── Upload draft (PDF / TXT / MD) ──────────────────────────────── */}
       <section className="space-y-2">
         <label className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
@@ -2607,6 +2631,13 @@ function SignInGate({
   themeMode: "day" | "night";
   onToggleTheme: () => void;
 }) {
+  // Read the effective guest caps directly from the store rather than
+  // taking them as props — keeps the parent's prop list short and lets
+  // any future SignInGate-style screen pick up the same numbers without
+  // the parent having to thread them through. Falls back to the store's
+  // compile-time defaults until /api/quota-limits resolves.
+  const guestQuickLimit   = useGuestQuotaStore(selectGuestQuickLimit);
+  const guestCuratedLimit = useGuestQuotaStore(selectGuestCuratedLimit);
   // Layout philosophy:
   //   • A single 20-rem-wide column anchors EVERYTHING (mascot, wordmark,
   //     tagline, both CTAs, footnote). The previous version let the tagline
@@ -2733,7 +2764,7 @@ function SignInGate({
                   className="text-center text-[11px]"
                   style={{ color: "var(--ats-fg-muted)" }}
                 >
-                  {GUEST_QUICK_MAX} Quick + {GUEST_CURATED_MAX} Curated · no signup
+                  {guestQuickLimit} Quick + {guestCuratedLimit} Curated · no signup
                 </p>
               )}
             </div>

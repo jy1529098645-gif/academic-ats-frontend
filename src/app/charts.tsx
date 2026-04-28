@@ -3,8 +3,12 @@
 import { memo, useMemo } from "react";
 
 // ── Minimal paper shape needed by charts ─────────────────────────────────────
+// `year` is `string | number` to stay compatible with the canonical
+// Paper in @/lib/types — the runtime use site already wraps it in
+// String(...) before regex-extracting the 4-digit year, so widening the
+// type is purely a type-level change.
 export type ChartPaper = {
-  year?: string;
+  year?: string | number;
   source?: string;
   is_oa?: boolean | number | string;
   evidence_score?: number | string;

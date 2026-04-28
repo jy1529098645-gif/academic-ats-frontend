@@ -754,46 +754,52 @@ export default function AdminPage() {
   }, [tsDays]);
   const funnel = usePolling(fetchFunnel, DETAIL_POLL_MS, enabled);
 
+  // Per-user mutations. These intentionally do NOT catch — errors
+  // propagate to the caller (UserDetailDrawer) so it can decide whether
+  // to keep the drawer open and show a row-local error. Previously the
+  // catch-and-alert pattern here meant the drawer's `await onBan(...)`
+  // saw a successful resolution even on HTTP failure, then ran
+  // `onClose()` regardless — the alert popped up but the drawer
+  // disappeared with it, making it look like the action had been
+  // "accepted but warned about" rather than rejected. The drawer is
+  // the only caller, so making these re-throw is safe.
   const setUserBan = async (userId: string, banned: boolean, reason?: string) => {
-    try {
-      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/ban`), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ banned, reason: reason ?? null }),
-      });
-      if (!res.ok) throw new Error(`${banned ? "ban" : "unban"} HTTP ${res.status}`);
-      await users.refresh();
-    } catch (e) {
-      alert(`Ban update failed: ${e instanceof Error ? e.message : String(e)}`);
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/ban`), {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ banned, reason: reason ?? null }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`${banned ? "ban" : "unban"} HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ""}`);
     }
+    await users.refresh();
   };
 
   const grantUserQuota = async (userId: string, grants: {quick_search?:number; deep_search?:number; synthesis?:number; deep_read?:number}) => {
-    try {
-      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/grant-quota`), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(grants),
-      });
-      if (!res.ok) throw new Error(`grant-quota HTTP ${res.status}`);
-      await users.refresh();
-    } catch (e) {
-      alert(`Gift-quota failed: ${e instanceof Error ? e.message : String(e)}`);
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/grant-quota`), {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(grants),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`grant-quota HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ""}`);
     }
+    await users.refresh();
   };
 
   const setUserTier = async (userId: string, tier: string) => {
-    try {
-      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/tier`), {
-        method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ tier }),
-      });
-      if (!res.ok) throw new Error(`tier PATCH HTTP ${res.status}`);
-      await users.refresh();
-    } catch (e) {
-      alert(`Tier change failed: ${e instanceof Error ? e.message : String(e)}`);
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users/${userId}/tier`), {
+      method:  "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ tier }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`tier PATCH HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ""}`);
     }
+    await users.refresh();
   };
 
   // Send a dev-composed popup notification to one user. Body is short
@@ -976,6 +982,26 @@ export default function AdminPage() {
     }
   };
 
+  // Force the LLM-distilled daily pool to regenerate on the next public
+  // fetch. Different from `refreshRecTerms` above which only reloads the
+  // admin-curated `recommended_terms` table — this hits the dedicated
+  // `/api/admin/recommended-terms/refresh` route which invalidates the
+  // in-process LLM cache (see backend recommended_terms_generator.clear_daily_cache).
+  // Useful when the admin notices the daily-trending chips look stale or
+  // wants to test a code change without waiting for UTC midnight.
+  const regenerateLlmPool = async () => {
+    if (!confirm("Regenerate the LLM-distilled trending pool? This invalidates the daily cache; the next public fetch will spend a few seconds re-querying OpenAlex/arXiv.")) return;
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/recommended-terms/refresh"), {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      alert("LLM pool cleared — next public fetch will regenerate it.");
+    } catch (e) {
+      alert(`Regenerate failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const refreshAll = () => {
     overview.refresh();
     timeseries.refresh();
@@ -1018,18 +1044,23 @@ export default function AdminPage() {
   };
 
   // Resolve / unresolve a feedback row (dev action — flips the flag).
+  // Re-throws on failure so FeedbackInbox can show a row-local busy state
+  // and unwind it; previously the catch swallowed errors into console
+  // only, so a failed PATCH looked indistinguishable from success — the
+  // row's Resolve / Reopen pill never updated and the admin assumed it
+  // worked. The visible alert is the floor; refreshing on success keeps
+  // the optimistic UI in sync with the persisted flag.
   const toggleFeedbackResolved = async (id: number, next: boolean) => {
-    try {
-      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/feedback/${id}`), {
-        method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ resolved: next }),
-      });
-      if (!res.ok) throw new Error(`resolve HTTP ${res.status}`);
-      feedback.refresh();
-    } catch (e) {
-      console.error("[admin] toggleFeedbackResolved:", e);
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/feedback/${id}`), {
+      method:  "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ resolved: next }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`resolve HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ""}`);
     }
+    await feedback.refresh();
   };
 
   // ── Derived values (must compute BEFORE the gate-screen early returns
@@ -1278,18 +1309,33 @@ export default function AdminPage() {
             // viewport we ship for.
             return (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-3">
+                {/* "Signed-in users" (was "Total users") — counts rows in
+                    the `profiles` table only. Anonymous visitors never get
+                    a profile (see ensure_profile() early-return for anon:*
+                    user_ids in supabase_client.py), so this number is the
+                    authenticated-user roster, not the visitor roster.
+                    Renamed 2026-04-28 because the prior "Total users"
+                    label silently undercounted public-beta traffic. */}
                 <KpiCard
                   icon={<Users size={14} />}
-                  label="Total users"
+                  label="Signed-in users"
                   value={ov?.users.total ?? "—"}
                   sublabel={`${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar`}
                   color="#3b82f6"
                 />
+                {/* Active users in window — counts DISTINCT user_id from
+                    user_usage_daily, which DOES include anon:{ip}
+                    buckets. So the numerator (active_users) and the
+                    "Signed-in users" denominator don't share a domain;
+                    the previous "X% of all users" sublabel could
+                    exceed 100% when most activity came from
+                    anonymous visitors. Replaced with a plain
+                    composition note instead of the broken ratio. */}
                 <KpiCard
                   icon={<Activity size={14} />}
                   label={`Active ${windowLabel}`}
                   value={win?.active_users ?? "—"}
-                  sublabel={win && ov ? `${pct(win.active_users, ov.users.total)}% of all users` : ""}
+                  sublabel={win ? "incl. anonymous visitors" : ""}
                   color="#10b981"
                 />
                 <KpiCard
@@ -1838,8 +1884,22 @@ export default function AdminPage() {
                 onClick={() => void refreshRecTerms()}
                 className="text-[10px] inline-flex items-center gap-1 transition-colors"
                 style={{ color: "var(--ats-fg-muted)" }}
+                title="Reload the admin-curated recommended_terms table"
               >
                 <RefreshCw size={10} /> Refresh
+              </button>
+              {/* Regenerate the LLM-distilled daily pool. Distinct
+                  from "Refresh" — Refresh reloads the curated table
+                  (this UI), Regenerate invalidates the LLM cache that
+                  drives /api/recommended-terms/today (the public-facing
+                  daily-shuffled chips users see on the workspace). */}
+              <button
+                onClick={() => void regenerateLlmPool()}
+                className="text-[10px] inline-flex items-center gap-1 transition-colors"
+                style={{ color: "var(--ats-fg-muted)" }}
+                title="Force the LLM-distilled trending pool to regenerate (clears daily cache)"
+              >
+                <Sparkles size={10} /> Regenerate LLM pool
               </button>
               <CollapseCaret open={isPanelOpen("rec-terms")} onClick={() => togglePanel("rec-terms")} />
             </div>
@@ -2019,7 +2079,33 @@ function MaintenancePanel({
   // stomped by a poll every 15s.
   const [msg, setMsg]     = useState<string>("");
   const [eta, setEta]     = useState<string>("");  // datetime-local string (no tz)
+  // In-flight tracker. Without this the action buttons accept multiple
+  // clicks while the POST to /api/admin/maintenance is still hanging,
+  // sending duplicate writes (and on slow networks the user thinks
+  // nothing happened, clicks again, and the server ends up flipping the
+  // toggle twice). Single-button-at-a-time is fine because the three
+  // actions are mutually exclusive: you're either entering, updating,
+  // or ending — never two at once.
+  const [busy, setBusy]   = useState<"apply" | "endNow" | null>(null);
   const lastSyncRef = useRef<string | null>(null);
+
+  const runApply = async () => {
+    setBusy("apply");
+    try {
+      await onApply({ enabled: true, message: msg, eta_at: etaToIso() });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const runEndNow = async () => {
+    if (!confirm("Bring the site back online now? All users will see their normal app immediately (within ~20s).")) return;
+    setBusy("endNow");
+    try {
+      await onEndNow();
+    } finally {
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     if (!state) return;
@@ -2168,18 +2254,20 @@ function MaintenancePanel({
         {!isEnabled ? (
           <button
             type="button"
-            onClick={() => onApply({ enabled: true, message: msg, eta_at: etaToIso() })}
-            className="rounded-lg px-4 py-2 text-xs font-bold text-white transition-all"
+            onClick={() => void runApply()}
+            disabled={busy !== null}
+            className="rounded-lg px-4 py-2 text-xs font-bold text-white transition-all disabled:opacity-60 disabled:cursor-wait"
             style={{ backgroundColor: "#f59e0b" }}
           >
-            ⏸ Enter maintenance mode
+            {busy === "apply" ? "Saving…" : "⏸ Enter maintenance mode"}
           </button>
         ) : (
           <>
             <button
               type="button"
-              onClick={() => onApply({ enabled: true, message: msg, eta_at: etaToIso() })}
-              className="rounded-lg px-4 py-2 text-xs font-bold border transition-all"
+              onClick={() => void runApply()}
+              disabled={busy !== null}
+              className="rounded-lg px-4 py-2 text-xs font-bold border transition-all disabled:opacity-60 disabled:cursor-wait"
               style={{
                 borderColor: "rgba(245, 158, 11, 0.6)",
                 color:       "#f59e0b",
@@ -2187,15 +2275,16 @@ function MaintenancePanel({
               }}
               title="Save the message + ETA without flipping the toggle off"
             >
-              💾 Update message / ETA
+              {busy === "apply" ? "Saving…" : "💾 Update message / ETA"}
             </button>
             <button
               type="button"
-              onClick={() => { if (confirm("Bring the site back online now? All users will see their normal app immediately (within ~20s).")) onEndNow(); }}
-              className="rounded-lg px-4 py-2 text-xs font-bold text-white transition-all"
+              onClick={() => void runEndNow()}
+              disabled={busy !== null}
+              className="rounded-lg px-4 py-2 text-xs font-bold text-white transition-all disabled:opacity-60 disabled:cursor-wait"
               style={{ backgroundColor: "#10b981" }}
             >
-              ▶ Go live now
+              {busy === "endNow" ? "Going live…" : "▶ Go live now"}
             </button>
           </>
         )}
@@ -2279,36 +2368,64 @@ function UserDetailDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Each handler wraps the prop call in try/catch so a failure surfaces
+  // a visible alert AND keeps the drawer open — the operator can adjust
+  // and retry without losing their place. Previously these awaited the
+  // prop unconditionally and then called `onClose()`; combined with the
+  // parent silently catching errors that meant a failed ban/tier change
+  // made the drawer disappear as if it had succeeded.
   const handleBan = async () => {
     if (!confirm(`Ban ${user.email || user.id}? They will be locked out immediately.`)) return;
     setBusy("ban");
-    await onBan(user.id, true, banReason.trim() || undefined);
-    setBusy(null);
-    onClose();
+    try {
+      await onBan(user.id, true, banReason.trim() || undefined);
+      onClose();
+    } catch (e) {
+      alert(`Ban failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
   };
   const handleUnban = async () => {
     setBusy("unban");
-    await onBan(user.id, false);
-    setBusy(null);
-    onClose();
+    try {
+      await onBan(user.id, false);
+      onClose();
+    } catch (e) {
+      alert(`Unban failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
   };
   const handleGrant = async () => {
     if (quickGrant + deepGrant + synthGrant + readsGrant <= 0) { alert("Enter at least one quota value."); return; }
     setBusy("grant");
-    await onGrantQuota(user.id, {
-      quick_search: quickGrant, deep_search: deepGrant,
-      synthesis:    synthGrant, deep_read:   readsGrant,
-    });
-    setBusy(null);
-    setQuickGrant(0); setDeepGrant(0); setSynthGrant(0); setReadsGrant(0);
+    try {
+      await onGrantQuota(user.id, {
+        quick_search: quickGrant, deep_search: deepGrant,
+        synthesis:    synthGrant, deep_read:   readsGrant,
+      });
+      // Only reset inputs on success — if the gift failed, keep the
+      // typed values so the operator can retry without re-entering.
+      setQuickGrant(0); setDeepGrant(0); setSynthGrant(0); setReadsGrant(0);
+    } catch (e) {
+      alert(`Gift-quota failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
   };
   const handleTier = async () => {
     if (tierDraft === user.tier) return;
     if (!confirm(`Change ${user.email || user.id} from ${user.tier} → ${tierDraft}?`)) return;
     setBusy("tier");
-    await onSetTier(user.id, tierDraft);
-    setBusy(null);
-    onClose();
+    try {
+      await onSetTier(user.id, tierDraft);
+      onClose();
+    } catch (e) {
+      alert(`Tier change failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handleNotify = async () => {
@@ -5234,8 +5351,15 @@ function FeedbackInbox({
   rows, onToggle,
 }: {
   rows: FeedbackRow[];
-  onToggle: (id: number, next: boolean) => void;
+  /** Re-throws on failure so the row can show "Saving…" then surface a
+   *  visible error instead of silently leaving the pill unchanged. */
+  onToggle: (id: number, next: boolean) => Promise<void>;
 }) {
+  // Per-row in-flight tracking. Keyed by feedback id so two rows can
+  // toggle in parallel without blocking each other; we only block the
+  // ROW that's currently flipping, not the whole list.
+  const [pendingId, setPendingId] = useState<number | null>(null);
+
   if (rows.length === 0) {
     return (
       <div className="text-xs italic py-4 text-center" style={{ color: "var(--ats-fg-muted)" }}>
@@ -5248,10 +5372,25 @@ function FeedbackInbox({
     feature: "#3b82f6",
     general: "#64748b",
   };
+
+  const handleToggle = async (id: number, next: boolean) => {
+    setPendingId(id);
+    try {
+      await onToggle(id, next);
+    } catch (e) {
+      // Visible feedback — without this the row pill silently stays as
+      // "Resolve" / "Reopen" and the admin can't tell anything failed.
+      alert(`Feedback update failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPendingId(null);
+    }
+  };
+
   return (
     <div className="space-y-2 max-h-[28rem] overflow-y-auto thin-scrollbar pr-1">
       {rows.map(f => {
         const color = CATEGORY_COLOR[f.category] ?? "#64748b";
+        const isPending = pendingId === f.id;
         return (
           <div
             key={f.id}
@@ -5278,15 +5417,16 @@ function FeedbackInbox({
                 </span>
               </div>
               <button
-                onClick={() => onToggle(f.id, !f.resolved)}
-                className="text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors hover:brightness-110"
+                onClick={() => void handleToggle(f.id, !f.resolved)}
+                disabled={isPending}
+                className="text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors hover:brightness-110 disabled:opacity-50 disabled:cursor-wait"
                 style={{
                   borderColor:     f.resolved ? "var(--ats-border-subtle)" : "#10b98155",
                   backgroundColor: f.resolved ? "transparent"              : "#10b9811a",
                   color:           f.resolved ? "var(--ats-fg-muted)"      : "#10b981",
                 }}
               >
-                {f.resolved ? "Reopen" : "Resolve"}
+                {isPending ? "Saving…" : f.resolved ? "Reopen" : "Resolve"}
               </button>
             </div>
             <p className="text-[12px] break-words leading-relaxed" style={{ color: "var(--ats-fg-primary)" }}>

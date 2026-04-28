@@ -15,7 +15,12 @@
 // legacy copy in another component silently drifts out of date.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const TOS_VERSION = "1.0";
+// Bumped 1.0 → 1.1 (2026-04-28) when Section 4 ("AI-assisted writing
+// tools") was added — the new section disclaims liability for the
+// Synthesis Lab + Paper Review output and tells users they retain
+// authorship responsibility. Every returning user re-accepts via the
+// TermsOfServiceGate on next session because of this bump.
+export const TOS_VERSION = "1.1";
 
 // Product version — shown in the TOS header + Section 1 so users know
 // exactly which build of the product they're agreeing to. Bump alongside
@@ -44,22 +49,27 @@ export const TOS_SECTIONS: TosSection[] = [
       "Your queries are sent to large-language-model providers (currently OpenAI) for interpretation and for generating research briefs. The third-party provider processes your query text under its own privacy policy. We do not send your email or other identifying account information to the LLM provider alongside your query. Paper metadata returned by the academic databases is cached briefly to improve performance; we don't store full paper PDFs on our servers long-term.",
   },
   {
-    title: "4. Your rights",
+    title: "4. AI-assisted writing tools (Synthesis Lab and Paper Review)",
+    body:
+      "AcademiCats provides two AI-assisted writing tools — the Synthesis Lab (drafting research syntheses, personal statements, and proposals) and Paper Review (multi-agent critique of your own draft). Both tools produce content using large language models that can hallucinate facts, fabricate citations, misinterpret sources, or miss substantive issues in the input. Output from these tools is intended as a starting point for your own work and is NOT a substitute for human peer review, original scholarship, or independent verification of any claim or citation. You retain full authorship responsibility for any work derived from or assisted by these tools — including factual accuracy, citation integrity, originality, and compliance with the publication, academic-integrity, or institutional rules that apply to your submission. AcademiCats does not warrant that AI-generated output is correct, complete, novel, or fit for any particular purpose, and is not liable for the consequences of using such output without independent verification and editing. Do not paste AI-generated text directly into a final submission without review.",
+  },
+  {
+    title: "5. Your rights",
     body:
       "You can export every piece of data we hold about you (Article 15, GDPR right of access) or permanently delete your account and all associated records (Article 17, right to erasure) from the user menu at any time. Both actions are immediate and irreversible. If you have questions about your data, email the project team — contact is listed in the in-app announcement banner.",
   },
   {
-    title: "5. Alpha caveats",
+    title: "6. Alpha caveats",
     body:
       "During Alpha testing, the service may be temporarily unavailable for maintenance, the feature set may change, and stored data may be migrated or reset if we hit a major architectural issue. We will give advance notice in the announcement banner for planned interruptions. Your usage quota, tier, and bonus balances are best-effort during Alpha and may be reset if we discover a bug in the quota system.",
   },
   {
-    title: "6. Acceptable use",
+    title: "7. Acceptable use",
     body:
       "You agree not to use AcademiCats to generate defamatory or harmful content, to scrape data at a rate that disrupts service for other users, or to circumvent the rate limits applied to your account tier. Accounts that violate these rules may be suspended without notice; suspension reasons are communicated on the next sign-in attempt.",
   },
   {
-    title: "7. Changes to these terms",
+    title: "8. Changes to these terms",
     body:
       "We may update these terms; when we do, the version number below changes and you will be asked to accept again on your next session. Your previous acceptance remains on record for compliance purposes. The exact timestamp + version of each acceptance is stored on your profile row so we can always show you which version was in effect for any specific action.",
   },

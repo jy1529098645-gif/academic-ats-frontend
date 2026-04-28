@@ -14,8 +14,35 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AcademiCats",
+  // `template` lets nested routes (e.g. /admin) override just the leaf
+  // and still get the "AcademiCats · Admin" suffix shape. `default` is
+  // what shows on the bare landing.
+  title: {
+    default:  "AcademiCats",
+    template: "%s · AcademiCats",
+  },
   description: "An academic assistant for structuring and verifying thought.",
+  // OpenGraph / Twitter card meta so a link share to Slack, Twitter, or
+  // iMessage renders with the mascot card instead of a generic Next.js
+  // preview. Image is the existing landing mascot — it's the asset
+  // every cold visitor already sees.
+  openGraph: {
+    title:       "AcademiCats",
+    description: "An academic assistant for structuring and verifying thought.",
+    type:        "website",
+    siteName:    "AcademiCats",
+    images: [{ url: "/Cats_01.png", alt: "AcademiCats mascot" }],
+  },
+  twitter: {
+    card:        "summary",
+    title:       "AcademiCats",
+    description: "An academic assistant for structuring and verifying thought.",
+    images:      ["/Cats_01.png"],
+  },
+  // Tells Next to honour the public/robots.txt we ship rather than the
+  // framework default (no robots directive). The policy lives in
+  // public/robots.txt — see comments there.
+  robots: { index: true, follow: true },
 };
 
 export default function RootLayout({
