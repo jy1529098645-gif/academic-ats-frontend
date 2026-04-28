@@ -4,26 +4,44 @@
 //
 // Design choices:
 //   - No external library (driver.js / shepherd.js / react-joyride). The
-//     tour is short (≤6 steps) and the surface area is modest, so a
-//     custom ~300-line component beats adding 12-45KB of dependency.
+//     tour is short and the surface area is modest, so a custom ~250-line
+//     component beats adding 12-45KB of dependency.
+//
 //   - Targets are looked up by `data-tour="..."` attribute, NOT by id.
 //     IDs already mean something elsewhere in this codebase; data-tour
 //     keeps the tour wiring out of the way of the rest of the app.
-//   - Spotlight is rendered as four mask divs around the target's
-//     bounding rect (top / bottom / left / right). This is more
-//     responsive than SVG cutouts and doesn't break on scroll.
-//   - Position recalc happens on scroll + resize via ResizeObserver +
-//     IntersectionObserver, so a step keeps tracking its target if the
-//     layout shifts mid-tour (e.g., the user expands a panel).
+//
+//   - Spotlight is a SINGLE element using the CSS box-shadow donut
+//     technique: one absolutely-positioned div sized to the target's
+//     bounding rect, with a giant `box-shadow: 0 0 0 9999px rgba(...)`
+//     that paints everything outside the rect dark. This is what
+//     Intro.js / Driver.js / Shepherd all do under the hood. It scales
+//     to any viewport, has zero "edge-alignment" bugs (because there
+//     are no four panels to keep in sync), and survives layout shifts.
+//
+//   - Position tracking uses a continuous `requestAnimationFrame` loop
+//     while the tour is open — every frame we re-read
+//     getBoundingClientRect() on the target and update state ONLY when
+//     the rect changes (so React re-renders are minimal). This catches:
+//        · scroll                 (no listener needed)
+//        · window resize          (no listener needed)
+//        · CSS transitions        (panels expanding / collapsing)
+//        · animations             (Sprite reveal, fade-ins)
+//        · React re-renders       (target gets bigger/smaller)
+//        · DOM additions          (target appears mid-tour)
+//     The 60fps cost is negligible; the spotlight stays glued to the
+//     target on any device size, dynamic layout, or framework jitter.
+//
 //   - Steps without a `target` render as a centred modal (welcome /
-//     done cards) with no spotlight.
+//     done cards) with no spotlight cutout.
+//
 //   - The component does NOT decide whether to open — the parent
-//     controls `open` and persistence (localStorage flag). Two modes:
-//     first-run (auto-open via parent's mount effect) and on-demand
-//     (Help → "Show welcome guide" sets `open=true` again).
+//     controls `open` and persistence. Two trigger paths today:
+//     auth-listener SIGNED_IN and the user-menu Help item, both
+//     in src/app/page.tsx.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 export type TourStep = {
@@ -65,11 +83,11 @@ type Props = {
 const PADDING = 8;     // px around the highlighted target
 const GAP     = 12;    // px between target rect and card
 const CARD_W  = 320;   // px — fixed so positioning math is stable
-const Z_BASE  = 95;    // sits above guestExhausted modal (z-90) + below feedback toast
+const Z_BASE  = 95;    // sits above guestExhausted modal (z-90), below sign-in (z-9400) + TOS gate (z-9500)
 
 type Rect = { top: number; left: number; width: number; height: number };
 
-function getTargetRect(target: string | undefined): Rect | null {
+function readRect(target: string | undefined): Rect | null {
   if (!target || typeof window === "undefined") return null;
   const el = document.querySelector(`[data-tour="${CSS.escape(target)}"]`);
   if (!el) return null;
@@ -77,6 +95,17 @@ function getTargetRect(target: string | undefined): Rect | null {
   // Skip hidden / display:none elements (they return 0×0 rects).
   if (r.width === 0 && r.height === 0) return null;
   return { top: r.top, left: r.left, width: r.width, height: r.height };
+}
+
+function rectsEqual(a: Rect | null, b: Rect | null): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  // 0.5px threshold — sub-pixel jitter from CSS transforms or
+  // device-pixel-ratio rounding shouldn't trigger re-renders.
+  return Math.abs(a.top - b.top)       < 0.5
+      && Math.abs(a.left - b.left)     < 0.5
+      && Math.abs(a.width - b.width)   < 0.5
+      && Math.abs(a.height - b.height) < 0.5;
 }
 
 /** Pick the side with the most room. Left/right preferred when the
@@ -126,7 +155,6 @@ function cardPosition(rect: Rect, placement: Exclude<TourStep["placement"], "aut
 export default function OnboardingTour({ open, steps, onClose, onFinish }: Props) {
   const [stepIdx, setStepIdx] = useState(0);
   const [rect,    setRect]    = useState<Rect | null>(null);
-  const [tick,    setTick]    = useState(0);   // forces recompute on scroll/resize
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   // Reset to step 0 every time the tour re-opens. (Otherwise re-opening
@@ -140,17 +168,6 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   // state that the step's spotlight + body copy assume — e.g. open
   // the user menu, expand a panel. Wrapped in try/catch so a bad
   // onEnter doesn't break tour navigation.
-  //
-  // After onEnter fires, the parent's setState calls re-render new
-  // DOM (e.g. the user-menu dropdown that didn't exist before).
-  // The initial rect read on this step transition was taken BEFORE
-  // those state changes committed, so the spotlight is on a stale
-  // (or null) bounding box. We bump `tick` via a double-RAF after
-  // onEnter so the layout effect re-reads getBoundingClientRect()
-  // once the new DOM is live. Double RAF (not single) because React
-  // 19 batches commits to the next paint — one RAF lands after the
-  // commit-scheduling tick but before layout, two RAFs guarantee
-  // the new element is on screen.
   useEffect(() => {
     if (!open) return;
     const step = steps[stepIdx];
@@ -159,44 +176,34 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
       // eslint-disable-next-line no-console
       console.warn("[onboarding] step.onEnter threw:", err);
     }
-    let raf1 = 0, raf2 = 0;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => setTick(t => t + 1));
-    });
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-    };
   }, [open, stepIdx, steps]);
 
-  // Recompute target rect when step changes or layout shifts. We use
-  // requestAnimationFrame for the scroll/resize handlers to avoid
-  // doing layout work on every frame of a long scroll.
-  useLayoutEffect(() => {
+  // Continuous rect polling — every frame, re-read the target's
+  // bounding rect and update state only if it changed. This is the
+  // ONE mechanism that keeps the spotlight glued to the target across
+  // every layout-shift case (scroll, resize, CSS transitions on
+  // panels, React re-renders, animations). No scroll/resize listeners
+  // needed; the RAF loop is the single source of truth.
+  //
+  // 60fps × one rect read × one cheap shallow compare per frame is
+  // negligible — the loop runs only while `open` is true and stops
+  // immediately on close.
+  useEffect(() => {
     if (!open) return;
-    const step = steps[stepIdx];
-    setRect(getTargetRect(step?.target));
-    if (typeof window === "undefined") return;
+    const target = steps[stepIdx]?.target;
     let rafId = 0;
-    const recompute = () => {
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => setTick(t => t + 1));
+    let prev: Rect | null = null;
+    const tick = () => {
+      const next = readRect(target);
+      if (!rectsEqual(prev, next)) {
+        prev = next;
+        setRect(next);
+      }
+      rafId = requestAnimationFrame(tick);
     };
-    window.addEventListener("scroll",  recompute, { passive: true, capture: true });
-    window.addEventListener("resize",  recompute);
-    return () => {
-      cancelAnimationFrame(rafId);
-      window.removeEventListener("scroll", recompute, { capture: true });
-      window.removeEventListener("resize", recompute);
-    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
   }, [open, stepIdx, steps]);
-
-  // Reread the rect on tick changes (scroll / resize). Separate from
-  // the listener-mount effect to avoid re-binding listeners every tick.
-  useLayoutEffect(() => {
-    if (!open) return;
-    setRect(getTargetRect(steps[stepIdx]?.target));
-  }, [tick, stepIdx, steps, open]);
 
   // Keyboard: ESC to close, arrows to navigate.
   useEffect(() => {
@@ -232,9 +239,10 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
     return cardPosition(rect, placement, vw, vh);
   })();
 
-  // Spotlight hole rect (target + padding). Used for the four mask
-  // divs that simulate a cutout. When centred (no target) we render a
-  // single full-screen dim layer instead.
+  // Spotlight cutout = target rect + padding. We render this as a
+  // SINGLE div with a gigantic box-shadow that paints everything
+  // OUTSIDE the rect dark — far more reliable than four edge-aligned
+  // mask divs (which were producing the off-by-N drift the user hit).
   const hole = rect ? {
     top:    rect.top    - PADDING,
     left:   rect.left   - PADDING,
@@ -253,34 +261,50 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
       role="dialog"
       aria-labelledby="onboarding-tour-title"
     >
-      {/* Backdrop / spotlight. Either four mask rectangles around the
-          target (cutout effect) or one full-screen dim (no target). */}
       {hole ? (
         <>
-          <div className="fixed bg-black/60 transition-all" style={{ top: 0, left: 0, right: 0, height: hole.top }} />
-          <div className="fixed bg-black/60 transition-all" style={{ top: hole.top + hole.height, left: 0, right: 0, bottom: 0 }} />
-          <div className="fixed bg-black/60 transition-all" style={{ top: hole.top, left: 0, width: hole.left, height: hole.height }} />
-          <div className="fixed bg-black/60 transition-all" style={{ top: hole.top, left: hole.left + hole.width, right: 0, height: hole.height }} />
-          {/* Animated outline around the cut-out so the user's eye
-              snaps to the highlighted region. Pointer-events none so
-              clicks pass through to the actual target underneath
-              (users can still try-as-they-learn if they want). */}
+          {/* Spotlight cutout — single donut element. The 9999px
+              box-shadow paints "everything outside this rect" dark,
+              giving us a perfectly aligned cutout with no edge-sync
+              problems. The accent ring is layered onto the same
+              element via the second box-shadow term so the outline
+              is automatically tied to the rect's geometry.
+              pointer-events-none lets the user click through to the
+              real target underneath (try-as-you-learn).
+
+              No CSS transition: the RAF polling loop above updates
+              `rect` every frame the target moves, and React commits
+              a fresh top/left/width/height immediately. A
+              `transition: 150ms` here would make the spotlight chase
+              the target with visible lag — exactly the "跑偏"
+              behaviour the user reported. Snap-to-rect each frame
+              gives a stuck-to-the-target feel even during panel
+              expansions, scrolls, and viewport resizes. */}
           <div
-            className="fixed pointer-events-none rounded-xl transition-all"
+            className="fixed pointer-events-none rounded-xl"
             style={{
               top:    hole.top,
               left:   hole.left,
               width:  hole.width,
               height: hole.height,
-              boxShadow:    "0 0 0 2px var(--ats-fg-accent), 0 0 0 6px rgba(59,130,246,0.25)",
+              boxShadow: [
+                "0 0 0 9999px rgba(0, 0, 0, 0.55)",
+                "0 0 0 2px var(--ats-fg-accent)",
+                "0 0 0 6px rgba(59, 130, 246, 0.25)",
+              ].join(", "),
             }}
           />
         </>
       ) : (
+        // No target → full-screen dim for centred welcome / done cards.
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
       )}
 
-      {/* Floating card */}
+      {/* Floating card. Same no-transition rationale as the
+          spotlight: the card position is recomputed from the
+          spotlight rect every RAF tick, so we want every commit to
+          be the latest position. A CSS transition would make the
+          card slide from old position to new with visible lag. */}
       <div
         ref={cardRef}
         className="fixed rounded-2xl border shadow-2xl p-5"
