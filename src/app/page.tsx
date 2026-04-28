@@ -1835,29 +1835,28 @@ function DesktopWorkspace() {
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [guestSignInBusy,     setGuestSignInBusy]     = useState(false);
   const [guestSignInError,    setGuestSignInError]    = useState<string>("");
-  // First-run welcome modal — open exactly once per browser then never
-  // again unless the user clicks "Show welcome guide" in the Help
-  // panel. localStorage is the persistence layer so the same person
-  // returning on Day 2 isn't re-onboarded; clearing site data resets.
-  // Versioned key (`v1`) so we can re-prompt every user if the tour
-  // copy changes materially (bump to `v2`).
+  // Welcome tour — fires every time the user transitions from
+  // logged-out to logged-in. Per user spec: "新用户引导每次用户登录都
+  // 会重新显示一遍". The previous localStorage-gated "show once per
+  // browser" behaviour was removed in favour of this always-on
+  // post-login launch (covers fresh sign-in, sign-out → sign-in, and
+  // page reloads where session restore briefly takes authUser
+  // null → user).
+  //
+  // Why a ref instead of just `if (authUser) ...`: Supabase's auth
+  // listener can re-fire on token refresh, focus events, etc., where
+  // authUser stays non-null but the reference may change. The ref
+  // tracks the previous truthy/falsy state so we only open the tour
+  // on actual login transitions, never on mid-session re-emits.
+  const prevAuthLoggedInRef = useRef<boolean>(false);
   useEffect(() => {
-    // Wait until the user is actually authenticated before launching
-    // the tour. Pre-auth, the sign-in modal is in the foreground and
-    // half the tour's spotlight targets (user-menu, expanded right
-    // panel) don't exist in the DOM yet — so a first-render trigger
-    // would land the user in a confusing 3-layer stack (tour /
-    // sign-in / workspace) where most spotlights fall back to the
-    // centred-card mode. Gating on authUser turns the tour into a
-    // proper post-sign-in onboarding moment.
-    if (!authUser) return;
-    try {
-      if (typeof window === "undefined") return;
-      const seen = window.localStorage.getItem("ats-onboarding-seen-v1");
-      if (!seen) setWelcomeOpen(true);
-    } catch {
-      // localStorage may throw under privacy modes / disk-full / Safari
-      // ITP — silently skip the modal rather than crash the workspace.
+    const wasLoggedIn = prevAuthLoggedInRef.current;
+    const isLoggedIn  = !!authUser;
+    prevAuthLoggedInRef.current = isLoggedIn;
+    // Only fire on null → user transitions. user → user (token
+    // refresh) and user → null (sign-out) both skip.
+    if (!wasLoggedIn && isLoggedIn) {
+      setWelcomeOpen(true);
     }
   }, [authUser]);
 
@@ -4313,21 +4312,25 @@ ${html}
         </div>
       )}
 
-      {/* ── First-run guided tour ───────────────────────────────────────────
-          Step-by-step spotlight tour replacing the earlier 3-card
-          welcome modal. Each step highlights an actual UI region by
-          looking up `data-tour="..."` attributes on real elements;
-          users learn by SEEING the surface, not reading a description
-          of it. Auto-opens once per browser via the localStorage flag
-          (`ats-onboarding-seen-v1`); re-openable from the Help panel.
-          The tour component (src/components/onboarding/OnboardingTour.tsx)
-          handles spotlight math, scroll/resize tracking, ESC + arrow
-          key navigation, and writing the seen-flag on dismiss. */}
+      {/* ── Post-login guided tour ─────────────────────────────────────────
+          Step-by-step spotlight tour. Each step highlights an actual
+          UI region (data-tour attribute) and runs an onEnter
+          side-effect to put the page into the visual state the
+          step's body copy assumes (open the user menu, expand the
+          right panel, etc.). Fires every time `authUser` flips from
+          null → user (see the prevAuthLoggedInRef effect higher up)
+          — i.e. on every fresh sign-in AND on every page reload
+          while logged in. Per spec: "每次用户登录都会重新显示一遍".
+          Re-openable any time from user menu → Help → "Show welcome
+          guide" if the user wants to replay it mid-session. */}
       <OnboardingTour
         open={welcomeOpen}
         onClose={() => {
+          // No localStorage write — tour fires every login by design.
+          // Closing simply hides this run; next login transition
+          // re-opens it. Users who never want to see it again can
+          // dismiss with Skip / Esc each time.
           setWelcomeOpen(false);
-          try { window.localStorage.setItem("ats-onboarding-seen-v1", "1"); } catch { /* ignore */ }
         }}
         steps={[
           {
