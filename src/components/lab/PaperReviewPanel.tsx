@@ -274,8 +274,8 @@ export function PaperReviewPanel() {
       return;
     }
     if (generating) return;
-    // Funnel telemetry — fires before any LLM call. No-op without
-    // NEXT_PUBLIC_POSTHOG_KEY (see analytics.ts).
+    // Funnel telemetry — fires before any LLM call. Currently a
+    // no-op stub (see analytics.ts header).
     const reviewStartedAt = Date.now();
     void track("review_started", {
       draft_len_chars: text.length,

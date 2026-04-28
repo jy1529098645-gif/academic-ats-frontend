@@ -3342,7 +3342,8 @@ ${html}
     const isFast = fastModeRef.current;
     // Funnel telemetry — fires before any preflight gate so we can see
     // dropoff between "user clicked search" and "search actually ran".
-    // No-op without NEXT_PUBLIC_POSTHOG_KEY (see analytics.ts).
+    // Currently a no-op stub (see analytics.ts header) until we wire
+    // a Supabase events sink; call sites stay as-is.
     // Stash the start timestamp on a ref so the matching results_loaded
     // event (fired in the SSE "done" branch further down) can compute
     // elapsed_ms across the async lifecycle. Ref instead of state

@@ -1,9 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Client-side instrumentation. Next.js executes this once per page load,
-// before the React tree mounts, so Sentry catches early-boot errors too
-// and PostHog records the pageview. Both calls are no-ops when their
-// respective env vars (NEXT_PUBLIC_SENTRY_DSN / NEXT_PUBLIC_POSTHOG_KEY)
-// aren't configured.
+// before the React tree mounts, so Sentry catches early-boot errors too.
+// Sentry init is a no-op when NEXT_PUBLIC_SENTRY_DSN isn't set.
+// `initAnalytics()` is currently a no-op stub left in for forward-
+// compat with a future Supabase events sink (see lib/analytics.ts).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { initSentryBrowser } from "./lib/sentry";
