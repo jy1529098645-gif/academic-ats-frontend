@@ -10,6 +10,7 @@ import { PaperCharts } from "./charts";
 import { supabase } from "@/lib/supabase/client";
 import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
 import { Sprite, type SpriteHandle } from "@/components/sprite/Sprite";
+import { track } from "@/lib/analytics";
 import { labFieldSpec, labPointsPlaceholder } from "@/lib/lab-fields";
 import { THEME_REGISTRY, themesByMode, type ThemeMode } from "@/lib/themes";
 import { useThemeStore, hydrateThemeStore } from "@/lib/stores/theme-store";
@@ -2444,14 +2445,21 @@ function DesktopWorkspace() {
       authTokenRef.current = session?.access_token ?? null;
       setAuthUser(session?.user ?? null);
       cacheAndRegister(session);
-      console.log("[auth] getSession →", session?.user?.email ?? "no session", "| token:", session?.access_token ? "✓" : "✗");
+      // Auth-state debug log gated to non-production. Used to fire
+      // unconditionally and was one of the noisiest entries in the
+      // browser console on every page load.
+      if (process.env.NODE_ENV !== "production") {
+        console.debug("[auth] getSession →", session?.user?.email ?? "no session", "| token:", session?.access_token ? "✓" : "✗");
+      }
       setAuthLoading(false);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       authTokenRef.current = session?.access_token ?? null;
       setAuthUser(session?.user ?? null);
       cacheAndRegister(session);
-      console.log("[auth] onAuthStateChange →", session?.user?.email ?? "signed out", "| token:", session?.access_token ? "✓" : "✗");
+      if (process.env.NODE_ENV !== "production") {
+        console.debug("[auth] onAuthStateChange →", session?.user?.email ?? "signed out", "| token:", session?.access_token ? "✓" : "✗");
+      }
     });
     return () => subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3229,6 +3237,15 @@ ${html}
     // before scheduling handleSearch via setTimeout would otherwise
     // run with the stale closure value and execute the wrong mode.
     const isFast = fastModeRef.current;
+    // Funnel telemetry — fires before any preflight gate so we can see
+    // dropoff between "user clicked search" and "search actually ran".
+    // No-op without NEXT_PUBLIC_POSTHOG_KEY (see analytics.ts).
+    void track("search_submitted", {
+      mode:                isFast ? "quick" : "curated",
+      is_anonymous:        !!authUser?.is_anonymous,
+      paper_count_target:  isFast ? paperCountQuick : paperCountCurated,
+      query_chars:         trimmed.length,
+    });
     // Guest-mode hard cap. Anonymous (Supabase is_anonymous) sessions
     // get GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
     // device before this branch swaps the search for a sign-in prompt.
@@ -3673,6 +3690,12 @@ ${html}
   async function handleSynthesize() {
     if (labRefs.length === 0) return;
     if (!ensureQuota("synthesis")) return;
+    // Funnel telemetry — see search_submitted in handleSearch.
+    void track("lab_started", {
+      output_type:           labOutputType,
+      paper_count_attached:  labRefs.length,
+      is_anonymous:          !!authUser?.is_anonymous,
+    });
     const ac = new AbortController();
     labAbortRef.current = ac;
     setLabGenerating(true);
@@ -4706,6 +4729,23 @@ ${html}
               </div>
             </div>
 
+            {/* First-run "what is this" hint — only shown on the very
+                first visit to an empty workspace. Sprite already proposes
+                a daily-rotated set of recommended-term chips, but it
+                trusts the user to know WHAT to do with the workspace
+                first. This one-liner closes the gap for first-timers
+                without competing with Sprite's adaptive copy. Hidden
+                forever once the user has run any search. */}
+            {!hasRunSearch && !isSubmitting && (
+              <div className="mb-3 rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] leading-snug text-slate-400">
+                <span className="font-semibold text-blue-300">New here?</span>
+                {" "}Type a research question below (or pick a chip Cat suggests),
+                then choose <span className="font-semibold">Quick</span> for a fast scan
+                or <span className="font-semibold">Curated</span> for a deeper analysis.
+                When results come in, the right panel runs Synthesis Lab
+                drafts and Paper Review on top of them.
+              </div>
+            )}
             {/* Unified workspace card — textarea + action row live inside one bordered container */}
             <div className="rounded-xl border border-slate-700/60 bg-[var(--ats-bg-input)] shadow-[0_2px_8px_rgba(15,23,42,0.08)] overflow-hidden">
               <div ref={placeholderWrapperRef} className="relative" style={{ containerType: "inline-size" }}>

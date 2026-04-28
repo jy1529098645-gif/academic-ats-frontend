@@ -25,6 +25,7 @@ import {
   ThumbsUp, Target, Globe, Lightbulb,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
+import { track } from "@/lib/analytics";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider-name scrub
@@ -273,6 +274,12 @@ export function PaperReviewPanel() {
       return;
     }
     if (generating) return;
+    // Funnel telemetry — fires before any LLM call. No-op without
+    // NEXT_PUBLIC_POSTHOG_KEY (see analytics.ts).
+    void track("review_started", {
+      draft_len_chars: text.length,
+      draft_type:      draftType,
+    });
 
     // Fold the selected draft type into the context hint so the backend
     // intake agent + specialists anchor to the right rubric. User-entered

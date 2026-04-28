@@ -45,6 +45,7 @@ import {
 
 import { supabase } from "@/lib/supabase/client";
 import { fetchWithApiFallback, getAuthToken } from "@/lib/api";
+import { track } from "@/lib/analytics";
 import { useThemeStore } from "@/lib/stores/theme-store";
 import {
   useGuestQuotaStore,
@@ -224,6 +225,11 @@ export default function MobileApp() {
       setLabError("Please fill in the topic or core argument.");
       return;
     }
+    void track("lab_started", {
+      output_type:   labOutputType,
+      is_anonymous:  !!authUser?.is_anonymous,
+      surface:       "mobile",
+    });
     const ac = new AbortController();
     labAbortRef.current = ac;
     setLabGenerating(true);
@@ -398,6 +404,11 @@ export default function MobileApp() {
       setReviewError("Paste or upload at least a few paragraphs (≥ 200 chars).");
       return;
     }
+    void track("review_started", {
+      draft_len_chars: text.length,
+      is_anonymous:    !!authUser?.is_anonymous,
+      surface:         "mobile",
+    });
     const ac = new AbortController();
     reviewAbortRef.current = ac;
     setReviewGenerating(true);
@@ -477,6 +488,15 @@ export default function MobileApp() {
         return;
       }
     }
+    // Funnel telemetry. Mirrors the desktop search_submitted event so
+    // both platforms feed the same PostHog dashboard.
+    void track("search_submitted", {
+      mode:                fastMode ? "quick" : "curated",
+      is_anonymous:        !!authUser?.is_anonymous,
+      paper_count_target:  paperCount,
+      query_chars:         q.length,
+      surface:             "mobile",
+    });
 
     abortRef.current = new AbortController();
     setSearchStatus("running");
