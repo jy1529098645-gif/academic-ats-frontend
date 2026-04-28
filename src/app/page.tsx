@@ -1842,6 +1842,15 @@ function DesktopWorkspace() {
   // Versioned key (`v1`) so we can re-prompt every user if the tour
   // copy changes materially (bump to `v2`).
   useEffect(() => {
+    // Wait until the user is actually authenticated before launching
+    // the tour. Pre-auth, the sign-in modal is in the foreground and
+    // half the tour's spotlight targets (user-menu, expanded right
+    // panel) don't exist in the DOM yet — so a first-render trigger
+    // would land the user in a confusing 3-layer stack (tour /
+    // sign-in / workspace) where most spotlights fall back to the
+    // centred-card mode. Gating on authUser turns the tour into a
+    // proper post-sign-in onboarding moment.
+    if (!authUser) return;
     try {
       if (typeof window === "undefined") return;
       const seen = window.localStorage.getItem("ats-onboarding-seen-v1");
@@ -1850,7 +1859,7 @@ function DesktopWorkspace() {
       // localStorage may throw under privacy modes / disk-full / Safari
       // ITP — silently skip the modal rather than crash the workspace.
     }
-  }, []);
+  }, [authUser]);
 
   // ── Tour-lifecycle effect ────────────────────────────────────────────────
   // The onboarding tour highlights real DOM regions, but several of
