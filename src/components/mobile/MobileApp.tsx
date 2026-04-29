@@ -159,10 +159,10 @@ export default function MobileApp() {
   const [fastMode, setFastMode] = useState(true); // true = Quick, false = Curated
   // User-tunable result-set size. Desktop has separate Quick / Curated counts
   // and a 3–500 range; mobile collapses that to a single value with a chip
-  // strip of presets (20 / 50 / 100 / 200) plus a custom number entry. 50 is
-  // the default — matches desktop's Quick default and is a comfortable
-  // "single-screen" depth on a phone.
-  const [paperCount, setPaperCount] = useState<number>(50);
+  // strip of presets (20 / 50 / 100 / 200) plus a custom number entry. 60 is
+  // the default — matches desktop's Quick default (the active mode at first
+  // load) and is a comfortable "single-screen" depth on a phone.
+  const [paperCount, setPaperCount] = useState<number>(60);
   const [searchStatus, setSearchStatus] = useState<SearchStatus>("idle");
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("");

@@ -1314,8 +1314,8 @@ function DesktopWorkspace() {
   // The legacy `paperCount` localStorage key is migrated below: if a user
   // had previously tuned a single value, that value seeds BOTH new fields
   // so they don't lose their preference.
-  const [paperCountQuick,   setPaperCountQuick]   = useState(50);
-  const [paperCountCurated, setPaperCountCurated] = useState(20);
+  const [paperCountQuick,   setPaperCountQuick]   = useState(60);
+  const [paperCountCurated, setPaperCountCurated] = useState(30);
   const [sortMode, setSortMode] = useState("Relevance score");
   const [preferAbstracts, setPreferAbstracts] = useState(true);
   const [strictCoreOnly, setStrictCoreOnly] = useState(false);
@@ -1358,19 +1358,17 @@ function DesktopWorkspace() {
         if (Number.isFinite(p.yearEnd))               setYearEnd(p.yearEnd);
       }
 
-      // One-time defaults reset (Quick=50, Curated=20). Users from before
-      // the rebalancing carried legacy values forward (a single tuned
-      // `paperCount` migrated into BOTH new fields, e.g. Curated stuck
-      // at 30 or 50 even though the new sweet spot is 20). We force-
-      // override once per device, then write a flag so the override
-      // doesn't keep stomping users who have since tuned the values
-      // themselves. Bump the flag's date suffix if the defaults change
-      // again — a different key triggers a fresh one-time reset for
-      // every existing device.
-      const RESET_FLAG = "ats-paper-count-defaults-reset-2026-04-quick50-curated20";
+      // One-time defaults reset (Quick=60, Curated=30). Bumped in 2026-04
+      // from 50/20 to give Quick more breadth and Curated more substance
+      // on first run. The flag key embeds the new pair so every existing
+      // device — including those that already saw the prior 50/20 reset —
+      // gets force-overridden once on the next visit. Users who have
+      // since tuned the values themselves still keep their tuning after
+      // the override fires (this branch only runs if the flag is absent).
+      const RESET_FLAG = "ats-paper-count-defaults-reset-2026-04-quick60-curated30";
       if (!localStorage.getItem(RESET_FLAG)) {
-        setPaperCountQuick(50);
-        setPaperCountCurated(20);
+        setPaperCountQuick(60);
+        setPaperCountCurated(30);
         try { localStorage.setItem(RESET_FLAG, "1"); } catch { /* quota — ignore */ }
       }
     } catch {}
@@ -2233,6 +2231,24 @@ function DesktopWorkspace() {
   // ("How's it going?" instead of "Report a bug") and to auto-select the
   // general category. Reset whenever the modal closes.
   const [autoPromptedFeedback, setAutoPromptedFeedback] = useState(false);
+
+  // Fade in/out for the feedback modal. `feedbackMounted` keeps the DOM node
+  // around long enough for the close transition to play; `feedbackVisible`
+  // drives opacity/scale. Toggling open → mount → next frame visible=true;
+  // toggling close → visible=false → unmount after the duration below.
+  const FEEDBACK_FADE_MS = 200;
+  const [feedbackMounted, setFeedbackMounted] = useState(false);
+  const [feedbackVisible, setFeedbackVisible] = useState(false);
+  useEffect(() => {
+    if (feedbackOpen) {
+      setFeedbackMounted(true);
+      const r = requestAnimationFrame(() => setFeedbackVisible(true));
+      return () => cancelAnimationFrame(r);
+    }
+    setFeedbackVisible(false);
+    const t = setTimeout(() => setFeedbackMounted(false), FEEDBACK_FADE_MS);
+    return () => clearTimeout(t);
+  }, [feedbackOpen]);
 
   // ── Auto-prompt feedback after N metered actions ────────────────────────
   // Watches the Zustand usage-prompt counter. When it crosses the threshold
@@ -4450,7 +4466,7 @@ ${html}
           {
             id:    "welcome",
             title: "Welcome to AcademiCats",
-            body:  "I'll walk you through the workspace. Press → / Enter to advance, ← to go back, Esc to skip.",
+            body:  "Quick tour. → next, ← back, Esc to skip.",
             onEnter: () => {
               setUserMenuOpen(false);
               setLeftVisible(false);
@@ -4462,8 +4478,8 @@ ${html}
           {
             id:        "search-input",
             target:    "search-input",
-            title:     "Type a research question",
-            body:      "Plain English. e.g. \"GPT-4 hallucination evaluation in clinical settings\". Submit with Enter — Cat below will help you pick a search depth.",
+            title:     "Enter your topic",
+            body:      "A topic or keywords work — full sentences not required. Press Enter to submit.",
             placement: "auto",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4482,8 +4498,8 @@ ${html}
             // query on close.
             id:        "search-mode",
             target:    "search-mode",
-            title:     "Pick Quick or Curated",
-            body:      "Quick (~10 s) — fast scan across sources for a first look. Curated (<2 min) — deeper analysis with multi-agent screening, costs more quota.",
+            title:     "Quick or Curated",
+            body:      "Quick — broad scan across sources. Curated — multi-agent screening for deeper analysis, costs more quota.",
             placement: "top",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4503,8 +4519,8 @@ ${html}
             // is purely about the LEFT side.
             id:        "left-panel",
             target:    "left-panel",
-            title:     "Brief & Charts live here",
-            body:      "Once a search finishes, the left panel fills with the Research Brief (synthesised summary) and Charts (citation / topic landscape). Two tabs at the top to switch between them.",
+            title:     "Brief & Charts",
+            body:      "After a search, this panel fills with the synthesised brief and citation/topic charts. Tabs at the top switch between them.",
             placement: "right",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4532,8 +4548,8 @@ ${html}
             // hovering behind them and obstructing the spotlight.
             id:        "right-panel",
             target:    "right-panel",
-            title:     "Draft & Review live here",
-            body:      "Once results arrive, the right panel runs Synthesis Lab (write essays / statements / proposals from selected papers) and Paper Review (multi-agent critique of your own draft).",
+            title:     "Synthesis Lab & Paper Review",
+            body:      "Write essays, statements, or proposals from picked papers, or get a multi-agent critique of your own draft.",
             placement: "left",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4559,8 +4575,8 @@ ${html}
             // half-screen Lab panel competing for attention.
             id:        "user-menu",
             target:    "user-menu",
-            title:     "Profile, history, help",
-            body:      "Your usage, saved Lab outputs, and Help (which re-launches this tour) all live behind this avatar.",
+            title:     "Profile & help",
+            body:      "Profile, usage, and Help (which re-launches this tour) live behind your avatar.",
             placement: "right",
             onEnter:   () => {
               setUserMenuOpen(true);
@@ -4579,8 +4595,8 @@ ${html}
             // by either panel still being expanded alongside it.
             id:        "feedback-button",
             target:    "feedback-button",
-            title:     "Send us feedback",
-            body:      "Hit the bubble at the bottom-right any time to report a bug, suggest a feature, or send a quick note. We read everything.",
+            title:     "Send feedback",
+            body:      "Bug? Idea? Hit the bubble bottom-right — we read everything.",
             placement: "left",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4600,8 +4616,8 @@ ${html}
             // panel + menu makes the dim backdrop visually calmer
             // behind the closing card.
             id:    "done",
-            title: "You're set",
-            body:  "Anything unclear later? User menu → Help re-launches this tour any time.",
+            title: "All set",
+            body:  "User menu → Help re-launches this tour anytime.",
             onEnter: () => {
               setUserMenuOpen(false);
               setLeftVisible(false);
@@ -5897,15 +5913,15 @@ ${html}
                 </div>
               )}
               {displayedPapers.length > 0 ? (
-                <div className="space-y-5">
+                <div className="space-y-3">
                   {displayedPapers.map((paper, index) => {
                     const paperKey = getPaperKey(paper, index);
                     const langs = translationLanguages[paperKey] || ["Chinese (Simplified)"];
                     const deepRead = deepReadResults[paperKey];
                     return (
-                      <article key={`${paper.title}-${index}`} className="rounded-3xl bg-slate-950/40 p-5 fade-in">
+                      <article key={`${paper.title}-${index}`} className="rounded-3xl bg-slate-950/40 p-4 fade-in">
                         {/* Title row */}
-                        <div className="flex items-start gap-3">
+                        <div className="flex items-start gap-2">
                           <h3 className="flex-1 text-sm font-semibold leading-snug break-words text-slate-100">{index + 1}. {paper.title || "Untitled"}</h3>
                           {/* Add-to-Lab button — only in final phase */}
                           {!papersAreStreaming && (() => {
@@ -5929,7 +5945,7 @@ ${html}
 
                         {papersAreStreaming ? (
                           /* ── Phase 1: candidate preview ── */
-                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
                             <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-300">Candidate</span>
                             <span><span className="font-semibold text-slate-300">Authors:</span> {paper.authors || "Unknown authors"}</span>
                             <span><span className="font-semibold text-slate-300">Year:</span> {paper.year || "Unknown year"}</span>
@@ -5988,7 +6004,7 @@ ${html}
 
                         {/* One-line Insight */}
                         {paper.recommendation_reason && (
-                          <div className="mt-1.5 flex items-start gap-1.5 border-l-2 border-slate-700 pl-3 text-xs text-slate-400 break-words leading-[1.35]">
+                          <div className="mt-1 flex items-start gap-1.5 border-l-2 border-slate-700 pl-2.5 text-xs text-slate-400 break-words leading-[1.35]">
                             <Lightbulb size={11} className="shrink-0 mt-0.5 text-amber-400/80" />
                             <span>{paper.recommendation_reason}</span>
                           </div>
@@ -6008,7 +6024,7 @@ ${html}
                           const blockedClasses = "border-slate-800 bg-slate-900/30 text-slate-500 cursor-not-allowed opacity-60";
                           const blockedTooltip = isBlocked ? access.reason : undefined;
                         return (
-                        <div className="mt-3 flex flex-nowrap items-center gap-2 overflow-hidden">
+                        <div className="mt-2 flex flex-nowrap items-center gap-2 overflow-hidden">
                           {/* Open Paper — always enabled; publisher's own landing
                               page reliably works even when their PDF is paywalled. */}
                           {paper.url && (
@@ -6587,29 +6603,29 @@ ${html}
                   "lab展开后显示完整功能而不是必须要先run search"). */}
               {labModule === "synthesis" && (
               <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar">
-                <div className="px-4 py-4 space-y-4">
+                <div className="px-4 py-3 space-y-2.5">
                   {/* AI-assistance disclaimer — toned down per user feedback
                       (was an amber banner; now muted small-print). ToS §4
                       carries the formal liability language; this line is
                       just a daily reminder. */}
-                  <p className="text-[10px] italic leading-snug text-slate-500" role="note">
+                  <p className="text-[9px] italic leading-snug text-slate-500" role="note">
                     AI draft may include hallucinated facts or citations. Verify before use; you retain authorship. (Terms §4)
                   </p>
 
                   {/* References — compact header + tighter empty state for a denser top of Lab. */}
                   <div>
-                    <div className="flex items-center gap-2 mb-1.5">
+                    <div className="flex items-center gap-2 mb-1">
                       <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><BookOpen size={14} /><span>Papers to use</span></span>
                       <span className="text-xs text-slate-500">{labRefs.length} picked</span>
                     </div>
                     {labRefs.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-700 py-2.5 text-center text-xs text-slate-600 leading-5">
+                      <div className="rounded-xl border border-dashed border-slate-700 py-2 text-center text-xs text-slate-600 leading-5">
                         Pick papers with <span className="text-violet-400 font-semibold">Add as reference</span>.
                       </div>
                     ) : (
-                      <div className="space-y-1.5">
+                      <div className="space-y-1">
                         {labRefs.map(({ key, paper }) => (
-                          <div key={key} className="flex items-start gap-2 rounded-lg border border-slate-800/60 bg-slate-900/50 px-3 py-1.5">
+                          <div key={key} className="flex items-start gap-2 rounded-lg border border-slate-800/60 bg-slate-900/50 px-3 py-1">
                             <span className="flex-1 text-xs text-slate-300 leading-5 break-words line-clamp-2">{paper.title}</span>
                             <button onClick={() => removeFromLab(key)} className="shrink-0 mt-0.5 text-slate-600 hover:text-rose-400 transition-colors text-xs">✕</button>
                           </div>
@@ -6625,7 +6641,7 @@ ${html}
                     <label className="flex items-center gap-1.5 text-sm font-semibold text-slate-200"><Upload size={14} /><span>Add your own files</span></label>
                     <p className="mt-0.5 text-[11px] text-slate-500">PDF, TXT, or Markdown. Drag & drop works.</p>
                     <label
-                      className="mt-1.5 flex cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 px-3 py-2.5 text-xs text-slate-500 transition hover:border-violet-500/50 hover:text-violet-400"
+                      className="mt-1 flex cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-slate-700 bg-slate-900/30 px-3 py-2 text-xs text-slate-500 transition hover:border-violet-500/50 hover:text-violet-400"
                       onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("border-violet-500/60", "bg-violet-500/5"); }}
                       onDragLeave={(e) => { e.currentTarget.classList.remove("border-violet-500/60", "bg-violet-500/5"); }}
                       onDrop={(e) => {
@@ -6674,7 +6690,7 @@ ${html}
                     <select
                       value={labOutputType}
                       onChange={e => setLabOutputType(e.target.value)}
-                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-violet-500"
+                      className="mt-1.5 w-full rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-violet-500"
                     >
                       <option value="literature_review">Literature Review</option>
                       <option value="theoretical_framework">Theoretical Framework</option>
@@ -7217,7 +7233,7 @@ ${html}
                     const filename = `${outputSlug}_${argSlug}`;
                     return (
                     <div>
-                      <div className="flex flex-nowrap items-center gap-2 mb-2 overflow-hidden">
+                      <div className="flex flex-nowrap items-center gap-2 mb-1 overflow-hidden">
                         <span className="shrink min-w-0 truncate text-sm font-semibold text-slate-200">Generated Text</span>
                         <div className="ml-auto flex flex-nowrap items-center gap-1.5 min-w-0">
                           {/* Quick copy — stays in the header because it's
@@ -7642,13 +7658,13 @@ ${html}
             </span>
           </button>
 
-          {feedbackOpen && (
+          {feedbackMounted && (
             <div
-              className="fixed inset-0 z-[70] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm"
+              className={`fixed inset-0 z-[70] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm transition-opacity duration-200 ease-out ${feedbackVisible ? "opacity-100" : "opacity-0"}`}
               onClick={() => { setFeedbackOpen(false); setAutoPromptedFeedback(false); }}
             >
               <div
-                className={`w-full max-w-lg rounded-2xl border shadow-2xl ${autoPromptedFeedback ? "ring-4 ring-offset-2" : ""}`}
+                className={`w-full max-w-lg rounded-2xl border shadow-2xl transition-all duration-200 ease-out ${autoPromptedFeedback ? "ring-4 ring-offset-2" : ""} ${feedbackVisible ? "opacity-100 scale-100" : "opacity-0 scale-95"}`}
                 style={{
                   borderColor:     autoPromptedFeedback ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                   backgroundColor: "var(--ats-bg-panel)",

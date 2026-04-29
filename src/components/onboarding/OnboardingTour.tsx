@@ -198,6 +198,16 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   // `steps`). We want exactly-once-per-transition semantics.
   const lastFiredRef = useRef<number>(-1);
 
+  // Fade-cycle state. Each step transition runs:
+  //   t=0    : `fading` flips to true → card + spotlight transition opacity to 0
+  //   t=FADE : rect cleared, onEnter fires, `fading` flips back to false →
+  //            card + spotlight transition opacity to 1 against the new state
+  // The spotlight ALSO has CSS transitions on top/left/width/height so any
+  // within-step rect drift (scroll, layout shift) follows smoothly without
+  // the snap-jump that the old "no transition" implementation had.
+  const FADE_MS = 180;
+  const [fading, setFading] = useState(false);
+
   // Reset to step 0 every time the tour re-opens. (Otherwise re-opening
   // from the Help panel after a Skip would resume mid-tour.)
   useEffect(() => {
@@ -205,48 +215,66 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
       setStepIdx(0);
       setRect(null);
       lastFiredRef.current = -1;
+      // Initial open enters the fade-cycle too so the card fades IN from
+      // opacity 0 rather than popping into existence.
+      setFading(true);
     }
   }, [open]);
 
-  // Combined effect: handles the full per-step lifecycle.
-  //   1. On a REAL step transition (stepIdx changed since last run):
-  //      clear stale rect, fire onEnter side-effect.
-  //   2. On every effect run (including parent-driven steps array
-  //      reference changes): re-arm the RAF rect-tracking loop for
-  //      the current target.
-  // Splitting onEnter from the RAF arm via lastFiredRef means the
-  // parent can pass a fresh inline `steps={[...]}` every render
-  // without re-firing side-effects. Stable enough to avoid the
-  // "menu/panel toggles back and forth on every render" failure mode.
+  // Latest `steps` array, captured into a ref so the fade-cycle effect
+  // below can read the current step's onEnter without listing `steps`
+  // as a dep (parent re-renders pass a fresh inline `steps={[...]}`
+  // every render — listing it would clear our pending fade timer mid-
+  // cycle and leave the card stuck at opacity 0).
+  const stepsRef = useRef(steps);
+  useEffect(() => { stepsRef.current = steps; }, [steps]);
+
+  // Fade-cycle effect — keyed ONLY on real step transitions (`open` and
+  // `stepIdx`). Does NOT depend on `steps` because the parent re-creates
+  // the steps array on every render; including it here would re-fire
+  // cleanup mid-fade and prevent the fade-in setFading(false) from
+  // landing.
   useEffect(() => {
     if (!open) return;
-    const step = steps[stepIdx];
-    if (!step) return;
-
-    const stepChanged = lastFiredRef.current !== stepIdx;
-    if (stepChanged) {
-      lastFiredRef.current = stepIdx;
-      // Clear stale rect — without this, navigating from a step with
-      // a target to a centred (no-target) step would leak the prior
-      // spotlight ring into the centred card. Also gives target-steps
-      // a clean starting point until the RAF loop reads the new rect.
-      setRect(null);
-      if (step.onEnter) {
+    setFading(true);
+    const t = setTimeout(() => {
+      const step = stepsRef.current[stepIdx];
+      if (step?.onEnter) {
         try { step.onEnter(); } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("[onboarding] step.onEnter threw:", err);
         }
       }
-    }
+      lastFiredRef.current = stepIdx;
+      setFading(false);
+    }, FADE_MS);
+    return () => clearTimeout(t);
+  }, [open, stepIdx]);
 
-    // Centred steps don't need rect tracking.
-    if (!step.target) return;
+  // Wipe rect on step transitions so the spotlight starts clean. The
+  // RAF effect below will re-measure once the new step has rendered.
+  // We do NOT clear rect inside the fade timeout because that would
+  // race with the RAF effect's local-prev cache (which would then
+  // refuse to re-set rect because its cached prev still matches the
+  // post-clear DOM rect, leaving state stuck at null forever). Doing
+  // the clear here, in a separate effect that fires on stepIdx change,
+  // means React commits null → RAF cleanup runs → RAF re-arms with
+  // fresh prev=null → next tick re-populates rect.
+  useEffect(() => {
+    if (!open) return;
+    setRect(null);
+  }, [open, stepIdx]);
 
-    // Continuous rect polling — every frame, re-read the target's
-    // bounding rect and update state only if it changed. The RAF loop
-    // is the single source of truth for spotlight position; no
-    // scroll/resize listeners required. Stops on cleanup (step change
-    // or tour close).
+  // RAF rect-tracking effect — keyed on `steps` so a parent re-render
+  // that swaps the inline array reference re-arms the loop with the
+  // fresh closure (the target is read from step.target each tick).
+  // Independent from the fade-cycle effect above so its cleanup can
+  // re-fire freely without disturbing in-flight fades.
+  useEffect(() => {
+    if (!open) return;
+    const step = steps[stepIdx];
+    if (!step?.target) return;
+
     let rafId = 0;
     let prev: Rect | null = null;
     const tick = () => {
@@ -372,6 +400,10 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
         // is automatically tied to the rect's geometry.
         // pointer-events-none lets the user click through to the
         // real target underneath (try-as-you-learn).
+        // CSS transitions on top/left/width/height + opacity give
+        // smooth motion when the rect changes mid-step (scroll /
+        // layout shift) AND on step transitions (faded out → new
+        // rect → faded back in).
         <div
           className="fixed pointer-events-none rounded-xl"
           style={{
@@ -379,6 +411,8 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
             left:   hole.left,
             width:  hole.width,
             height: hole.height,
+            opacity: fading ? 0 : 1,
+            transition: "top 250ms cubic-bezier(0.4,0,0.2,1), left 250ms cubic-bezier(0.4,0,0.2,1), width 250ms cubic-bezier(0.4,0,0.2,1), height 250ms cubic-bezier(0.4,0,0.2,1), opacity 180ms ease-out",
             boxShadow: [
               "0 0 0 9999px rgba(0, 0, 0, 0.55)",
               "0 0 0 2px var(--ats-fg-accent)",
@@ -391,14 +425,20 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
         // centred welcome / done cards. Plain dim, no spotlight ring.
         // pointer-events:auto re-enabled here (wrapper is none) so
         // the dim layer blocks page interaction during welcome /
-        // done — there's nothing to interact with under those.
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto" />
+        // done — there's nothing to interact with under those. Opacity
+        // transition keeps the dim consistent with the spotlight fade.
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto"
+          style={{ opacity: fading ? 0 : 1, transition: "opacity 180ms ease-out" }}
+        />
       )}
 
       {/* Floating card. Uses translate-centring for centred steps and
-          absolute top/left for targeted steps. No CSS transition: the
-          RAF loop updates rect every frame the target moves; a
-          transition here would chase with visible lag.
+          absolute top/left for targeted steps. CSS transitions on
+          top/left + opacity smooth out the per-step jump and the
+          per-frame RAF rect chases. The duration is short enough
+          that the lag against fast-moving targets stays imperceptible
+          (≤4 frames at 60fps).
           pointer-events:auto re-enabled (wrapper is none) so the
           Back / Next / Skip buttons remain clickable.
           cardRef feeds the post-render height measurement back into
@@ -408,6 +448,8 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
         className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto"
         style={{
           ...cardStyle,
+          opacity: fading ? 0 : 1,
+          transition: "top 250ms cubic-bezier(0.4,0,0.2,1), left 250ms cubic-bezier(0.4,0,0.2,1), opacity 180ms ease-out",
           borderColor:     "var(--ats-border-subtle)",
           backgroundColor: "var(--ats-bg-panel)",
           color:           "var(--ats-fg-primary)",

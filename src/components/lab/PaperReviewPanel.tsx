@@ -407,13 +407,13 @@ export function PaperReviewPanel() {
   // between the two tabs feels consistent — same gap between blocks, same
   // divider pattern, same button styling.
   return (
-    <div className="px-4 py-4 space-y-4" style={{ color: "var(--ats-fg-primary)" }}>
+    <div className="px-4 py-3 space-y-2.5" style={{ color: "var(--ats-fg-primary)" }}>
       {/* AI-assistance disclaimer — toned down per user feedback to match
           the muted "small-print" aesthetic used elsewhere in the panel
           chrome. Single italic line, slate-500, no border / bg, so it
           reads as a footnote rather than a yellow alert. ToS §4 carries
           the formal language; this is just a daily reminder. */}
-      <p className="text-[10px] italic leading-snug text-slate-500" role="note">
+      <p className="text-[9px] italic leading-snug text-slate-500" role="note">
         AI review may miss issues or hallucinate. Verify before acting. (Terms §4)
       </p>
       {/* ── Upload ────────────────────────────────────────────────────────── */}
