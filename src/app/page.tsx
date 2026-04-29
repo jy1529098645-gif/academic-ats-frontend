@@ -120,7 +120,6 @@ const DEFAULT_SOURCES = [
 
 const SORT_MODES = [
   "Relevance score",
-  "Evidence strength",
   "Research fit",
   "Citation count",
   "Newest first",
@@ -1340,13 +1339,15 @@ function DesktopWorkspace() {
         // Prefer the new per-mode keys; fall back to the legacy `paperCount`
         // (single shared value) so a returning user keeps their tuned count
         // on both modes until they explicitly adjust one of them.
+        // Curated cap dropped to 100 in 2026-04: legacy persisted values
+        // up to 500 get clamped down on rehydration. Quick stays at 500.
         const _legacyCount = Number.isFinite(p.paperCount)
           ? Math.max(3, Math.min(500, Math.round(p.paperCount)))
           : null;
         if (Number.isFinite(p.paperCountQuick))       setPaperCountQuick(Math.max(3, Math.min(500, Math.round(p.paperCountQuick))));
         else if (_legacyCount !== null)               setPaperCountQuick(_legacyCount);
-        if (Number.isFinite(p.paperCountCurated))     setPaperCountCurated(Math.max(3, Math.min(500, Math.round(p.paperCountCurated))));
-        else if (_legacyCount !== null)               setPaperCountCurated(_legacyCount);
+        if (Number.isFinite(p.paperCountCurated))     setPaperCountCurated(Math.max(3, Math.min(100, Math.round(p.paperCountCurated))));
+        else if (_legacyCount !== null)               setPaperCountCurated(Math.min(100, _legacyCount));
         if (typeof p.sortMode === "string")           setSortMode(p.sortMode);
         if (typeof p.preferAbstracts === "boolean")   setPreferAbstracts(p.preferAbstracts);
         if (typeof p.strictCoreOnly === "boolean")    setStrictCoreOnly(p.strictCoreOnly);
@@ -3096,8 +3097,14 @@ function DesktopWorkspace() {
       return t !== 0 ? t : citeCount(b) - citeCount(a);
     };
 
-    if (sortMode === "Relevance score")   copy.sort((a, b) => toNum(b.evidence_score ?? b.score) - toNum(a.evidence_score ?? a.score));
-    else if (sortMode === "Evidence strength") copy.sort((a, b) => toNum(b.evidence_score) - toNum(a.evidence_score));
+    // "Relevance score" reads relevance_score (the per-mode composite the
+    // backend writes via combine_rule_and_llm_scores) with evidence_score
+    // / score as legacy fallbacks. The previous version sorted by
+    // evidence_score, which made it indistinguishable from the now-removed
+    // "Evidence strength" mode and caused user-visible "duplicate sort
+    // option" confusion.
+    if (sortMode === "Relevance score")
+      copy.sort((a, b) => toNum(b.relevance_score ?? b.evidence_score ?? b.score) - toNum(a.relevance_score ?? a.evidence_score ?? a.score));
     else if (sortMode === "Research fit") copy.sort((a, b) => toNum(b.research_fit_score) - toNum(a.research_fit_score));
     else if (sortMode === "Citation count") copy.sort(cmpCite);
     else if (sortMode === "Newest first") copy.sort((a, b) => toNum(b.year) - toNum(a.year));
@@ -5541,8 +5548,16 @@ ${html}
                       max={500}
                       value={paperCountQuick}
                       onChange={(e) => {
+                        // Only clamp the UPPER bound while typing — the
+                        // lower bound (3) gets enforced on blur.  Without
+                        // this, typing the leading "1" of "100" instantly
+                        // clamps the field to 3, then "0" / "0" produce
+                        // "30" / "300" instead of the user's intended 100.
                         const n = Number(e.target.value);
-                        if (Number.isFinite(n)) setPaperCountQuick(Math.max(3, Math.min(500, Math.round(n))));
+                        if (Number.isFinite(n)) setPaperCountQuick(Math.min(500, Math.max(0, Math.round(n))));
+                      }}
+                      onBlur={() => {
+                        if (paperCountQuick < 3) setPaperCountQuick(3);
                       }}
                       className={`w-full rounded-lg border bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500 ${fastMode ? "border-blue-500/60" : "border-slate-700"}`}
                     />
@@ -5552,11 +5567,20 @@ ${html}
                     <input
                       type="number"
                       min={3}
-                      max={500}
+                      max={100}
                       value={paperCountCurated}
                       onChange={(e) => {
+                        // Curated cap dropped from 500 → 100 because the
+                        // backend's per-search 300 s ceiling cannot fit a
+                        // 500-paper LLM rerank + adversarial + agent run;
+                        // ~100 is the sweet spot that finishes under the
+                        // cap on a healthy day.  Same defer-lower-bound
+                        // pattern as Quick — only clamp upper while typing.
                         const n = Number(e.target.value);
-                        if (Number.isFinite(n)) setPaperCountCurated(Math.max(3, Math.min(500, Math.round(n))));
+                        if (Number.isFinite(n)) setPaperCountCurated(Math.min(100, Math.max(0, Math.round(n))));
+                      }}
+                      onBlur={() => {
+                        if (paperCountCurated < 3) setPaperCountCurated(3);
                       }}
                       className={`w-full rounded-lg border bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500 ${!fastMode ? "border-blue-500/60" : "border-slate-700"}`}
                     />
@@ -8413,25 +8437,27 @@ ${html}
                         value={paperCountQuick}
                         onChange={(e) => {
                           const n = Number(e.target.value);
-                          if (Number.isFinite(n)) setPaperCountQuick(Math.max(3, Math.min(500, Math.round(n))));
+                          if (Number.isFinite(n)) setPaperCountQuick(Math.min(500, Math.max(0, Math.round(n))));
                         }}
+                        onBlur={() => { if (paperCountQuick < 3) setPaperCountQuick(3); }}
                         className={`w-20 rounded-lg border bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums ${fastMode ? "border-blue-500/60" : "border-slate-700"}`}
                       />
                     </div>
                     <div className="flex items-center justify-between rounded-xl bg-slate-800/50 px-4 py-3">
                       <div>
                         <p className="text-sm font-semibold text-slate-200">Curated — paper count</p>
-                        <p className="text-[10px] text-slate-500 mt-0.5">How many papers each Curated run analyses (3–500)</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">How many papers each Curated run analyses (3–100)</p>
                       </div>
                       <input
                         type="number"
                         min={3}
-                        max={500}
+                        max={100}
                         value={paperCountCurated}
                         onChange={(e) => {
                           const n = Number(e.target.value);
-                          if (Number.isFinite(n)) setPaperCountCurated(Math.max(3, Math.min(500, Math.round(n))));
+                          if (Number.isFinite(n)) setPaperCountCurated(Math.min(100, Math.max(0, Math.round(n))));
                         }}
+                        onBlur={() => { if (paperCountCurated < 3) setPaperCountCurated(3); }}
                         className={`w-20 rounded-lg border bg-slate-900/60 px-2 py-1 text-right text-sm font-mono text-slate-100 outline-none focus:border-blue-500/60 tabular-nums ${!fastMode ? "border-blue-500/60" : "border-slate-700"}`}
                       />
                     </div>

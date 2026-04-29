@@ -57,6 +57,11 @@ export type Paper = {
   doi?:                   string;
   evidence_strength?:     string;
   evidence_score?:        number | string;
+  /** Per-mode composite score the backend writes via
+   *  combine_rule_and_llm_scores. Read by the client-side "Relevance score"
+   *  re-sort so it actually differs from "Evidence strength" / Research fit.
+   *  Optional — older saved results may not carry it. */
+  relevance_score?:       number | string;
   recommendation_reason?: string;
   research_fit_score?:    number;
   domain_fit_label?:      string;
