@@ -1297,6 +1297,15 @@ function DesktopWorkspace() {
   // value so they trigger re-renders correctly.
   const fastModeRef = useRef(fastMode);
   useEffect(() => { fastModeRef.current = fastMode; }, [fastMode]);
+  // Snapshot of the last successful papers list, taken right before
+  // handleSearch wipes state for a re-run. Used as a graceful fallback
+  // when the new search ends with 0 papers — without it, switching from
+  // a Quick run that found N papers to a Curated run whose initial
+  // retrieval returns 0 (slow-source timeouts in deep mode, smaller
+  // paperCountCurated, or strict filtering can all hit this) wipes the
+  // user's view entirely. Cleared the moment a fresh papers SSE arrives
+  // so a real new result always replaces the stale snapshot.
+  const previousPapersRef = useRef<Paper[]>([]);
   // Two paper-count settings — one per mode. Quick defaults to 50 (wide
   // sweep, seconds to ship); Curated defaults to 20 (each paper costs a
   // multi-agent pass, so smaller pools keep latency reasonable). Settings
@@ -3450,6 +3459,18 @@ ${html}
     // question. See useLayoutEffect on [hasRunSearch, isSubmitting] above.
     setHasRunSearch(true);
     setUiError("");
+    // Capture the visible papers BEFORE we wipe state, so the SSE result
+    // handler can splice them back in if the new search returns 0 papers.
+    // Prefer the canonical job.result.papers (LLM-scored, fully populated)
+    // and fall back to streamPapers (rule-ranked candidates) if no final
+    // result has landed yet.
+    {
+      const _prevResultPapers = job?.result?.papers;
+      const _prev = (Array.isArray(_prevResultPapers) && _prevResultPapers.length > 0)
+        ? _prevResultPapers
+        : streamPapers;
+      previousPapersRef.current = (_prev && _prev.length > 0) ? [...(_prev as Paper[])] : [];
+    }
     setJob(null);
     briefVersionRef.current = 0;       // reset: no SSE version received yet for this search
     briefFlushGenRef.current += 1;     // invalidate any stale RAF batches from previous search
@@ -3595,6 +3616,11 @@ ${html}
               setStreamPapers(data.papers);
               setRetrievalCount(data.papers.length);
               setCandidateLimit(data.papers.length);
+              // Real new papers landed — drop the previous-search snapshot
+              // so the result handler doesn't fall back to it later.
+              if (data.papers.length > 0) {
+                previousPapersRef.current = [];
+              }
               if (!isFast) {
                 setStartedAgents(prev => {
                   const s = new Set(prev);
@@ -3619,11 +3645,30 @@ ${html}
               setBriefStreamText((prev) => prev || String(briefFallback));
             }
             setPlannerThinking(null);
+            // Empty-papers fallback: if the new result returned 0 papers
+            // but we have a snapshot of the previous run's papers, splice
+            // them back in so a Curated-after-Quick switch (where Curated's
+            // initial retrieval can return 0 due to source timeouts /
+            // smaller paper_count) doesn't blank out the user's view.
+            // The `_papers_fallback` marker lets the UI surface a notice
+            // explaining what the user is looking at.
+            let _resultForJob = data.result ?? null;
+            const _newPapers = _resultForJob?.papers;
+            const _newIsEmpty = !Array.isArray(_newPapers) || _newPapers.length === 0;
+            if (_resultForJob && _newIsEmpty && previousPapersRef.current.length > 0) {
+              _resultForJob = {
+                ..._resultForJob,
+                papers: previousPapersRef.current,
+                _papers_fallback: true,
+              };
+            } else if (_resultForJob && Array.isArray(_newPapers) && _newPapers.length > 0) {
+              previousPapersRef.current = [];
+            }
             setJob((prev) => ({
               ...prev,
               status: "done",
               progress: 100,
-              result: data.result ?? null,
+              result: _resultForJob,
               finished_at: Date.now() / 1000,
             }));
             // Funnel completion — pairs with the search_submitted event
@@ -3786,6 +3831,7 @@ ${html}
     setHasRunSearch(false);
     setJob(null);
     setStreamPapers([]);
+    previousPapersRef.current = [];
     setStreamAgents({});
     setStartedAgents(new Set());
     setRetrievalCount(null);
@@ -5709,6 +5755,16 @@ ${html}
                   </span>
                 )}
               </div>
+              {/* Fallback notice — surfaces when the new run returned 0
+                  papers and we're showing the snapshot from the previous
+                  successful run instead of a blank list. */}
+              {(result as any)?._papers_fallback && !isSubmitting && (
+                <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-xs text-amber-300">
+                  {fastMode
+                    ? "This run returned 0 papers — showing the previous result instead. Try broadening sources or the query."
+                    : "Curated mode returned 0 papers — showing your previous result instead. Sources may have timed out, or filters were too strict. Try Quick mode or a broader query."}
+                </div>
+              )}
               {papersAreStreaming && (
                 <div className="mb-3 rounded-2xl border border-blue-500/20 bg-blue-500/5 px-4 py-3">
                   <div className="flex items-center justify-between text-sm mb-1.5">
