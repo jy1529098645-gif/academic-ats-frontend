@@ -70,7 +70,7 @@ import {
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   Link as LinkIcon, ShieldCheck,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical,
-  Megaphone, CornerDownLeft, RotateCcw,
+  Megaphone, CornerDownLeft, RotateCcw, RefreshCw,
 } from "lucide-react";
 
 // Transport / auth / error-copy helpers live in src/lib/api.ts. They used to
@@ -5413,6 +5413,32 @@ ${html}
                       className="stage-reveal flex h-8 w-8 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
                     >
                       <Square size={13} fill="currentColor" />
+                    </button>
+                  )}
+
+                  {/* Re-run-in-CURRENT-mode icon button. Sits next to
+                      the mode-switch button so users who tweaked Settings
+                      after a search (paper count, sources, year range)
+                      can re-fire without going through Start over.
+                      Icon-only on purpose — the action bar already
+                      carries Settings + the mode-switch label, and a
+                      third worded button makes it noisy. Same gating
+                      as the mode-switch button (post-search, not mid-
+                      flight). */}
+                  {introStage === "full" && hasRunSearch && !isSubmitting && (
+                    <button
+                      onClick={() => { void handleSearch(); }}
+                      {...helpProps("re-run with current settings")}
+                      title="Re-run with current settings"
+                      aria-label="Re-run with current settings"
+                      className="stage-reveal flex h-7 w-7 items-center justify-center rounded-xl border transition-colors hover:brightness-110"
+                      style={{
+                        borderColor:     "var(--ats-border-subtle)",
+                        backgroundColor: "var(--ats-bg-panel)",
+                        color:           "var(--ats-fg-muted)",
+                      }}
+                    >
+                      <RefreshCw size={12} className="shrink-0" />
                     </button>
                   )}
 
