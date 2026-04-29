@@ -44,7 +44,7 @@ import {
   BarChart as BarChartIcon, Users, Activity, MessageSquare, Zap,
   DollarSign, RefreshCw, ArrowLeft, Sparkles,
   FileText, Clock, Database, LogOut,
-  Plus, Trash2, Check, X, Megaphone, Inbox,
+  Plus, Trash2, Check, X, Megaphone, Inbox, EyeOff,
 } from "lucide-react";
 
 // ── Must stay in sync with the same list in src/app/page.tsx ────────────────
@@ -707,6 +707,46 @@ export default function AdminPage() {
     try { window.localStorage.setItem("ats-admin-top-queries-window", topQueriesWindow); } catch { /* ignore */ }
   }, [topQueriesWindow]);
 
+  // ── Per-user analytics filter ─────────────────────────────────────────
+  // Frontend-only filter that hides specific accounts (and optionally ALL
+  // tier="dev" accounts) from the per-user panels: All-users table, Top
+  // users by cost, Activity feed, Cost alerts, Feedback inbox. The
+  // aggregate cards (KPIs / time-series / conversion funnel) intentionally
+  // stay UNFILTERED — those numbers are pre-aggregated server-side and
+  // would need a backend query parameter to slice by user. We surface a
+  // small caption on the toolbar so operators know the limitation.
+  //
+  // Why not just exclude dev accounts globally? Sometimes the admin DOES
+  // want to see dev traffic (e.g., verifying a smoke test went through).
+  // A toggle keeps the choice runtime-controllable without redeploys, and
+  // the explicit chip-list lets ops hide individual non-dev accounts
+  // (test recruiters, abuse cases, etc.) without polluting analytics.
+  const [hideDevs, setHideDevs] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try { return window.localStorage.getItem("ats-admin-hide-devs") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-hide-devs", hideDevs ? "1" : "0"); } catch { /* ignore */ }
+  }, [hideDevs]);
+
+  // extraHidden: Set of user_ids the admin has manually opted to hide.
+  // Persisted as a JSON array. Adding by email looks up the user_id via
+  // userEmailToId below (we always store user_id internally so the chip
+  // survives email changes).
+  const [extraHidden, setExtraHidden] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.localStorage.getItem("ats-admin-extra-hidden");
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch { /* ignore */ }
+    return new Set();
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-extra-hidden", JSON.stringify([...extraHidden])); } catch { /* ignore */ }
+  }, [extraHidden]);
+
   const fetchTopUsers = useCallback(async (): Promise<{ users: TopUserRow[] }> => {
     const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-users?window=${topUsersWindow}&limit=10`));
     if (!res.ok) throw new Error(`top-users HTTP ${res.status}`);
@@ -1081,13 +1121,85 @@ export default function AdminPage() {
   // activity) so dropping it doesn't lose meaningful signal.
   const _nyTodayKey = _NY_DATE_FMT.format(new Date());  // "YYYY-MM-DD" in NY
   const ts = (timeseries.data?.data ?? []).filter(p => p.day <= _nyTodayKey);
-  const rawUserList = users.data?.users ?? [];
+  // Memoised so the userIdToTier / userEmailToId / userList useMemos
+  // below don't see a fresh `[]` reference on every render and re-run
+  // unnecessarily.
+  const rawUserList = useMemo(() => users.data?.users ?? [], [users.data]);
   const annList  = announcements.data?.announcements ?? [];
+
+  // ── Filter lookup maps ───────────────────────────────────────────────
+  // user_id → tier so we can decide "is this person a dev" for panels
+  // whose row type doesn't carry tier (Activity feed). email → user_id so
+  // the toolbar can accept a typed-in email and resolve it to a stable
+  // user_id (which is what we actually persist), and so the Feedback
+  // inbox (which only carries email) can be filtered.
+  const userIdToTier = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const u of rawUserList) m.set(u.id, u.tier);
+    return m;
+  }, [rawUserList]);
+  const userEmailToId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const u of rawUserList) if (u.email) m.set(u.email.toLowerCase(), u.id);
+    return m;
+  }, [rawUserList]);
+
+  // Two predicates (one keyed by user_id, one by email) — every panel
+  // calls the one that matches its row shape. Both honour the global
+  // `hideDevs` toggle + the explicit `extraHidden` set.
+  const isUserIdHidden = useCallback((userId: string | null | undefined, tier?: string | null): boolean => {
+    if (!userId) return false;
+    if (extraHidden.has(userId)) return true;
+    const t = tier ?? userIdToTier.get(userId);
+    if (hideDevs && t === "dev") return true;
+    return false;
+  }, [extraHidden, hideDevs, userIdToTier]);
+  const isEmailHidden = useCallback((email: string | null | undefined): boolean => {
+    if (!email) return false;
+    const uid = userEmailToId.get(email.toLowerCase());
+    if (!uid) return false;
+    return isUserIdHidden(uid);
+  }, [userEmailToId, isUserIdHidden]);
+
+  // Add by typed input (UUID or email). Email path resolves to user_id so
+  // we always persist a stable id. Returns null on success, error string
+  // on failure (caller surfaces it inline, not via alert()).
+  const addExtraHidden = useCallback((rawInput: string): string | null => {
+    const v = (rawInput || "").trim().toLowerCase();
+    if (!v) return "Enter a UUID or email";
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+    let userId = v;
+    if (v.includes("@")) {
+      const found = userEmailToId.get(v);
+      if (!found) return `No signed-in user with email "${v}" — they may not have logged in yet`;
+      userId = found;
+    } else if (!isUuid) {
+      return "Not a valid UUID or email";
+    }
+    setExtraHidden(prev => {
+      if (prev.has(userId)) return prev;
+      const next = new Set(prev);
+      next.add(userId);
+      return next;
+    });
+    return null;
+  }, [userEmailToId]);
+  const removeExtraHidden = useCallback((uid: string) => {
+    setExtraHidden(prev => {
+      if (!prev.has(uid)) return prev;
+      const next = new Set(prev);
+      next.delete(uid);
+      return next;
+    });
+  }, []);
+
   // Sorted view of the user list — defaults to the server-provided order
   // (most-recent activity desc) so the panel keeps its existing behaviour
   // until an admin picks a different sort. Adding alphabetical email is
   // the explicit ask; the other keys piggy-back on the same dropdown so
   // an admin can also slice by the columns they actually read.
+  // Filtered AFTER sorting so the visible roster matches the toolbar
+  // (rather than silently shrinking the count below).
   const userList = useMemo(() => {
     const arr = rawUserList.slice();
     const cmpStr  = (a: string | null | undefined, b: string | null | undefined) =>
@@ -1109,8 +1221,8 @@ export default function AdminPage() {
       case "active":
       default:         arr.sort((a, b) => cmpDate(a.last_active_at, b.last_active_at)); break;
     }
-    return arr;
-  }, [rawUserList, userSort]);
+    return arr.filter(u => !isUserIdHidden(u.id, u.tier));
+  }, [rawUserList, userSort, isUserIdHidden]);
 
   // ── Gate screens ────────────────────────────────────────────────────────
   // All three gate screens inherit the day-mint theme wrapper below so
@@ -1269,6 +1381,24 @@ export default function AdminPage() {
           state={maintenance.data}
           onApply={setMaintenance}
           onEndNow={endMaintenanceNow}
+        />
+
+        {/* ── Per-user analytics filter ─────────────────────────────────
+             Hides specific accounts from the per-user panels (All users
+             table, Top users by cost, Activity feed, Cost alerts,
+             Feedback inbox). Aggregate cards (KPIs / time-series /
+             funnel) intentionally stay UNFILTERED — those are
+             pre-aggregated server-side and would need a backend
+             query parameter to slice. The caption on the right makes
+             that limitation explicit so operators don't expect
+             filtered KPIs. */}
+        <AnalyticsFilterToolbar
+          hideDevs={hideDevs}
+          onToggleHideDevs={setHideDevs}
+          extraHidden={extraHidden}
+          rawUserList={rawUserList}
+          onAdd={addExtraHidden}
+          onRemove={removeExtraHidden}
         />
 
         {/* ── KPI hero ──────────────────────────────────────────────── */}
@@ -1528,7 +1658,7 @@ export default function AdminPage() {
                 <RefreshCw size={10} /> Refresh
               </button>
             </div>
-            <CostAlertsPanel alerts={costAlerts.data?.alerts ?? []} />
+            <CostAlertsPanel alerts={(costAlerts.data?.alerts ?? []).filter(a => !isUserIdHidden(a.user_id, a.tier))} />
           </div>
 
           <div className="rounded-2xl border p-4" style={panelStyle}>
@@ -1649,7 +1779,7 @@ export default function AdminPage() {
             </div>
             {isPanelOpen("top-users") && (
             <TopUsersPanel
-              rows={topUsers.data?.users ?? []}
+              rows={(topUsers.data?.users ?? []).filter(u => !isUserIdHidden(u.user_id, u.tier))}
               onOpenDrawer={(row) => {
                 // Find the matching AdminUser (they share user_id). Fall
                 // back to a minimal synthesized row if the user list
@@ -1735,7 +1865,7 @@ export default function AdminPage() {
             // header above lets the user collapse the panel when it
             // gets long, which is the right control for "I don't want
             // to scroll past 50 rows of activity right now".
-            <ActivityFeed rows={activity.data?.activity ?? []} />
+            <ActivityFeed rows={(activity.data?.activity ?? []).filter(a => !isUserIdHidden(a.user_id))} />
           )}
         </section>
 
@@ -1858,7 +1988,7 @@ export default function AdminPage() {
           </div>
           {isPanelOpen("feedback") && (
             <div className="max-h-[520px] overflow-y-auto thin-scrollbar pr-1">
-              <FeedbackInbox rows={feedback.data?.feedback ?? []} onToggle={toggleFeedbackResolved} />
+              <FeedbackInbox rows={(feedback.data?.feedback ?? []).filter(f => !isEmailHidden(f.user_email))} onToggle={toggleFeedbackResolved} />
             </div>
           )}
         </section>
@@ -3430,6 +3560,170 @@ function StatusPill({ enabled }: { enabled: boolean }) {
   );
 }
 
+
+// ── Per-user analytics filter toolbar ──────────────────────────────────────
+// Compact horizontal control rendered above the KPI hero. Three regions:
+//   1. Toggle:    "Hide developer accounts" — filters all tier="dev" rows.
+//   2. Chip list: currently-hidden accounts (with × to remove). Each chip
+//                 shows the matched email if known, else a short UUID
+//                 prefix so the admin can tell at a glance who's hidden.
+//   3. Add input: paste a UUID OR an email + Enter. The input field
+//                 surfaces inline error text below itself for invalid
+//                 input or unknown emails (rather than alert()-ing).
+//
+// The right-aligned caption is deliberate: the filter ONLY hides per-user
+// rows, NOT aggregate KPIs / charts. Operators who don't read the caption
+// would otherwise expect the dollar figures in "Cost today" to drop when
+// they hide their own dev account, then file a bug. The caption also
+// invites the next-step backend query parameter as a known follow-up.
+function AnalyticsFilterToolbar({
+  hideDevs,
+  onToggleHideDevs,
+  extraHidden,
+  rawUserList,
+  onAdd,
+  onRemove,
+}: {
+  hideDevs:           boolean;
+  onToggleHideDevs:   (v: boolean) => void;
+  extraHidden:        Set<string>;
+  rawUserList:        AdminUser[];
+  onAdd:              (input: string) => string | null;  // returns error string or null
+  onRemove:           (uid: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [err,   setErr]   = useState<string>("");
+
+  const submit = () => {
+    const e = onAdd(draft);
+    if (e) {
+      setErr(e);
+      return;
+    }
+    setDraft("");
+    setErr("");
+  };
+
+  // Build a quick "uid → email/short-id" labeller so chips read as
+  // human emails when known. Falls back to the first 8 hex of the UUID
+  // when the user isn't (yet) in rawUserList — e.g., banned users that
+  // the admin hid before the list refreshed, or non-existent UUIDs the
+  // operator pasted speculatively.
+  const labelFor = (uid: string): string => {
+    const u = rawUserList.find(r => r.id === uid);
+    return u?.email ?? `${uid.slice(0, 8)}…`;
+  };
+
+  const chips = [...extraHidden];
+
+  return (
+    <section
+      className="rounded-2xl border px-4 py-3 flex flex-col gap-2"
+      style={panelStyle}
+    >
+      <div className="flex items-center gap-3 flex-wrap text-xs">
+        <span className="inline-flex items-center gap-1.5 font-bold uppercase tracking-wider text-[10px]"
+              style={{ color: "var(--ats-fg-secondary)" }}>
+          <EyeOff size={12} />
+          Per-user filter
+        </span>
+
+        {/* Hide-devs toggle */}
+        <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={hideDevs}
+            onChange={e => onToggleHideDevs(e.target.checked)}
+            className="h-3 w-3 cursor-pointer"
+          />
+          <span style={{ color: "var(--ats-fg-primary)" }}>
+            Hide developer accounts
+          </span>
+          <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+            (tier = dev)
+          </span>
+        </label>
+
+        <span style={{ color: "var(--ats-border-subtle)" }}>·</span>
+
+        {/* Chip list of manually-hidden accounts */}
+        {chips.length === 0 ? (
+          <span className="text-[10px] italic" style={{ color: "var(--ats-fg-muted)" }}>
+            No additional accounts hidden
+          </span>
+        ) : (
+          <div className="inline-flex items-center gap-1 flex-wrap">
+            {chips.map(uid => (
+              <span
+                key={uid}
+                className="inline-flex items-center gap-1 rounded-full border pl-2 pr-1 py-0.5 text-[10px]"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  color:           "var(--ats-fg-secondary)",
+                }}
+                title={uid}
+              >
+                <span className="font-mono">{labelFor(uid)}</span>
+                <button
+                  onClick={() => onRemove(uid)}
+                  className="rounded-full p-0.5 hover:bg-[var(--ats-bg-accent-soft)] transition-colors"
+                  title="Stop hiding this account"
+                  aria-label="Remove from hidden list"
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Spacer + caption pinned right */}
+        <span className="ml-auto text-[10px] max-w-[320px] text-right"
+              style={{ color: "var(--ats-fg-muted)" }}
+              title="KPIs and charts use server-aggregated data; filtering them would need a backend query parameter (TODO).">
+          Filters apply to per-user panels only — KPI cards / charts include all activity.
+        </span>
+      </div>
+
+      {/* Input row — kept on its own line so the chip list above wraps
+          cleanly without colliding with the typing field. Submits on
+          Enter or on the + button. */}
+      <div className="flex items-center gap-2 text-xs">
+        <input
+          value={draft}
+          onChange={e => { setDraft(e.target.value); if (err) setErr(""); }}
+          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
+          placeholder="Hide a specific account — paste UUID or type email + Enter"
+          className="flex-1 max-w-[480px] rounded-md border px-2.5 py-1 font-mono text-[11px] outline-none focus:ring-1"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-primary)",
+          }}
+        />
+        <button
+          onClick={submit}
+          disabled={!draft.trim()}
+          className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] disabled:opacity-50 transition-colors"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-secondary)",
+          }}
+        >
+          <Plus size={11} />
+          Hide
+        </button>
+        {err && (
+          <span className="text-[10px] text-red-600 dark:text-red-400" role="alert">
+            {err}
+          </span>
+        )}
+      </div>
+    </section>
+  );
+}
 
 // ── Admin login screen ────────────────────────────────────────────────────
 // Gates /admin behind its own email+password prompt against the isolated
