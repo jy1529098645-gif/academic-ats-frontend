@@ -101,7 +101,7 @@ type UsageWindow = {
 
 type Overview = {
   server_time: string;
-  users: { total: number; by_tier: Record<string, number> };
+  users: { total: number; by_tier: Record<string, number>; anonymous?: number };
   conversations: number;
   history_entries: number;
   today: UsageWindow;
@@ -125,6 +125,10 @@ type TimeSeriesPoint = {
 type AdminUser = {
   id: string;
   email: string | null;
+  // Server-side flag: true when email is NULL on the profile row (Supabase
+  // anonymous-auth user). The UI uses this to render a Session ID instead
+  // of the empty email cell, and to honour the global Hide-anonymous toggle.
+  is_anonymous?: boolean;
   tier: "free" | "basic" | "scholar" | "dev" | string;
   tier_updated_at: string | null;
   profile_updated: string | null;
@@ -730,6 +734,20 @@ export default function AdminPage() {
     try { window.localStorage.setItem("ats-admin-hide-devs", hideDevs ? "1" : "0"); } catch { /* ignore */ }
   }, [hideDevs]);
 
+  // Hide-anonymous toggle. Mirrors hideDevs: persisted to localStorage and
+  // wired through isUserIdHidden so EVERY user-keyed panel (user table,
+  // top users, activity feed, cost alerts, feedback inbox) drops anon rows
+  // when on. The Signed-in users KPI also subtracts ov.users.anonymous when
+  // this is enabled, so the headline number stays consistent.
+  const [hideAnon, setHideAnon] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try { return window.localStorage.getItem("ats-admin-hide-anon") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-hide-anon", hideAnon ? "1" : "0"); } catch { /* ignore */ }
+  }, [hideAnon]);
+
   // extraHidden: Set of user_ids the admin has manually opted to hide.
   // Persisted as a JSON array. Adding by email looks up the user_id via
   // userEmailToId below (we always store user_id internally so the chip
@@ -1143,17 +1161,26 @@ export default function AdminPage() {
     for (const u of rawUserList) if (u.email) m.set(u.email.toLowerCase(), u.id);
     return m;
   }, [rawUserList]);
+  // Anonymous user_id set — derived from server-tagged is_anonymous so panels
+  // whose row shape only carries user_id (top users, activity feed, cost
+  // alerts) can also drop anon rows when the global toggle is on.
+  const userIdAnonymous = useMemo(() => {
+    const s = new Set<string>();
+    for (const u of rawUserList) if (u.is_anonymous) s.add(u.id);
+    return s;
+  }, [rawUserList]);
 
   // Two predicates (one keyed by user_id, one by email) — every panel
   // calls the one that matches its row shape. Both honour the global
-  // `hideDevs` toggle + the explicit `extraHidden` set.
+  // `hideDevs` / `hideAnon` toggles + the explicit `extraHidden` set.
   const isUserIdHidden = useCallback((userId: string | null | undefined, tier?: string | null): boolean => {
     if (!userId) return false;
     if (extraHidden.has(userId)) return true;
     const t = tier ?? userIdToTier.get(userId);
     if (hideDevs && t === "dev") return true;
+    if (hideAnon && userIdAnonymous.has(userId)) return true;
     return false;
-  }, [extraHidden, hideDevs, userIdToTier]);
+  }, [extraHidden, hideDevs, hideAnon, userIdToTier, userIdAnonymous]);
   const isEmailHidden = useCallback((email: string | null | undefined): boolean => {
     if (!email) return false;
     const uid = userEmailToId.get(email.toLowerCase());
@@ -1395,6 +1422,9 @@ export default function AdminPage() {
         <AnalyticsFilterToolbar
           hideDevs={hideDevs}
           onToggleHideDevs={setHideDevs}
+          hideAnon={hideAnon}
+          onToggleHideAnon={setHideAnon}
+          anonCount={ov?.users.anonymous ?? 0}
           extraHidden={extraHidden}
           rawUserList={rawUserList}
           onAdd={addExtraHidden}
@@ -1446,13 +1476,30 @@ export default function AdminPage() {
                     authenticated-user roster, not the visitor roster.
                     Renamed 2026-04-28 because the prior "Total users"
                     label silently undercounted public-beta traffic. */}
-                <KpiCard
-                  icon={<Users size={14} />}
-                  label="Signed-in users"
-                  value={ov?.users.total ?? "—"}
-                  sublabel={`${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar`}
-                  color="#3b82f6"
-                />
+                {/* When Hide-anonymous is on we subtract the anon cohort from
+                    BOTH the headline number and the sublabel breakdown so the
+                    KPI matches what's visible in the user table below.
+                    `users.anonymous` is server-counted (profiles with email
+                    NULL) and is also excluded from `by_tier` adjustments
+                    because anon rows are bucketed under their stored tier
+                    (usually "free") server-side. */}
+                {(() => {
+                  const total = ov?.users.total ?? null;
+                  const anon  = ov?.users.anonymous ?? 0;
+                  const shown = total === null ? null : (hideAnon ? Math.max(0, total - anon) : total);
+                  const sub = hideAnon
+                    ? `${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar · −${anon} anon hidden`
+                    : `${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar · ${anon} anon`;
+                  return (
+                    <KpiCard
+                      icon={<Users size={14} />}
+                      label="Signed-in users"
+                      value={shown ?? "—"}
+                      sublabel={sub}
+                      color="#3b82f6"
+                    />
+                  );
+                })()}
                 {/* Active users in window — counts DISTINCT user_id from
                     user_usage_daily, which DOES include anon:{ip}
                     buckets. So the numerator (active_users) and the
@@ -1709,11 +1756,11 @@ export default function AdminPage() {
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
-                  Conversion funnel (last {tsDays} days)
+                  Feature adoption (last {tsDays} days)
                 </h3>
                 <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                  Cohort = users who signed up in this window. Shows drop-off from signup to active use to feedback.
-                  Retargets with the chart&apos;s time-range toggle.
+                  Of authenticated users active in this window, what fraction reaches each feature?
+                  Anonymous users excluded. Retargets with the chart&apos;s time-range toggle.
                 </p>
               </div>
               <button onClick={() => funnel.refresh()} className="text-[10px] inline-flex items-center gap-1" style={{ color: "var(--ats-fg-muted)" }}>
@@ -3141,11 +3188,12 @@ function SourceStatsPanel({ rows }: { rows: SourceStatRow[] }) {
 }
 
 
-// ── Conversion funnel panel ────────────────────────────────────────────────
+// ── Feature-adoption funnel panel ──────────────────────────────────────────
 // Funnel visualisation: horizontal bars, each sized relative to Stage 1
-// (signed_up). Percentage shown is absolute (relative to signed_up), not
-// step-to-step — the "what fraction of signups actually used it" framing
-// is the one that matters most for alpha retention.
+// (active users). Percentage shown is relative to the active base, so
+// "60%" reads as "60% of users who took any action this period reached
+// this feature". Excludes anonymous users so the cohort matches the
+// authenticated KPIs above.
 
 function ConversionFunnelPanel({ data }: { data: FunnelResponse | null }) {
   if (!data) {
@@ -3163,22 +3211,22 @@ function ConversionFunnelPanel({ data }: { data: FunnelResponse | null }) {
     );
   }
   const stages = data.stages || [];
-  // Schema-drift warning (e.g. profiles.first_seen_at missing) — render
-  // inline above the bars so the operator sees why their cohort numbers
-  // might be inflated, with the exact migration SQL nudged for clarity.
+  // Server warnings still render inline (kept generic so future schema
+  // drifts can reuse this slot without code changes).
   const warning = data.warning;
   if (stages.length === 0 || stages[0].count === 0) {
     return (
       <div className="text-xs italic py-6 text-center" style={{ color: "var(--ats-fg-muted)" }}>
-        No signups in the last {data.window_days} days.
+        No authenticated activity in the last {data.window_days} days.
       </div>
     );
   }
   const top = stages[0].count;
   const stageColor = (idx: number) => {
-    // Ladder green → blue → purple → pink so the visual "funnel"
-    // shape is obvious even if percentages look similar.
-    return ["#10b981", "#3b82f6", "#8b5cf6", "#ec4899"][idx % 4];
+    // 6-step ladder so each stage gets a distinct hue. Order intentionally
+    // walks the rainbow so the leftmost (broadest) stage is the warmest
+    // green and rare features (deep_read, feedback) sit at the cooler end.
+    return ["#10b981", "#22d3ee", "#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b"][idx % 6];
   };
   return (
     <div className="space-y-2">
@@ -3579,6 +3627,9 @@ function StatusPill({ enabled }: { enabled: boolean }) {
 function AnalyticsFilterToolbar({
   hideDevs,
   onToggleHideDevs,
+  hideAnon,
+  onToggleHideAnon,
+  anonCount,
   extraHidden,
   rawUserList,
   onAdd,
@@ -3586,6 +3637,9 @@ function AnalyticsFilterToolbar({
 }: {
   hideDevs:           boolean;
   onToggleHideDevs:   (v: boolean) => void;
+  hideAnon:           boolean;
+  onToggleHideAnon:   (v: boolean) => void;
+  anonCount:          number;
   extraHidden:        Set<string>;
   rawUserList:        AdminUser[];
   onAdd:              (input: string) => string | null;  // returns error string or null
@@ -3641,6 +3695,27 @@ function AnalyticsFilterToolbar({
           </span>
           <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
             (tier = dev)
+          </span>
+        </label>
+
+        <span style={{ color: "var(--ats-border-subtle)" }}>·</span>
+
+        {/* Hide-anonymous toggle. Same plumbing as hide-devs: filters every
+            per-user panel AND drops the anon cohort from the Signed-in users
+            KPI. The chip count after the label is the server-reported anon
+            cohort size so the operator knows what's being subtracted. */}
+        <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={hideAnon}
+            onChange={e => onToggleHideAnon(e.target.checked)}
+            className="h-3 w-3 cursor-pointer"
+          />
+          <span style={{ color: "var(--ats-fg-primary)" }}>
+            Hide anonymous users
+          </span>
+          <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+            (email = ∅, {anonCount} now)
           </span>
         </label>
 
@@ -4306,8 +4381,14 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
                   backgroundColor: u.is_banned ? "rgba(239, 68, 68, 0.04)" : undefined,
                 }}
               >
-                <td className="py-1.5 pr-3 truncate max-w-[220px]" title={u.email ?? ""}>
-                  {u.email ?? <span className="italic" style={{ color: "var(--ats-fg-muted)" }}>(no email)</span>}
+                <td className="py-1.5 pr-3 truncate max-w-[220px]" title={u.email ?? (u.is_anonymous ? `Session ${u.id}` : "")}>
+                  {u.email
+                    ? u.email
+                    : u.is_anonymous
+                      ? <span className="font-mono text-[11px]" style={{ color: "var(--ats-fg-secondary)" }}>
+                          Session: {u.id.slice(0, 8)}…{u.id.slice(-4)}
+                        </span>
+                      : <span className="italic" style={{ color: "var(--ats-fg-muted)" }}>(no email)</span>}
                 </td>
                 <td className="py-1.5 pr-3">
                   <span
