@@ -1843,37 +1843,33 @@ function DesktopWorkspace() {
   // two cases apart since both surface as null → user transitions.
 
   // ── Tour-lifecycle effect ────────────────────────────────────────────────
-  // The onboarding tour highlights real DOM regions, but several of
-  // those regions (like the right panel) are collapsed by default on
-  // the landing page — so the spotlight would land on a 36-px sliver
-  // and miss the point. This effect watches `welcomeOpen` and:
-  //   1. On open: snapshots the current panel state, then forces the
-  //      right panel expanded so step 4 ("Draft & Review live here")
-  //      actually shows the panel users will use.
-  //   2. On close (any path: Skip, Got it, Esc, backdrop click): puts
-  //      the panel back to whatever the user had before. The snapshot
-  //      lives in a ref so a tour re-open later (from the Help menu)
-  //      starts fresh. Pre-search landing always has the right panel
-  //      collapsed; if the user re-opens the tour later they may
-  //      already have it expanded → we still capture+restore exactly.
+  // Snapshots all page state the tour mutates (right-panel visibility,
+  // user-menu, demo query, button step) on open and restores on close,
+  // so the tour leaves zero trace regardless of exit path (Skip / Got
+  // it / Esc / backdrop). Each step's onEnter is the source of truth
+  // for what the page should look like during that step — including
+  // expanding the right panel for "Draft & Review live here" so the
+  // spotlight lands on the actual Lab surface rather than the
+  // collapsed 36-px sliver.
   const tourSnapshotRef = useRef<{
-    userMenuOpen: boolean;
-    query:        string;
-    buttonStep:   0 | 1 | 2;
+    userMenuOpen:     boolean;
+    leftVisible:      boolean;
+    analyticsVisible: boolean;
+    leftPct:          number;
+    centerPct:        number;
+    query:            string;
+    buttonStep:       0 | 1 | 2;
   } | null>(null);
   useEffect(() => {
     if (welcomeOpen) {
       // Capture once per open (don't overwrite if effect re-runs).
-      // We deliberately do NOT force-expand the right panel any
-      // more — the spotlight follows the actual rendered rect of
-      // each region (whatever it is on the user's current device
-      // / layout / collapsed-state). Forcing expansion was making
-      // the panel overflow off-screen on smaller viewports because
-      // the workspace grid uses pixel tracks computed off body
-      // width, not viewport width. Per user spec: "高亮的区域就
-      // 直接按照这个区域当前显示的大小绘制不就行了".
+      // Snapshots both panel toggles + column splits — the
+      // left-panel and right-panel steps each force their panel
+      // open and re-balance columns; without restoring we'd leave
+      // the user with rebalanced columns / forced-open panels
+      // after the tour ends.
       if (tourSnapshotRef.current === null) {
-        tourSnapshotRef.current = { userMenuOpen, query, buttonStep };
+        tourSnapshotRef.current = { userMenuOpen, leftVisible, analyticsVisible, leftPct, centerPct, query, buttonStep };
       }
     } else if (tourSnapshotRef.current !== null) {
       // Restore demo state on close (any path: Skip / Got it / Esc).
@@ -1881,6 +1877,18 @@ function DesktopWorkspace() {
       tourSnapshotRef.current = null;
       if (userMenuOpen !== snap.userMenuOpen) {
         setUserMenuOpen(snap.userMenuOpen);
+      }
+      if (leftVisible !== snap.leftVisible) {
+        setLeftVisible(snap.leftVisible);
+      }
+      if (analyticsVisible !== snap.analyticsVisible) {
+        setAnalyticsVisible(snap.analyticsVisible);
+      }
+      if (leftPct !== snap.leftPct) {
+        setLeftPct(snap.leftPct);
+      }
+      if (centerPct !== snap.centerPct) {
+        setCenterPct(snap.centerPct);
       }
       // Restore the user's typed query + buttonStep, so the demo
       // placeholder injected for the Quick/Curated step is wiped.
@@ -4351,16 +4359,22 @@ ${html}
           setWelcomeOpen(false);
         }}
         steps={[
+          // Each step's onEnter is fully declarative about page state:
+          // it explicitly sets every state var the tour mutates
+          // (userMenuOpen, leftVisible, analyticsVisible, leftPct,
+          // centerPct, query, buttonStep) so back-and-forth navigation
+          // always lands on the same visual state, regardless of which
+          // step the user came from. The parent's snapshot/restore
+          // handles original pre-tour state; per-step onEnter handles
+          // in-tour state.
           {
             id:    "welcome",
             title: "Welcome to AcademiCats",
-            body:  "I'll walk you through the workspace in 5 steps. Press → / Enter to advance, ← to go back, Esc to skip.",
-            // Each step's onEnter explicitly resets the demo-state
-            // it doesn't want, so navigating with the back arrow
-            // restores prior steps cleanly. Welcome card is centred,
-            // so we just clear any lingering demo:
+            body:  "I'll walk you through the workspace. Press → / Enter to advance, ← to go back, Esc to skip.",
             onEnter: () => {
               setUserMenuOpen(false);
+              setLeftVisible(false);
+              setAnalyticsVisible(false);
               setQuery("");
               setButtonStep(0);
             },
@@ -4373,89 +4387,147 @@ ${html}
             placement: "auto",
             onEnter:   () => {
               setUserMenuOpen(false);
+              setLeftVisible(false);
+              setAnalyticsVisible(false);
               setQuery("");
               setButtonStep(0);
             },
           },
           {
-            // Replaced the previous "recommended-chips" step with a
-            // Quick/Curated demo per user spec ("第二步显示两个检索按钮").
-            // The Quick/Curated buttons inside Sprite are gated on
+            // Quick/Curated buttons inside Sprite are gated on
             // `!hasRunSearch && trimmedQuery.length > 0 && buttonStep >= 1`
-            // (Sprite.tsx:105). We satisfy those conditions during
-            // this step by injecting a placeholder query + bumping
-            // buttonStep, then revert in every other step's onEnter
-            // (and on tour close via the snapshot) so the buttons
-            // are visible ONLY on this step.
+            // (Sprite.tsx:105). Satisfy those conditions for this
+            // step by injecting a placeholder query + bumping
+            // buttonStep; the snapshot restores the user's real
+            // query on close.
             id:        "search-mode",
             target:    "search-mode",
             title:     "Pick Quick or Curated",
-            body:      "Quick (~30 s) — fast scan across sources for a first look. Curated (~2 min) — deeper analysis with multi-agent screening, costs more quota.",
+            body:      "Quick (~10 s) — fast scan across sources for a first look. Curated (<2 min) — deeper analysis with multi-agent screening, costs more quota.",
             placement: "top",
             onEnter:   () => {
               setUserMenuOpen(false);
-              // Demo placeholder query — the user's real query (if
-              // any) is in the snapshot and gets restored on close.
+              setLeftVisible(false);
+              setAnalyticsVisible(false);
               setQuery("e.g. GPT-4 hallucination evaluation");
               setButtonStep(1);
             },
           },
           {
+            // Force the LEFT panel open + 32/68/0 column split (the
+            // "scholar" layout) so the spotlight lands on a wide
+            // Brief / Charts surface. The Brief and Charts tabs are
+            // the post-search analytics surface — pre-search shows
+            // a placeholder that still reads correctly under the
+            // spotlight. Right panel stays collapsed so this step
+            // is purely about the LEFT side.
+            id:        "left-panel",
+            target:    "left-panel",
+            title:     "Brief & Charts live here",
+            body:      "Once a search finishes, the left panel fills with the Research Brief (synthesised summary) and Charts (citation / topic landscape). Two tabs at the top to switch between them.",
+            placement: "right",
+            onEnter:   () => {
+              setUserMenuOpen(false);
+              setLeftVisible(true);
+              setAnalyticsVisible(false);
+              setLeftPct(32);
+              setCenterPct(68);
+              setQuery("");
+              setButtonStep(0);
+            },
+          },
+          {
+            // Force the right panel open AND re-balance the column
+            // splits to 10/40/50 so the spotlight lands on a
+            // generously-sized Lab surface (not the 14% landing
+            // sliver, not the 20% balanced default — half-width is
+            // what makes the Lab read as the "primary surface" the
+            // copy describes). Left panel collapses here so we
+            // don't have BOTH panels expanded competing.
+            //
+            // The next step (user-menu) explicitly collapses the
+            // right panel back to landing defaults — we don't keep
+            // it expanded for the rest of the tour, otherwise the
+            // feedback / done steps would have a giant Lab panel
+            // hovering behind them and obstructing the spotlight.
             id:        "right-panel",
             target:    "right-panel",
             title:     "Draft & Review live here",
             body:      "Once results arrive, the right panel runs Synthesis Lab (write essays / statements / proposals from selected papers) and Paper Review (multi-agent critique of your own draft).",
             placement: "left",
-            // Revert the Quick/Curated demo from the previous step.
-            // The right panel itself stays expanded for the whole
-            // tour via the lifecycle effect.
             onEnter:   () => {
               setUserMenuOpen(false);
+              setLeftVisible(false);
+              setAnalyticsVisible(true);
+              setLeftPct(10);
+              setCenterPct(40);
               setQuery("");
               setButtonStep(0);
             },
           },
           {
+            // Open the user menu so the spotlight lands on the
+            // dropdown (data-tour="user-menu" is on the open
+            // dropdown, not the avatar button). The RAF rect-poll
+            // in OnboardingTour picks up the dropdown rect once
+            // React commits the open state.
+            //
+            // Collapse the right panel + reset columns to landing
+            // defaults: pressing Next from "Draft & Review" should
+            // tuck the Lab back away so the user-menu / feedback /
+            // done callouts have a clean dim backdrop, not a
+            // half-screen Lab panel competing for attention.
             id:        "user-menu",
             target:    "user-menu",
             title:     "Profile, history, help",
             body:      "Your usage, saved Lab outputs, and Help (which re-launches this tour) all live behind this avatar.",
             placement: "right",
-            // Open the user menu so the spotlight lands on the
-            // actual dropdown panel (data-tour="user-menu" is on
-            // the open dropdown, not the avatar button) instead
-            // of pointing at a closed circle. The double-RAF tick
-            // bump in OnboardingTour ensures the spotlight rect
-            // is recomputed AFTER the dropdown renders.
             onEnter:   () => {
+              setUserMenuOpen(true);
+              setLeftVisible(false);
+              setAnalyticsVisible(false);
+              setLeftPct(14.3);
+              setCenterPct(71.4);
               setQuery("");
               setButtonStep(0);
-              setUserMenuOpen(true);
             },
           },
           {
+            // Both panels collapsed here — the feedback button is
+            // in the bottom-right corner and the spotlight should
+            // highlight only that bubble, not be visually crowded
+            // by either panel still being expanded alongside it.
             id:        "feedback-button",
             target:    "feedback-button",
             title:     "Send us feedback",
             body:      "Hit the bubble at the bottom-right any time to report a bug, suggest a feature, or send a quick note. We read everything.",
             placement: "left",
-            // Close the user menu so the floating feedback button
-            // (bottom-right of the screen) is unobstructed; the
-            // spotlight will land on its current rendered position.
             onEnter:   () => {
               setUserMenuOpen(false);
+              setLeftVisible(false);
+              setAnalyticsVisible(false);
+              setLeftPct(14.3);
+              setCenterPct(71.4);
               setQuery("");
               setButtonStep(0);
             },
           },
           {
+            // Centred "you're done" card. No target → no spotlight,
+            // just a dim backdrop (the OnboardingTour clears its
+            // rect on every step transition so the prior step's
+            // blue ring can't leak through here). Collapsing the
+            // panel + menu makes the dim backdrop visually calmer
+            // behind the closing card.
             id:    "done",
             title: "You're set",
             body:  "Anything unclear later? User menu → Help re-launches this tour any time.",
-            // Close the menu before the final card so it doesn't
-            // overlap with the centred Got-it modal.
             onEnter: () => {
               setUserMenuOpen(false);
+              setLeftVisible(false);
+              setAnalyticsVisible(false);
+              setLeftPct(14.3);
+              setCenterPct(71.4);
               setQuery("");
               setButtonStep(0);
             },
@@ -4760,6 +4832,7 @@ ${html}
 
             <section
               data-region="synthesis"
+              data-tour="left-panel"
               className="absolute inset-0 flex flex-col rounded-xl bg-[var(--ats-bg-section)] ats-panel overflow-hidden"
               style={{
                 transform: leftVisible ? "translateX(0)" : "translateX(-105%)",
