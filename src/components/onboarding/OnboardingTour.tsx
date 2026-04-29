@@ -198,90 +198,87 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   // `steps`). We want exactly-once-per-transition semantics.
   const lastFiredRef = useRef<number>(-1);
 
-  // Fade-cycle state. Each step transition runs:
-  //   t=0    : `fading` flips to true → card + spotlight transition opacity to 0
-  //   t=FADE : rect cleared, onEnter fires, `fading` flips back to false →
-  //            card + spotlight transition opacity to 1 against the new state
-  // The spotlight ALSO has CSS transitions on top/left/width/height so any
-  // within-step rect drift (scroll, layout shift) follows smoothly without
-  // the snap-jump that the old "no transition" implementation had.
-  const FADE_MS = 180;
-  const [fading, setFading] = useState(false);
-
   // Reset to step 0 every time the tour re-opens. (Otherwise re-opening
-  // from the Help panel after a Skip would resume mid-tour.)
+  // from the Help panel after a Skip would resume mid-tour.) We do NOT
+  // wipe rect here — keeping the previous rect across reopens means the
+  // CSS transitions on top/left/width/height can carry the spotlight
+  // smoothly to its first target instead of popping into existence.
   useEffect(() => {
     if (open) {
       setStepIdx(0);
-      setRect(null);
       lastFiredRef.current = -1;
-      // Initial open enters the fade-cycle too so the card fades IN from
-      // opacity 0 rather than popping into existence.
-      setFading(true);
     }
   }, [open]);
 
-  // Latest `steps` array, captured into a ref so the fade-cycle effect
-  // below can read the current step's onEnter without listing `steps`
-  // as a dep (parent re-renders pass a fresh inline `steps={[...]}`
-  // every render — listing it would clear our pending fade timer mid-
-  // cycle and leave the card stuck at opacity 0).
+  // Latest `steps` array, captured into a ref so the onEnter effect
+  // below can read the current step without listing `steps` as a dep
+  // (parent re-renders pass a fresh inline `steps={[...]}` every render).
   const stepsRef = useRef(steps);
   useEffect(() => { stepsRef.current = steps; }, [steps]);
 
-  // Fade-cycle effect — keyed ONLY on real step transitions (`open` and
-  // `stepIdx`). Does NOT depend on `steps` because the parent re-creates
-  // the steps array on every render; including it here would re-fire
-  // cleanup mid-fade and prevent the fade-in setFading(false) from
-  // landing.
+  // onEnter side-effect — fires once per real step transition. Keyed
+  // ONLY on `[open, stepIdx]` so a parent re-render (which swaps the
+  // steps array reference) doesn't re-fire side-effects. We do NOT
+  // wipe rect here either: keeping the previous rect lets the CSS
+  // transitions on top/left/width/height slide the spotlight from the
+  // old target's position to the new one in a single continuous motion
+  // (the user's complaint with the prior fade+slide combo was that the
+  // ring would visually appear at the new location and then expand —
+  // a clean slide reads cleaner).
   useEffect(() => {
     if (!open) return;
-    setFading(true);
-    const t = setTimeout(() => {
-      const step = stepsRef.current[stepIdx];
-      if (step?.onEnter) {
-        try { step.onEnter(); } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("[onboarding] step.onEnter threw:", err);
-        }
+    if (lastFiredRef.current === stepIdx) return;
+    lastFiredRef.current = stepIdx;
+    const step = stepsRef.current[stepIdx];
+    if (step?.onEnter) {
+      try { step.onEnter(); } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[onboarding] step.onEnter threw:", err);
       }
-      lastFiredRef.current = stepIdx;
-      setFading(false);
-    }, FADE_MS);
-    return () => clearTimeout(t);
-  }, [open, stepIdx]);
-
-  // Wipe rect on step transitions so the spotlight starts clean. The
-  // RAF effect below will re-measure once the new step has rendered.
-  // We do NOT clear rect inside the fade timeout because that would
-  // race with the RAF effect's local-prev cache (which would then
-  // refuse to re-set rect because its cached prev still matches the
-  // post-clear DOM rect, leaving state stuck at null forever). Doing
-  // the clear here, in a separate effect that fires on stepIdx change,
-  // means React commits null → RAF cleanup runs → RAF re-arms with
-  // fresh prev=null → next tick re-populates rect.
-  useEffect(() => {
-    if (!open) return;
-    setRect(null);
+    }
   }, [open, stepIdx]);
 
   // RAF rect-tracking effect — keyed on `steps` so a parent re-render
-  // that swaps the inline array reference re-arms the loop with the
-  // fresh closure (the target is read from step.target each tick).
-  // Independent from the fade-cycle effect above so its cleanup can
-  // re-fire freely without disturbing in-flight fades.
+  // that swaps the inline array reference re-arms the loop.
+  //
+  // Stability gate: we only call setRect once the target's rect has
+  // been STABLE for STABLE_FRAMES consecutive frames. If we updated
+  // every frame the rect changed (the prior implementation), each
+  // setRect would re-start the spotlight's CSS transition, so when
+  // the underlying target itself was animating (e.g. right-panel's
+  // 0.9s translateX slide-in) the spotlight chased it with a visible
+  // two-step "first deform, then move" feel. Waiting for stability
+  // means the spotlight performs ONE continuous transition to the
+  // final settled rect — what the user asked for.
+  //
+  // We never setRect(null) when readRect returns null: leaving the
+  // previous rect in place keeps the spotlight at the old target
+  // (or invisible, for centred → targeted) instead of blinking to
+  // an undefined intermediate state.
+  const STABLE_FRAMES = 3; // ~50ms at 60fps — enough to filter mid-animation
   useEffect(() => {
     if (!open) return;
     const step = steps[stepIdx];
     if (!step?.target) return;
 
     let rafId = 0;
-    let prev: Rect | null = null;
+    let stableCandidate: Rect | null = null;
+    let stableCount = 0;
+    let lastCommitted: Rect | null = null;
+
     const tick = () => {
       const next = readRect(step.target);
-      if (!rectsEqual(prev, next)) {
-        prev = next;
-        setRect(next);
+      if (next) {
+        if (stableCandidate && rectsEqual(stableCandidate, next)) {
+          stableCount += 1;
+        } else {
+          stableCandidate = next;
+          stableCount = 1;
+        }
+        if (stableCount >= STABLE_FRAMES && !rectsEqual(lastCommitted, next)) {
+          lastCommitted = next;
+          setRect(next);
+        }
       }
       rafId = requestAnimationFrame(tick);
     };
@@ -400,10 +397,11 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
         // is automatically tied to the rect's geometry.
         // pointer-events-none lets the user click through to the
         // real target underneath (try-as-you-learn).
-        // CSS transitions on top/left/width/height + opacity give
-        // smooth motion when the rect changes mid-step (scroll /
-        // layout shift) AND on step transitions (faded out → new
-        // rect → faded back in).
+        // CSS transitions on top/left/width/height drive a single
+        // continuous slide from the previous step's target to the
+        // current one — no opacity fade so the ring never visually
+        // "appears at the new spot then expands". Mid-step rect
+        // drift (scroll / layout shift) rides the same transitions.
         <div
           className="fixed pointer-events-none rounded-xl"
           style={{
@@ -411,8 +409,7 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
             left:   hole.left,
             width:  hole.width,
             height: hole.height,
-            opacity: fading ? 0 : 1,
-            transition: "top 250ms cubic-bezier(0.4,0,0.2,1), left 250ms cubic-bezier(0.4,0,0.2,1), width 250ms cubic-bezier(0.4,0,0.2,1), height 250ms cubic-bezier(0.4,0,0.2,1), opacity 180ms ease-out",
+            transition: "top 320ms cubic-bezier(0.4,0,0.2,1), left 320ms cubic-bezier(0.4,0,0.2,1), width 320ms cubic-bezier(0.4,0,0.2,1), height 320ms cubic-bezier(0.4,0,0.2,1)",
             boxShadow: [
               "0 0 0 9999px rgba(0, 0, 0, 0.55)",
               "0 0 0 2px var(--ats-fg-accent)",
@@ -425,20 +422,15 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
         // centred welcome / done cards. Plain dim, no spotlight ring.
         // pointer-events:auto re-enabled here (wrapper is none) so
         // the dim layer blocks page interaction during welcome /
-        // done — there's nothing to interact with under those. Opacity
-        // transition keeps the dim consistent with the spotlight fade.
-        <div
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto"
-          style={{ opacity: fading ? 0 : 1, transition: "opacity 180ms ease-out" }}
-        />
+        // done — there's nothing to interact with under those.
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto" />
       )}
 
       {/* Floating card. Uses translate-centring for centred steps and
           absolute top/left for targeted steps. CSS transitions on
-          top/left + opacity smooth out the per-step jump and the
-          per-frame RAF rect chases. The duration is short enough
-          that the lag against fast-moving targets stays imperceptible
-          (≤4 frames at 60fps).
+          top/left smooth out both per-step jumps and per-frame RAF
+          rect chases. The duration matches the spotlight (320ms)
+          so the card and the ring move together as one motion.
           pointer-events:auto re-enabled (wrapper is none) so the
           Back / Next / Skip buttons remain clickable.
           cardRef feeds the post-render height measurement back into
@@ -448,8 +440,7 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
         className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto"
         style={{
           ...cardStyle,
-          opacity: fading ? 0 : 1,
-          transition: "top 250ms cubic-bezier(0.4,0,0.2,1), left 250ms cubic-bezier(0.4,0,0.2,1), opacity 180ms ease-out",
+          transition: "top 320ms cubic-bezier(0.4,0,0.2,1), left 320ms cubic-bezier(0.4,0,0.2,1)",
           borderColor:     "var(--ats-border-subtle)",
           backgroundColor: "var(--ats-bg-panel)",
           color:           "var(--ats-fg-primary)",

@@ -20,15 +20,17 @@
 //   which enforces tier == "dev" OR membership in the email allowlist.
 //
 // Data flow:
-//   - /api/admin/overview            — polled every 10s
-//   - /api/admin/system-health       — polled every 10s
-//   - /api/admin/usage-timeseries    — refreshed every 60s
-//   - /api/admin/users               — refreshed every 60s
-//   - /api/admin/announcements-all   — refreshed every 60s
-//   - /api/admin/db-stats            — refreshed every 60s
-//   - /api/admin/cost-alerts         — refreshed every 60s
+//   - /api/admin/overview            — polled every 30s
+//   - /api/admin/system-health       — polled every 30s
+//   - /api/admin/usage-timeseries    — refreshed every 5min
+//   - /api/admin/users               — refreshed every 5min
+//   - /api/admin/announcements-all   — refreshed every 5min
+//   - /api/admin/db-stats            — refreshed every 5min
+//   - /api/admin/cost-alerts         — refreshed every 5min
 //   - /api/admin/errors              — refreshed every 30s
 //   - /api/admin/feedback            — refreshed every 30s
+// "Live" / "Paused" toggle in the header lets the operator stop ALL
+// polling for a stable snapshot. Manual Refresh always works.
 //
 // Charts are hand-rolled SVG (see `LineChart` / `DonutChart` below) so we
 // don't pull in a chart library for a single-page internal tool.
@@ -77,8 +79,13 @@ async function fetchWithAdminAuth(url: string, options: RequestInit = {}): Promi
   });
 }
 
-const OVERVIEW_POLL_MS = 10_000; // hot KPIs
-const DETAIL_POLL_MS   = 60_000; // time-series / users / announcements
+// Polling intervals — tuned for one-operator alpha. The previous 10s/60s
+// pair generated ~20 req/min just from an idle dashboard tab; at scale
+// (or under a free-tier quota) that's all wasted budget. The "Pause
+// updates" toggle in the toolbar lets the operator drop to zero polling
+// when they need a stable snapshot.
+const OVERVIEW_POLL_MS = 30_000; // hot KPIs (was 10s)
+const DETAIL_POLL_MS   = 300_000; // time-series / users / announcements (was 60s)
 
 // ── API response types ──────────────────────────────────────────────────────
 
@@ -446,7 +453,22 @@ export default function AdminPage() {
   }, []);
 
   const isDev   = authEmail ? DEV_ACCTS.includes(authEmail) : false;
-  const enabled = authChecked && isDev;
+  // "Pause updates" toggle — lets the operator stop ALL polling without
+  // signing out. Useful when reviewing a moment-in-time snapshot (e.g.
+  // taking a screenshot, debugging a state mid-incident) and the next
+  // poll cycle would replace the data they're staring at. Persisted
+  // to localStorage so a refresh during an investigation doesn't
+  // resume polling unexpectedly. Manual Refresh buttons still work
+  // when paused.
+  const [pollPaused, setPollPaused] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try { return window.localStorage.getItem("ats-admin-poll-paused") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-poll-paused", pollPaused ? "1" : "0"); } catch { /* ignore */ }
+  }, [pollPaused]);
+  const enabled = authChecked && isDev && !pollPaused;
 
   // ── Time-range state (must precede fetchers that close over it) ────────
   // Chart time-range selector — persisted so a refresh keeps the operator's
@@ -764,6 +786,62 @@ export default function AdminPage() {
     if (typeof window === "undefined") return;
     try { window.localStorage.setItem("ats-admin-extra-hidden", JSON.stringify([...extraHidden])); } catch { /* ignore */ }
   }, [extraHidden]);
+
+  // ── Anonymous cleanup modal state ─────────────────────────────────────
+  // Two-step: clicking "Clean unused anon" first OPENS the modal and fetches
+  // the candidate list; the operator reviews; then a separate "Delete N
+  // rows" button inside the modal sends the POST. Server re-verifies each
+  // id is still safe to delete (TOCTOU protection) and returns a
+  // {deleted, skipped} summary which we surface inline.
+  type AnonCandidate = { id: string; first_seen_at: string | null };
+  const [anonCleanupOpen, setAnonCleanupOpen]           = useState(false);
+  const [anonCleanupLoading, setAnonCleanupLoading]     = useState(false);
+  const [anonCleanupCandidates, setAnonCleanupCandidates] = useState<AnonCandidate[]>([]);
+  const [anonCleanupDays, setAnonCleanupDays]           = useState(7);
+  const [anonCleanupError, setAnonCleanupError]         = useState<string>("");
+  const [anonCleanupResult, setAnonCleanupResult]       = useState<{ deleted: number; skipped: number } | null>(null);
+
+  const openAnonCleanup = useCallback(async () => {
+    setAnonCleanupOpen(true);
+    setAnonCleanupResult(null);
+    setAnonCleanupError("");
+    setAnonCleanupLoading(true);
+    setAnonCleanupCandidates([]);
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/anonymous-cleanup?older_than_days=${anonCleanupDays}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { candidates: AnonCandidate[] };
+      setAnonCleanupCandidates(data.candidates ?? []);
+    } catch (e) {
+      setAnonCleanupError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAnonCleanupLoading(false);
+    }
+  }, [anonCleanupDays]);
+
+  const confirmAnonCleanup = useCallback(async () => {
+    if (anonCleanupCandidates.length === 0) return;
+    setAnonCleanupLoading(true);
+    setAnonCleanupError("");
+    try {
+      const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/anonymous-cleanup"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_ids: anonCleanupCandidates.map(c => c.id) }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { deleted: string[]; skipped: string[] };
+      setAnonCleanupResult({ deleted: data.deleted?.length ?? 0, skipped: data.skipped?.length ?? 0 });
+      setAnonCleanupCandidates([]);
+      // Pull a fresh user list so the table reflects the deletions immediately.
+      try { users.refresh(); overview.refresh(); } catch { /* refresh is best-effort */ }
+    } catch (e) {
+      setAnonCleanupError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAnonCleanupLoading(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anonCleanupCandidates]);
 
   const fetchTopUsers = useCallback(async (): Promise<{ users: TopUserRow[] }> => {
     const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/top-users?window=${topUsersWindow}&limit=10`));
@@ -1356,6 +1434,22 @@ export default function AdminPage() {
             <span className="inline-flex items-center gap-1" title="Signed into admin console as">
               <code style={{ color: "var(--ats-fg-primary)" }}>{authEmail}</code>
             </span>
+            <button
+              onClick={() => setPollPaused(p => !p)}
+              className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors"
+              style={{
+                borderColor:     pollPaused ? "rgba(245,158,11,0.55)" : "var(--ats-border-subtle)",
+                backgroundColor: pollPaused ? "rgba(245,158,11,0.10)" : "var(--ats-bg-panel)",
+                color:           pollPaused ? "#f59e0b" : "var(--ats-fg-secondary)",
+              }}
+              title={pollPaused
+                ? "Polling paused — manual Refresh still works. Click to resume."
+                : "Pause all background polling (overview, users, time-series, …). Manual Refresh still works."}
+            >
+              <span className="inline-block h-1.5 w-1.5 rounded-full"
+                    style={{ backgroundColor: pollPaused ? "#f59e0b" : "#10b981" }} />
+              {pollPaused ? "Paused" : "Live"}
+            </button>
             <button
               onClick={refreshAll}
               className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors"
@@ -1953,6 +2047,14 @@ export default function AdminPage() {
                 <option value="first_old">First seen (oldest)</option>
               </select>
               <button
+                onClick={openAnonCleanup}
+                title="List anonymous profiles older than N days with zero activity, then optionally delete them"
+                className="text-[10px] inline-flex items-center gap-1 transition-colors hover:text-rose-400"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <Trash2 size={10} /> Clean unused anon
+              </button>
+              <button
                 onClick={() => users.refresh()}
                 className="text-[10px] inline-flex items-center gap-1 transition-colors"
                 style={{ color: "var(--ats-fg-muted)" }}
@@ -2218,6 +2320,150 @@ export default function AdminPage() {
             onNotify={notifyUser}
             onFetchActivity={fetchUserActivity}
           />
+        )}
+
+        {/* ── Anonymous cleanup modal ──────────────────────────────────────
+             Two-step destructive action: list candidates first, operator
+             reviews, then explicit "Delete N rows" button. Server re-
+             verifies each id (anon + zero activity) on the POST so an
+             anon user who logged a search between list and confirm is
+             skipped, not deleted. */}
+        {anonCleanupOpen && (
+          <div
+            className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm"
+            onClick={() => !anonCleanupLoading && setAnonCleanupOpen(false)}
+          >
+            <div
+              className="w-full max-w-2xl rounded-2xl border shadow-2xl flex flex-col max-h-[80vh]"
+              style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "var(--ats-bg-panel)" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start gap-3 px-6 pt-5 pb-3 border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-lg font-bold" style={{ color: "var(--ats-fg-primary)" }}>
+                    Clean unused anonymous profiles
+                  </h2>
+                  <p className="mt-1 text-xs" style={{ color: "var(--ats-fg-secondary)" }}>
+                    Lists anonymous accounts (email = ∅) older than the threshold with{" "}
+                    <span className="font-semibold">zero history + zero usage</span>. Review the list,
+                    then delete in one click. The server re-verifies every id at delete time so a row
+                    that just gained activity is skipped automatically.
+                  </p>
+                </div>
+                <button
+                  onClick={() => !anonCleanupLoading && setAnonCleanupOpen(false)}
+                  className="p-1 rounded hover:bg-black/5 shrink-0"
+                  aria-label="Close"
+                  style={{ color: "var(--ats-fg-muted)" }}
+                  disabled={anonCleanupLoading}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="px-6 py-3 flex items-center gap-3 text-xs border-b" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                <label className="inline-flex items-center gap-2" style={{ color: "var(--ats-fg-secondary)" }}>
+                  Older than
+                  <input
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={anonCleanupDays}
+                    onChange={(e) => setAnonCleanupDays(Math.max(1, Math.min(365, Number(e.target.value) || 7)))}
+                    className="w-16 rounded border px-2 py-0.5 text-xs"
+                    style={{
+                      borderColor:     "var(--ats-border-subtle)",
+                      backgroundColor: "var(--ats-bg-base)",
+                      color:           "var(--ats-fg-primary)",
+                    }}
+                  />
+                  days
+                </label>
+                <button
+                  onClick={openAnonCleanup}
+                  disabled={anonCleanupLoading}
+                  className="text-[10px] inline-flex items-center gap-1 px-2 py-1 rounded border transition-colors disabled:opacity-50"
+                  style={{
+                    borderColor:     "var(--ats-border-subtle)",
+                    color:           "var(--ats-fg-secondary)",
+                  }}
+                >
+                  <RefreshCw size={10} /> Re-list
+                </button>
+                <span className="ml-auto text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                  {anonCleanupLoading
+                    ? "Working…"
+                    : anonCleanupResult
+                      ? `Deleted ${anonCleanupResult.deleted}, skipped ${anonCleanupResult.skipped}.`
+                      : `${anonCleanupCandidates.length} candidate${anonCleanupCandidates.length === 1 ? "" : "s"}`}
+                </span>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-6 py-3 thin-scrollbar">
+                {anonCleanupError && (
+                  <p className="text-xs rounded-lg border px-3 py-2 mb-2"
+                    style={{ borderColor: "#ef444455", backgroundColor: "#ef44441a", color: "#ef4444" }}>
+                    {anonCleanupError}
+                  </p>
+                )}
+                {anonCleanupResult && (
+                  <p className="text-xs rounded-lg border px-3 py-2 mb-2"
+                    style={{ borderColor: "#10b98155", backgroundColor: "#10b9811a", color: "#10b981" }}>
+                    Deleted {anonCleanupResult.deleted} anonymous profile{anonCleanupResult.deleted === 1 ? "" : "s"}.
+                    {anonCleanupResult.skipped > 0 && ` Skipped ${anonCleanupResult.skipped} (gained activity since list).`}
+                  </p>
+                )}
+                {!anonCleanupLoading && anonCleanupCandidates.length === 0 && !anonCleanupResult && !anonCleanupError && (
+                  <p className="text-xs italic text-center py-6" style={{ color: "var(--ats-fg-muted)" }}>
+                    No candidates — nothing to clean up.
+                  </p>
+                )}
+                {anonCleanupCandidates.length > 0 && (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left font-semibold uppercase tracking-wider text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
+                        <th className="py-1.5 pr-3">Session ID</th>
+                        <th className="py-1.5 pr-3">First seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {anonCleanupCandidates.map(c => (
+                        <tr key={c.id} className="border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                          <td className="py-1.5 pr-3 font-mono" style={{ color: "var(--ats-fg-secondary)" }}>
+                            {c.id.slice(0, 8)}…{c.id.slice(-4)}
+                          </td>
+                          <td className="py-1.5 pr-3 tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
+                            {c.first_seen_at?.slice(0, 10) ?? "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between gap-2 px-6 py-3 border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                <button
+                  onClick={() => setAnonCleanupOpen(false)}
+                  className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: "var(--ats-fg-secondary)" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmAnonCleanup}
+                  disabled={anonCleanupLoading || anonCleanupCandidates.length === 0}
+                  className="text-xs px-4 py-1.5 rounded-lg font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                  style={{
+                    backgroundColor: "#ef4444",
+                    color:           "#ffffff",
+                  }}
+                >
+                  <Trash2 size={12} /> Delete {anonCleanupCandidates.length} row{anonCleanupCandidates.length === 1 ? "" : "s"}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

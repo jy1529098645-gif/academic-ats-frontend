@@ -3464,7 +3464,26 @@ ${html}
     if (isGuest) {
       const remaining = isFast ? guestQuickRemaining : guestCuratedRemaining;
       if (remaining <= 0) {
-        setGuestExhaustedOpen(true);
+        // Auto-pop cooldown: a guest who hits the cap and then keeps
+        // clicking Search would otherwise see the same upsell modal on
+        // EVERY click. We auto-show it on the first hit, record the
+        // timestamp, and suppress for SIGN_IN_NUDGE_COOLDOWN_MS after.
+        // Within the cooldown the search still short-circuits (return)
+        // — quota is still 0 — but the user isn't repeatedly nagged.
+        // The avatar pill stays a one-click manual opener for users
+        // who DO want to sign in. Cooldown resets on successful sign-in
+        // (the modal's localStorage key is scoped to the guest device).
+        const SIGN_IN_NUDGE_COOLDOWN_MS = 4 * 60 * 60 * 1000;  // 4 hours
+        let lastShownAt = 0;
+        try {
+          const raw = localStorage.getItem("ats-guest-exhausted-shown-at");
+          if (raw) lastShownAt = Number(raw) || 0;
+        } catch { /* ignore */ }
+        const elapsed = Date.now() - lastShownAt;
+        if (elapsed >= SIGN_IN_NUDGE_COOLDOWN_MS) {
+          setGuestExhaustedOpen(true);
+          try { localStorage.setItem("ats-guest-exhausted-shown-at", String(Date.now())); } catch { /* ignore */ }
+        }
         return;
       }
     }

@@ -13,7 +13,18 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Resolved at build time. NEXT_PUBLIC_SITE_URL takes precedence (set this
+// in Vercel for the live origin); otherwise we fall back to localhost so
+// dev builds still satisfy Next 16's metadata-resolution requirement and
+// stop spamming the "metadataBase property … not set" warning on every
+// page render. Without metadataBase, OG/Twitter image URLs in the metadata
+// below would resolve relative to nothing and Next falls back to
+// localhost anyway — making the env-var explicit just silences the warning
+// and gives us correct social-card images on prod.
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
   // `template` lets nested routes (e.g. /admin) override just the leaf
   // and still get the "AcademiCats · Admin" suffix shape. `default` is
   // what shows on the bare landing.
