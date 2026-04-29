@@ -66,5 +66,20 @@ export type Paper = {
   citation_count?:        number | string;
   evidence_breakdown?:    Record<string, number>;
   word_count?:            number;
+  /** Per-paper Evidence Chain: claim-level breakdown of what the paper
+   *  argues, with each claim's strength + scope + evidence basis.
+   *  Populated by Curated mode's `enrich_core_evidence_with_claims_parallel`
+   *  and streamed in via the `claim_batch` SSE event. Empty / undefined
+   *  for Quick mode (extraction doesn't run there). */
+  claims?:                PaperClaim[];
   raw?:                   Record<string, unknown>;
+};
+
+export type PaperClaim = {
+  claim_text:        string;
+  claim_type?:       "finding" | "method" | "framing" | "limitation" | string;
+  support_level?:    "strong" | "moderate" | "weak" | string;
+  scope_note?:       string;
+  evidence_basis?:   string;
+  claim_confidence?: "high" | "medium" | "low" | string;
 };

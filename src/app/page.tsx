@@ -33,6 +33,7 @@ import {
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import OnboardingTour, { type TourStep } from "@/components/onboarding/OnboardingTour";
+import PaperEvidenceChain from "@/components/evidence-chain/PaperEvidenceChain";
 import UserNotificationPopup from "@/components/UserNotificationPopup";
 import { useUserNotifications } from "@/lib/hooks/use-user-notifications";
 import {
@@ -210,17 +211,15 @@ type JobResponse = {
 
 type DeepReadResult = Record<string, any>;
 
-// ── Feature flag: Evidence Chain (temporarily disabled) ──────────────────
-// Evidence Chain is still under iteration — claim quality + source-trail
-// coverage need more work before we put it in front of users. Setting
-// this to `false` hides the button (greyed out + tooltip), removes the
-// marketing bullets from the subscription modal, and drops the
-// onboarding card. The backend endpoint also returns 503 when disabled,
-// so any cached client that still has an enabled button fails with a
-// clean "temporarily disabled" message rather than the LLM pipeline.
-// Flip to `true` to turn everything back on — no other code changes
-// required. Quota counters + admin panel keep tracking the key so
-// historical data stays intact across the disable window.
+// ── Feature flag: Evidence Chain ─────────────────────────────────────────
+// Disabled again — the deep-read endpoint depends on `core_claim`
+// which only the Curated ranking pipeline populates. Ad-hoc clicks
+// land on papers without it and every card shows "couldn't extract
+// structured claims" until that data flow is restructured. See
+// backend main.py's EVIDENCE_CHAIN_ENABLED comment for the longer
+// reasoning. The button greys out + backend returns 503; flip both
+// flags back to true (frontend AND backend) once the upstream
+// claim-normalisation work is done.
 const EVIDENCE_CHAIN_ENABLED = false;
 const EVIDENCE_CHAIN_DISABLED_NOTE = "Evidence Chain is temporarily offline while we refine claim quality — back soon.";
 
@@ -1530,6 +1529,11 @@ function DesktopWorkspace() {
   const [firstInteractionDone] = useState(true);
 
   // ── Left panel tabs: Research Brief | Analytics ────────────────────────────
+  // Left-panel tab. Consensus Lane lives INSIDE the Charts tab as a
+  // second analytics surface (cross-paper consensus is statistical
+  // aggregation, same family as the year/venue/citation distributions
+  // already in Charts) — keeps the tab bar to two top-level entries
+  // and groups all "what does the paper set tell us?" surfaces together.
   const [leftTab, setLeftTab] = useState<"brief" | "analytics">("brief");
 
   // ── Announcement / messaging state ─────────────────────────────────────────
@@ -6073,6 +6077,20 @@ ${html}
                             </details>
                           );
                         })()}
+
+                        {/* Per-paper Evidence Chain — gated on the
+                            same EVIDENCE_CHAIN_ENABLED flag as the
+                            click-triggered button above. Same root
+                            blocker: claim_extraction depends on
+                            `core_claim` which only the Curated
+                            multi-agent pipeline populates, so this
+                            section either looked broken (empty
+                            claims) or never appeared for ad-hoc
+                            searches. Flipping the flag re-mounts
+                            this alongside the button. */}
+                        {EVIDENCE_CHAIN_ENABLED && (
+                          <PaperEvidenceChain claims={paper.claims} />
+                        )}
 
 
                         {/* Empty state: the endpoint returned but produced
