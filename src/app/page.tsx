@@ -122,6 +122,7 @@ const SORT_MODES = [
   "Relevance score",
   "Evidence strength",
   "Research fit",
+  "Citation count",
   "Newest first",
   "Open access first",
   "Balanced",
@@ -3074,9 +3075,31 @@ function DesktopWorkspace() {
     const base: Paper[] = (result?.papers?.length ? result.papers : null) ?? (streamPapers.length > 0 ? streamPapers : []);
     const toNum = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : -1; };
     const copy = [...base];
+    // Citation tiebreaker mirrors the backend's _citation_tier helper:
+    // (tier, raw_count) where tier 2 = public count > 0, 1 = undisclosed
+    // (null/missing), 0 = explicit zero — keeps "missing" above "zero"
+    // when a primary key ties, same convention the server uses.
+    const citeTier = (p: Paper): number => {
+      const cn = p.citation_count;
+      if (cn === null || cn === undefined || cn === "") return 1;
+      const n = Number(cn);
+      if (!Number.isFinite(n)) return 1;
+      return n > 0 ? 2 : 0;
+    };
+    const citeCount = (p: Paper): number => {
+      const cn = p.citation_count;
+      const n = Number(cn);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+    const cmpCite = (a: Paper, b: Paper): number => {
+      const t = citeTier(b) - citeTier(a);
+      return t !== 0 ? t : citeCount(b) - citeCount(a);
+    };
+
     if (sortMode === "Relevance score")   copy.sort((a, b) => toNum(b.evidence_score ?? b.score) - toNum(a.evidence_score ?? a.score));
     else if (sortMode === "Evidence strength") copy.sort((a, b) => toNum(b.evidence_score) - toNum(a.evidence_score));
     else if (sortMode === "Research fit") copy.sort((a, b) => toNum(b.research_fit_score) - toNum(a.research_fit_score));
+    else if (sortMode === "Citation count") copy.sort(cmpCite);
     else if (sortMode === "Newest first") copy.sort((a, b) => toNum(b.year) - toNum(a.year));
     else if (sortMode === "Open access first") copy.sort((a, b) => (b.is_oa ? 1 : 0) - (a.is_oa ? 1 : 0));
     // "Balanced" keeps backend order
@@ -5539,14 +5562,9 @@ ${html}
                     />
                   </div>
                 </div>
-                {/* Row 1b: sort mode (full width — keeps the layout clean
-                    now that count occupies the row above). */}
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-400">Sort mode</label>
-                  <select value={sortMode} onChange={(e) => setSortMode(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-blue-500">
-                    {SORT_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
-                  </select>
-                </div>
+                {/* Sort mode dropdown moved to the Retrieved Papers
+                    header row so users can re-rank without opening the
+                    Settings panel. Single source of truth lives there. */}
                 {/* Row 2: checkboxes */}
                 <div className="flex flex-wrap gap-2">
                   <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300"><input type="checkbox" checked={preferAbstracts} onChange={(e) => setPreferAbstracts(e.target.checked)} />Prefer abstracts</label>
@@ -5779,6 +5797,24 @@ ${html}
                       ? <>Selected <span className="font-semibold text-slate-300">{displayedPapers.length}</span> from <span className="font-semibold text-slate-300">{retrievedPoolSize.toLocaleString()}</span> retrieved</>
                       : <>{displayedPapers.length} papers</>}
                   </span>
+                )}
+                {/* Sort dropdown lives on the same row as the title (ml-auto
+                    pushes it to the far right) — moved out of the Settings
+                    panel because users frequently re-rank an existing result
+                    without changing anything else, and burying it behind
+                    Settings made that a 3-click action. The change is
+                    purely client-side: handleSearch reads sortMode from
+                    state for new searches, and displayedPapers re-sorts
+                    in-place when the dropdown changes. */}
+                {(hasRunSearch || displayedPapers.length > 0) && (
+                  <select
+                    value={sortMode}
+                    onChange={(e) => setSortMode(e.target.value)}
+                    title="Sort papers by"
+                    className="ml-auto rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1 text-xs text-slate-200 outline-none focus:border-blue-500"
+                  >
+                    {SORT_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+                  </select>
                 )}
               </div>
               {/* Fallback notice — surfaces when the new run returned 0
