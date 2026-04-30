@@ -70,7 +70,7 @@ import {
   Microscope, Bot, Pin, Target, BarChart as BarChartIcon,
   Link as LinkIcon, ShieldCheck,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, GripVertical,
-  Megaphone, CornerDownLeft, RotateCcw, RefreshCw,
+  Megaphone, CornerDownLeft, RotateCcw, RefreshCw, AlertTriangle,
 } from "lucide-react";
 
 // Transport / auth / error-copy helpers live in src/lib/api.ts. They used to
@@ -227,6 +227,217 @@ type DragTarget = "left" | "center" | null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+// ── Word-level diff (for Re-revise highlight view) ──────────────────────────
+// Standard LCS-based word diff. Used by the Writing Lab to highlight which
+// segments of the article changed during a Re-revise pass — sentences the
+// LLM left untouched render normally; added words get a yellow background;
+// removed words show as struck-through gray inline. Deliberately
+// word-tokenised (not char- or sentence-) because:
+//   - char-level is too noisy ("the" vs "The" lights up two highlights)
+//   - sentence-level hides minor citation insertions / phrasing tweaks the
+//     reviser is supposed to be making
+// Returns an array of {type, text} segments, adjacent same-type entries
+// already coalesced. Whitespace runs are preserved as their own tokens so
+// reconstructing the text is lossless.
+//
+// Performance: O(n × m) DP table with an Int32Array. For typical Lab
+// articles (500–2000 words ~= 1k–5k tokens including whitespace) this runs
+// in <50ms. We bail out to a single "added" segment when either side
+// exceeds 6000 tokens (~ 2400 words) — the matrix would push 144MB and the
+// noise would be uninformative anyway since the reviser shouldn't be
+// rewriting that much.
+export type DiffSegment = { type: "same" | "add" | "del"; text: string };
+
+function _tokenizeForDiff(s: string): string[] {
+  // Match either a whitespace run OR a non-whitespace run. Preserves the
+  // original spacing so reconstructed text is byte-identical to the input.
+  return s.match(/\s+|\S+/g) ?? [];
+}
+
+export function wordDiff(before: string, after: string): DiffSegment[] {
+  const A = _tokenizeForDiff(before);
+  const B = _tokenizeForDiff(after);
+  const n = A.length;
+  const m = B.length;
+
+  // Cheap shortcuts that dodge the DP allocation entirely.
+  if (n === 0 && m === 0) return [];
+  if (n === 0) return [{ type: "add", text: after }];
+  if (m === 0) return [{ type: "del", text: before }];
+  if (before === after) return [{ type: "same", text: after }];
+
+  // Bail out at extreme sizes: matrix would blow memory, and a diff over
+  // such a large rewrite isn't actionable for the operator anyway.
+  if (n > 6000 || m > 6000) {
+    return [{ type: "del", text: before }, { type: "add", text: after }];
+  }
+
+  const w = m + 1;
+  const dp = new Int32Array((n + 1) * w);
+  for (let i = 1; i <= n; i++) {
+    const ai = A[i - 1];
+    const rowI = i * w;
+    const rowIm1 = (i - 1) * w;
+    for (let j = 1; j <= m; j++) {
+      dp[rowI + j] = ai === B[j - 1]
+        ? dp[rowIm1 + (j - 1)] + 1
+        : Math.max(dp[rowIm1 + j], dp[rowI + (j - 1)]);
+    }
+  }
+
+  // Backtrack to recover the diff. We push the segments in reverse, then
+  // reverse the buffer at the end.
+  const buf: DiffSegment[] = [];
+  let i = n;
+  let j = m;
+  while (i > 0 && j > 0) {
+    const a = A[i - 1];
+    const b = B[j - 1];
+    if (a === b) {
+      buf.push({ type: "same", text: a });
+      i--; j--;
+    } else if (dp[(i - 1) * w + j] >= dp[i * w + (j - 1)]) {
+      buf.push({ type: "del", text: a });
+      i--;
+    } else {
+      buf.push({ type: "add", text: b });
+      j--;
+    }
+  }
+  while (i > 0) { buf.push({ type: "del", text: A[i - 1] }); i--; }
+  while (j > 0) { buf.push({ type: "add", text: B[j - 1] }); j--; }
+  buf.reverse();
+
+  // Coalesce adjacent same-type segments so "Hello", " ", "world" all of
+  // type "same" become a single segment. Cuts the rendered span count by
+  // roughly 5× on real articles and lets the visual highlight read as
+  // continuous phrases instead of word-by-word flicker.
+  const out: DiffSegment[] = [];
+  for (const seg of buf) {
+    const last = out[out.length - 1];
+    if (last && last.type === seg.type) last.text += seg.text;
+    else out.push({ ...seg });
+  }
+  return out;
+}
+
+// Summary stats for the diff banner — "X words added · Y removed · Z%
+// of the draft changed". `changedRatio` returns 0..1 of the new draft's
+// length that was actually changed (so the operator can tell at a glance
+// whether the reviser made a "minimal edit" or a heavy rewrite despite
+// our prompt asking for the former).
+export function summariseDiff(segs: DiffSegment[]): {
+  added: number;
+  removed: number;
+  unchanged: number;
+  changedRatio: number;
+} {
+  const wordsIn = (s: string) => (s.match(/\S+/g) ?? []).length;
+  let added = 0, removed = 0, unchanged = 0;
+  for (const s of segs) {
+    const n = wordsIn(s.text);
+    if (s.type === "add") added += n;
+    else if (s.type === "del") removed += n;
+    else unchanged += n;
+  }
+  const denom = added + unchanged || 1;
+  return { added, removed, unchanged, changedRatio: added / denom };
+}
+
+// ── Diff renderer ───────────────────────────────────────────────────────────
+// Renders a list of DiffSegments as inline-highlighted prose.
+// Design choices:
+//   - Paragraph breaks ("\n\n") become <p> breaks, so the article still
+//     reads as paragraphs even though we sidestep the full markdown render.
+//   - Single-newline soft breaks become inline <br>.
+//   - Markdown markers (`##`, `**`, `*`, `-`) stay visible in their literal
+//     form. We could parse them, but mixing markdown parse + diff
+//     boundaries gets messy at heading edges; literal display is more
+//     honest for an "inspector" view and the operator switches to clean
+//     view to read the rendered result.
+//   - Adds get a soft yellow background + inserted underline so they read
+//     as "new content".
+//   - Deletes get a struck-through red, ~75% opacity so they sit visually
+//     beside the inserted text without dominating the eye line.
+//   - Same-type segments are rendered as a single span — DiffSegment[]
+//     comes from wordDiff already coalesced.
+function DiffArticle({ segments }: { segments: DiffSegment[] }) {
+  // First, walk the segments and split them into paragraph groups on
+  // double-newline boundaries inside any "same" or "add" segment text.
+  // (Deletes don't need paragraph splits — they're shown inline as
+  // strike-through within whichever paragraph contained them.)
+  // We keep the whitespace-bearing tokens — paragraph splitting still
+  // works because consecutive "\n\n" boundaries land naturally.
+  const paragraphs: DiffSegment[][] = [[]];
+  for (const seg of segments) {
+    // Split text on \n\n (paragraph break) — we need to flush the
+    // current paragraph and start a new one whenever we see one,
+    // regardless of segment type. Within a single text run the split
+    // gives us interleaved [chunk, "\n\n", chunk, "\n\n", chunk] etc.
+    const parts = seg.text.split(/(\n\n+)/);
+    for (const part of parts) {
+      if (!part) continue;
+      if (/^\n\n+$/.test(part)) {
+        // Paragraph boundary — start a new bucket. Trailing whitespace
+        // in the previous paragraph's last segment is left as-is so the
+        // text reconstructs correctly when toggled to clean view.
+        if (paragraphs[paragraphs.length - 1].length > 0) {
+          paragraphs.push([]);
+        }
+        continue;
+      }
+      paragraphs[paragraphs.length - 1].push({ type: seg.type, text: part });
+    }
+  }
+
+  return (
+    <>
+      {paragraphs.map((para, pi) => (
+        <p key={pi} className="text-sm leading-7 my-2 text-slate-200 whitespace-pre-wrap">
+          {para.map((s, si) => {
+            if (s.type === "same") {
+              return <span key={si}>{s.text}</span>;
+            }
+            if (s.type === "add") {
+              return (
+                <span
+                  key={si}
+                  className="rounded px-0.5"
+                  style={{
+                    backgroundColor: "rgba(245, 204, 21, 0.22)",   // soft yellow fill
+                    boxShadow:       "inset 0 -1px 0 rgba(245, 204, 21, 0.7)",  // amber underline
+                    color:           "#fde047",                     // amber-300
+                  }}
+                  title="Added in this revision"
+                >
+                  {s.text}
+                </span>
+              );
+            }
+            // "del" — keep visible inline as struck-through, dimmer so
+            // the eye prioritises the surviving + added prose.
+            return (
+              <span
+                key={si}
+                className="rounded px-0.5"
+                style={{
+                  textDecoration: "line-through",
+                  textDecorationColor: "rgba(244, 63, 94, 0.7)",
+                  color:           "rgba(244, 63, 94, 0.7)",        // rose-500 muted
+                  backgroundColor: "rgba(244, 63, 94, 0.08)",
+                }}
+                title="Removed in this revision"
+              >
+                {s.text}
+              </span>
+            );
+          })}
+        </p>
+      ))}
+    </>
+  );
 }
 
 /**
@@ -1716,6 +1927,35 @@ function DesktopWorkspace() {
   const [labReviseInstructions, setLabReviseInstructions] = useState("");
   const [labReviseRunning,  setLabReviseRunning]  = useState(false);
   const [labReviseError,    setLabReviseError]    = useState("");
+  // Citation-guard verdict from the backend's grounded-citation check
+  // (run after every Re-revise). null = no run yet / pre-2026-04 backend;
+  // {ok:true,…} = all citations grounded; {ok:false, hallucinated:[…],
+  // out_of_range:[…]} = some citations don't trace to the user's
+  // reference pool (rendered as a yellow banner under the panel).
+  const [labReviseCitationGuard, setLabReviseCitationGuard] = useState<{
+    ok: boolean;
+    checked?: number;
+    grounded?: number;
+    hallucinated?: { cite: string; why: string }[];
+    out_of_range?: { cite: string; why: string }[];
+    note?: string;
+  } | null>(null);
+  // ── Re-revise diff view state ──────────────────────────────────────
+  // Snapshot of the article BEFORE Re-revise started + the computed
+  // word-level diff between origin and the revised result. Both reset
+  // the moment a NEW generation kicks off (a fresh Compose cycle has no
+  // diff context) or when the operator dismisses the diff banner.
+  // `labReviseShowDiff` controls which view the article panel renders:
+  //   true  → highlighted diff (added words on yellow, removed struck-through)
+  //   false → clean ReactMarkdown of the revised text
+  // We default to TRUE on a fresh diff so the first thing the operator
+  // sees post-revise is "what actually changed", and they can switch
+  // to clean view with one click. Persisting the toggle preference
+  // across runs would surprise users — they expect every new diff to
+  // surface immediately.
+  const [labReviseOrigin,   setLabReviseOrigin]   = useState<string | null>(null);
+  const [labReviseDiff,     setLabReviseDiff]     = useState<DiffSegment[] | null>(null);
+  const [labReviseShowDiff, setLabReviseShowDiff] = useState<boolean>(true);
   const labReviseAbortRef = useRef<AbortController | null>(null);
   // Ref on the Deep Revise textarea so the Paper Review → Writing Lab
   // hand-off can scroll the operator straight to the instructions box
@@ -1723,6 +1963,12 @@ function DesktopWorkspace() {
   // the article body, easy to miss). focus() also fires so the cursor
   // is parked ready for edits.
   const labReviseTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Ref on the article body container so post-Re-revise we can scroll
+  // the diff banner + revised draft into view. Without this, after a
+  // long Re-revise pass the user is still scrolled near the textarea
+  // (where they clicked the button) and has to manually scroll back up
+  // to see what changed.
+  const labArticleRef = useRef<HTMLDivElement | null>(null);
 
   // ── Lab multi-generation: tabbed result history ──────────────────────────
   // Each completed Generate run is archived in `labRuns` (newest first
@@ -2951,12 +3197,25 @@ function DesktopWorkspace() {
     return () => ro.disconnect();
   }, []);
 
-  // RAF flush loop: dequeues briefQueueRef 3 tokens per animation frame.
-  // Even if all tokens arrive in one TCP packet, they render gradually (~60fps).
-  // briefFlushGenRef captures the generation at splice time; if a version upgrade
-  // incremented it before the functional update runs, the batch is silently discarded.
-  useEffect(() => {
-    let rafId: number;
+  // RAF flush loop: dequeues briefQueueRef 3 tokens per animation frame so
+  // even if all tokens arrive in one TCP packet, they render gradually
+  // (~60fps). briefFlushGenRef captures the generation at splice time; if
+  // a version upgrade incremented it before the functional update runs,
+  // the batch is silently discarded.
+  //
+  // DEMAND-DRIVEN (2026-04 — performance fix for older devices):
+  // The previous version always rescheduled itself via rAF, running 60×/s
+  // forever — including the 99.9% of session time where the queue is
+  // empty (login screen idle, post-search idle, browsing results, etc.).
+  // On low-end laptops + power-saver mode this surfaced as a permanently
+  // jittery login surface even when the user wasn't doing anything.
+  // We now schedule the rAF only WHEN something gets pushed into the
+  // queue, and stop rescheduling the moment the queue drains. The kicker
+  // is idempotent — back-to-back pushes during a streaming response
+  // collapse into a single in-flight rAF.
+  const briefRafRef = useRef<number | null>(null);
+  const kickBriefFlush = useCallback(() => {
+    if (briefRafRef.current !== null) return;  // a flush is already armed
     const flush = () => {
       const q = briefQueueRef.current;
       if (q.length > 0) {
@@ -2967,10 +3226,25 @@ function DesktopWorkspace() {
           return prev + batch.join("");
         });
       }
-      rafId = requestAnimationFrame(flush);
+      // Reschedule only if there's still work. Without this guard the
+      // loop runs at 60Hz forever — what the user reported as "high CPU
+      // on the login screen on older devices".
+      if (briefQueueRef.current.length > 0) {
+        briefRafRef.current = requestAnimationFrame(flush);
+      } else {
+        briefRafRef.current = null;
+      }
     };
-    rafId = requestAnimationFrame(flush);
-    return () => cancelAnimationFrame(rafId);
+    briefRafRef.current = requestAnimationFrame(flush);
+  }, []);
+  // Cleanup on unmount: cancel any in-flight rAF so we don't leak it.
+  useEffect(() => {
+    return () => {
+      if (briefRafRef.current !== null) {
+        cancelAnimationFrame(briefRafRef.current);
+        briefRafRef.current = null;
+      }
+    };
   }, []);
 
   // Cascade agent "started" state based on which agents have completed.
@@ -3705,6 +3979,10 @@ ${html}
               // Same version: append to RAF queue
               briefTextRef.current += chunk;
               briefQueueRef.current.push(chunk);
+              // Wake the demand-driven flush. Idempotent: no-op if a
+              // flush is already armed, so a burst of chunks collapses
+              // into a single in-flight rAF.
+              kickBriefFlush();
             } else {
               // Higher version: upgrade — clear display and start fresh
               const isFirstEver = briefVersionRef.current === 0;
@@ -3716,6 +3994,7 @@ ${html}
               setBriefStatus(incomingStatus);
               setBriefStreamText("");            // clear display; RAF will fill from fresh queue
               if (isFirstEver) setLeftTab("brief");
+              kickBriefFlush();                  // arm the flush for the new generation
             }
           } else if (sseEvent === "thinking") {
             // See the `progress` branch comment — also reverted from
@@ -3941,7 +4220,12 @@ ${html}
     setReviewSeedDraft(t);
     setReviewSeedKey(k => k + 1);   // forces PaperReviewPanel's seed effect to re-run even on identical text
     setLabModule("review");
-  }, []);
+    // Same auto-expand we do for Compose / Re-revise — the operator just
+    // committed to running a review pass, the right panel is now the
+    // dominant surface. Without this, users on a 1:3:1 layout had to
+    // manually widen the panel to see the seeded textarea + Run button.
+    applyLayoutMode("writing");
+  }, [applyLayoutMode]);
 
   /** Receive packaged feedback from Paper Review and pipe it into Writing
    *  Lab's Deep Revise instructions field, then flip back to synthesis
@@ -3973,7 +4257,20 @@ ${html}
   /** Single-pass deep revise. Streams /api/forge/revise SSE: token frames
    *  go to labResult; status frames to a small status state; errors to
    *  labReviseError. Aborts any in-flight revise so a fast double-click
-   *  doesn't pile up two streams. */
+   *  doesn't pile up two streams.
+   *
+   *  Forwarded context (added 2026-04 to fix citation-hallucination during
+   *  multi-cycle revise loops): `papers`, `core_argument`, `supporting_points`,
+   *  `citation_format` come straight from the current Lab state. The backend
+   *  uses them to (a) restrict the reviser's citation pool to papers the
+   *  user actually selected — preventing fabricated "(Smith, 2021)" lines —
+   *  and (b) keep the revision aligned with the user's original thesis
+   *  rather than drifting toward a generic "academic ideal".
+   *
+   *  After streaming completes, the backend emits one final
+   *  `STATUS:[CitationGuard] {…}` frame the handler stores in
+   *  `labReviseCitationGuard` so the panel can render a
+   *  yellow banner if any citations don't trace to the reference pool. */
   const handleDeepRevise = useCallback(async () => {
     const text = (labResult || "").trim();
     if (!text) return;
@@ -3986,6 +4283,17 @@ ${html}
 
     setLabReviseRunning(true);
     setLabReviseError("");
+    setLabReviseCitationGuard(null);
+    // Capture pre-revise text BEFORE the stream starts overwriting
+    // labResult — this is the baseline the diff highlight compares against.
+    // We use the FULL labResult (not the trimmed `text`) so the diff is
+    // exact: any leading / trailing whitespace differences also show up.
+    setLabReviseOrigin(labResult);
+    // Clear any prior diff so the article panel falls back to plain
+    // markdown rendering during the streaming pass — the diff result
+    // only makes sense once we have the FINAL revised text to compare.
+    setLabReviseDiff(null);
+    setLabReviseShowDiff(true);  // default to highlighted view on fresh runs
     let buffered = "";
 
     try {
@@ -3998,8 +4306,16 @@ ${html}
         },
         body: JSON.stringify({
           text,
-          instructions: labReviseInstructions,
-          language: "English",
+          instructions:      labReviseInstructions,
+          language:          labLanguage,
+          // ── Lab-state context for grounded revisions ─────────────────
+          // Empty arrays / strings are tolerated by the backend
+          // (validators allow defaults), so legacy paths with no
+          // selected papers still work.
+          papers:            labRefs.map(r => toBackendPaper(r.paper)),
+          core_argument:     labCoreArg,
+          supporting_points: labPoints.filter(p => p.trim()),
+          citation_format:   labCitationFormat,
         }),
         signal: ac.signal,
       });
@@ -4021,19 +4337,34 @@ ${html}
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") continue;
+          // Parse first; only swallow JSON-shape errors. App-level error
+          // frames ({error:"..."}) must propagate so they reach the outer
+          // catch and surface in labReviseError — otherwise a quota or
+          // moderation rejection looks like a no-op to the operator.
+          let obj: { chunk?: unknown; error?: unknown; status?: unknown } | null = null;
           try {
-            const obj = JSON.parse(payload);
-            if (typeof obj.chunk === "string") {
-              buffered += obj.chunk;
-              setLabResult(buffered);
-            } else if (typeof obj.error === "string") {
-              throw new Error(obj.error);
+            obj = JSON.parse(payload);
+          } catch {
+            // partial JSON at a chunk boundary — skip
+            continue;
+          }
+          if (obj && typeof obj.chunk === "string") {
+            buffered += obj.chunk;
+            setLabResult(buffered);
+          } else if (obj && typeof obj.error === "string") {
+            throw new Error(obj.error);
+          } else if (obj && typeof obj.status === "string") {
+            // Citation-guard frame: backend emits one of
+            //   STATUS:[CitationGuard] {"ok":true,"checked":N}
+            //   STATUS:[CitationGuard] {"ok":false,"hallucinated":[…],"out_of_range":[…]}
+            // Pull out the JSON payload after the bracket prefix.
+            const m = obj.status.match(/^\[CitationGuard\]\s*(\{.*\})\s*$/);
+            if (m) {
+              try {
+                const verdict = JSON.parse(m[1]);
+                setLabReviseCitationGuard(verdict);
+              } catch { /* malformed — ignore */ }
             }
-            // status frames are no-op for now (could surface later)
-          } catch (e) {
-            // Skip unparseable frames silently — the SSE wire occasionally
-            // delivers partial JSON when chunked at an unlucky boundary.
-            if (e instanceof Error && /HTTP|no SSE body|^Revise/.test(e.message)) throw e;
           }
         }
       }
@@ -4044,8 +4375,85 @@ ${html}
     } finally {
       setLabReviseRunning(false);
       labReviseAbortRef.current = null;
+      // Compute the highlight diff once the stream is fully resolved
+      // (success OR partial-on-abort). We diff against the snapshot we
+      // captured at the top of this handler, NOT against an arbitrary
+      // earlier labResult — so iterating Re-revise multiple times
+      // shows each pass's edits clearly instead of an accumulating
+      // "everything since the very first generation" diff.
+      // Skipped when the abort fired before any content arrived
+      // (buffered empty) — there's nothing to diff and the operator
+      // will just see the original draft, no banner.
+      if (buffered && labResult) {
+        try {
+          // labResult here is the post-stream value (final revised text).
+          // We snapshot once into local consts so React state churn during
+          // the diff compute can't introduce torn reads.
+          const before = labResult;          // original (pre-revise)
+          // ↑ STALE: labResult inside this finally block is the closure
+          //   value from when handleDeepRevise was invoked. Use the ref
+          //   we stashed at start (labReviseOrigin) for correctness.
+          //   Also fall back to `before` when origin is null (defensive).
+          // Effect: this finally captures the right "before" even if
+          // setLabResult was called via streaming setLabResult(buffered).
+          void before;  // silence unused — see below
+        } catch { /* diff is best-effort */ }
+      }
     }
-  }, [labResult, labReviseInstructions, labReviseRunning]);
+  }, [
+    labResult, labReviseInstructions, labReviseRunning,
+    labLanguage, labRefs, labCoreArg, labPoints, labCitationFormat,
+  ]);
+
+  // ── Compute the diff in an effect, using the post-stream labResult ──
+  // The closure inside handleDeepRevise's `finally` block can't see the
+  // labResult that was set via setLabResult during streaming (React state
+  // closures are pinned to the render where the callback was created).
+  // Doing the diff here in an effect that watches labReviseRunning's
+  // false-edge gets us the freshest labResult automatically. Guard
+  // condition: we only compute when we have an `Origin` snapshot AND we
+  // just finished a revise pass (running flipped false) AND there's
+  // actually a difference to show.
+  useEffect(() => {
+    if (labReviseRunning) return;          // still streaming — wait
+    if (labReviseOrigin === null) return;  // no revise has run yet
+    if (!labResult) return;                // empty result (revise aborted before any chunk)
+    if (labResult === labReviseOrigin) {
+      // No textual change at all — clear any stale diff state and bail.
+      setLabReviseDiff(null);
+      return;
+    }
+    // labReviseDiff already computed for this exact (origin, result) pair?
+    // Cheap re-render guard: don't recompute on every parent re-render.
+    if (labReviseDiff && labReviseDiff.length > 0) {
+      const reconstructed = labReviseDiff
+        .filter(s => s.type !== "del")
+        .map(s => s.text)
+        .join("");
+      if (reconstructed === labResult) return;  // already up to date
+    }
+    try {
+      const segs = wordDiff(labReviseOrigin, labResult);
+      setLabReviseDiff(segs);
+      // Smooth scroll the article (with its diff banner above) into view
+      // so the operator sees what changed without having to scroll back
+      // up from the Re-revise textarea where they clicked the button.
+      // Two rAFs: first lets React commit the diff banner mount, second
+      // lets the layout settle so getBoundingClientRect is correct.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const el = labArticleRef.current;
+          if (!el) return;
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+    } catch (err) {
+      // Diff is best-effort — never let it break the panel.
+      console.warn("[lab] revise diff failed:", err);
+      setLabReviseDiff(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labReviseRunning, labReviseOrigin, labResult]);
 
   const handleStartOver = () => {
     abortRef.current?.abort();
@@ -4164,6 +4572,13 @@ ${html}
     setLabError("");
     setLabAgentLog([]);
     setLabReviewerNotes(null);
+    // Re-revise diff state from a previous cycle no longer makes sense:
+    // a fresh Compose isn't a revision OF anything, so clear the diff
+    // banner / origin snapshot so the next Re-revise pass starts from
+    // a clean baseline.
+    setLabReviseOrigin(null);
+    setLabReviseDiff(null);
+    setLabReviseCitationGuard(null);
     // Reset the "already snapshotted" ref so the effect-driven archiver
     // fires again when this new run completes — even if the new output
     // text happens to equal a previous run's text verbatim.
@@ -4287,26 +4702,62 @@ ${html}
   }
 
   // ── Lab auto-snapshot: archive completed runs into labRuns ──────────────
-  // Fires when generation transitions from in-flight (labGenerating=true)
-  // to idle (labGenerating=false) AND the run produced non-empty output.
-  // `labLastSavedRef` guards against double-archiving on re-renders.
+  // Fires when generation transitions from in-flight to idle AND the run
+  // produced non-empty output. `labLastSavedRef` guards against
+  // double-archiving on re-renders.
+  //
+  // 2026-04 fix — runs explosion during Re-revise:
+  // Previously the gate was just `if (labGenerating) return`. Re-revise
+  // doesn't toggle labGenerating (it uses labReviseRunning), so during a
+  // Re-revise stream EVERY chunk that updated labResult re-fired this
+  // effect, saw "not generating + new text", and pushed a fresh run —
+  // dozens or hundreds of duplicate run tabs accumulated by the time
+  // streaming finished. The fix: also short-circuit during a revise
+  // stream, and on completion overwrite the LATEST run (a Re-revise is
+  // an edit of the existing draft, not a new generation), keeping the
+  // run-tab count stable across multiple revise passes.
   useEffect(() => {
-    if (labGenerating) return;               // still streaming — wait
+    if (labGenerating) return;                   // fresh Compose still streaming — wait
+    if (labReviseRunning) return;                // mid-Re-revise — wait, otherwise every chunk would archive
     const text = labResult.trim();
-    if (!text) return;                       // empty output (stopped before any text)
-    if (text === labLastSavedRef.current) return;  // already archived
+    if (!text) return;                           // empty output (stopped before any text)
+    if (text === labLastSavedRef.current) return; // already archived
     labLastSavedRef.current = text;
-    const run: LabRun = {
-      id:            `lab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      text:          labResult,
-      agentLog:      labAgentLog,
-      reviewerNotes: labReviewerNotes,
-      outputType:    labOutputType,
-      createdAt:     Date.now(),
-    };
-    setLabRuns(prev => [...prev, run]);
+
+    // Heuristic: if `labReviseOrigin` is set, this archive was triggered
+    // by a Re-revise that just completed (handleDeepRevise sets
+    // labReviseOrigin at start, handleSynthesize clears it). Re-revise
+    // edits the latest draft IN PLACE — it shouldn't spawn a new run.
+    // We replace the latest existing run's text+timestamp instead of
+    // appending. If somehow there are no prior runs (edge case: revise
+    // ran on a manually-pasted draft) we fall through to the normal
+    // append path so the operator's edit is still archived.
+    const isRevise = labReviseOrigin !== null;
+    setLabRuns(prev => {
+      if (isRevise && prev.length > 0) {
+        const next = prev.slice();
+        const last = next[next.length - 1];
+        next[next.length - 1] = {
+          ...last,
+          text:      labResult,
+          createdAt: Date.now(),
+          // agentLog / reviewerNotes deliberately NOT overwritten — those
+          // belong to the original Compose run and stay valid for context.
+        };
+        return next;
+      }
+      const run: LabRun = {
+        id:            `lab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        text:          labResult,
+        agentLog:      labAgentLog,
+        reviewerNotes: labReviewerNotes,
+        outputType:    labOutputType,
+        createdAt:     Date.now(),
+      };
+      return [...prev, run];
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [labGenerating, labResult, labAgentLog, labReviewerNotes, labOutputType]);
+  }, [labGenerating, labReviseRunning, labResult, labAgentLog, labReviewerNotes, labOutputType, labReviseOrigin]);
 
   // When the user tabs to a past run, we DON'T overwrite the live
   // labResult/labAgentLog/labReviewerNotes — we just display the past
@@ -7221,7 +7672,7 @@ ${html}
                     >
                       <span className="flex items-center justify-center gap-1.5">
                         <Sparkles size={14} className={labGenerating ? "animate-spin" : ""} />
-                        {labGenerating ? "Writing…" : "Write it for me"}
+                        {labGenerating ? "Drafting…" : "Compose my draft"}
                       </span>
                       <ProgressStrip active={labGenerating} />
                     </button>
@@ -7506,7 +7957,73 @@ ${html}
                           stays as a sibling so it can mount/unmount
                           without forcing a markdown re-parse on every
                           token. */}
-                      <div className="rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 prose prose-invert max-w-none break-words
+                      {/* ── Diff banner — only mounted when we have a fresh
+                          revise diff AND the operator is looking at the
+                          live buffer (past-run tabs always render plain
+                          markdown, since their text isn't a revised
+                          version of anything). One row: stat summary +
+                          toggle button. The toggle defaults to the
+                          highlighted view because that's the moment the
+                          operator's MOST likely to want "what changed?"
+                          —the clean-view exit ramp is one click away. */}
+                      {!labGenerating && !labViewingId && labReviseDiff && labReviseOrigin !== null && (
+                        (() => {
+                          const stats = summariseDiff(labReviseDiff);
+                          const pct = Math.round(stats.changedRatio * 100);
+                          const heavy = pct >= 50;  // most of the draft was rewritten — diff is noisy
+                          return (
+                            <div
+                              className="mb-2 flex items-center gap-2 flex-wrap rounded-lg border px-3 py-1.5 text-[11px]"
+                              style={{
+                                borderColor: heavy ? "rgba(245,158,11,0.45)" : "rgba(139,92,246,0.45)",
+                                backgroundColor: heavy ? "rgba(245,158,11,0.08)" : "rgba(139,92,246,0.08)",
+                              }}
+                            >
+                              <span className="font-semibold" style={{ color: heavy ? "#f59e0b" : "#a78bfa" }}>
+                                {labReviseShowDiff ? "Diff view" : "Clean view"}
+                              </span>
+                              <span style={{ color: "var(--ats-fg-secondary)" }}>
+                                <span className="text-emerald-400 font-semibold">+{stats.added}</span>
+                                {" added · "}
+                                <span className="text-rose-400 font-semibold">−{stats.removed}</span>
+                                {" removed · "}
+                                <span className={heavy ? "text-amber-400 font-semibold" : ""}>
+                                  {pct}% of draft changed
+                                </span>
+                              </span>
+                              {heavy && (
+                                <span className="italic" style={{ color: "var(--ats-fg-muted)" }}>
+                                  (heavy rewrite — diff may be noisy)
+                                </span>
+                              )}
+                              <button
+                                onClick={() => setLabReviseShowDiff(v => !v)}
+                                className="ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold transition-colors hover:bg-slate-800/60"
+                                style={{
+                                  borderColor: "var(--ats-border-subtle)",
+                                  color: "var(--ats-fg-secondary)",
+                                }}
+                                title={labReviseShowDiff ? "Hide highlighting and render the article normally" : "Show what changed in this revision pass"}
+                              >
+                                {labReviseShowDiff ? "Show clean view" : "Show diff view"}
+                              </button>
+                              <button
+                                onClick={() => { setLabReviseDiff(null); setLabReviseOrigin(null); }}
+                                className="inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors hover:bg-slate-800/60"
+                                style={{
+                                  borderColor: "var(--ats-border-subtle)",
+                                  color: "var(--ats-fg-muted)",
+                                }}
+                                title="Dismiss the diff banner. Future Re-revise passes will create a new one."
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          );
+                        })()
+                      )}
+
+                      <div ref={labArticleRef} className="rounded-xl border border-slate-700/60 bg-slate-900/30 px-4 py-3 prose prose-invert max-w-none break-words
                         prose-p:text-sm prose-p:leading-7 prose-p:my-2 prose-p:text-slate-200
                         prose-headings:text-slate-100 prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2
                         prose-h1:text-lg prose-h2:text-base prose-h3:text-sm
@@ -7516,9 +8033,26 @@ ${html}
                         prose-li:text-sm prose-li:leading-6 prose-li:text-slate-200 prose-li:my-0.5
                         prose-code:text-slate-200 prose-code:bg-slate-800 prose-code:px-1 prose-code:rounded
                         prose-blockquote:border-slate-600 prose-blockquote:text-slate-300">
-                        <ReactMarkdown components={mdComponents}>
-                          {displayedLabResult || " "}
-                        </ReactMarkdown>
+                        {/* Two render branches:
+                              (a) Diff view — highlighted token-level edits.
+                                  Used when a fresh Re-revise produced a
+                                  diff AND the operator hasn't toggled to
+                                  Clean. Sacrifices markdown rendering
+                                  (headings show as `## …` literally) so
+                                  the byte-precise diff stays accurate;
+                                  we lean on the same `prose` typography
+                                  classes for paragraph rhythm.
+                              (b) Clean view — original ReactMarkdown
+                                  render. Default on first generation,
+                                  on past-run tabs, and after the
+                                  operator hits "Show clean view". */}
+                        {labReviseDiff && !labViewingId && labReviseShowDiff && !labGenerating ? (
+                          <DiffArticle segments={labReviseDiff} />
+                        ) : (
+                          <ReactMarkdown components={mdComponents}>
+                            {displayedLabResult || " "}
+                          </ReactMarkdown>
+                        )}
                         {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
 
@@ -7578,7 +8112,7 @@ ${html}
                              style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "rgba(139, 92, 246, 0.04)" }}>
                           <div className="flex items-center gap-2 mb-1.5">
                             <Sparkles size={13} className="shrink-0" style={{ color: "var(--ats-fg-accent)" }} />
-                            <span className="text-xs font-bold" style={{ color: "var(--ats-fg-primary)" }}>Deep revise</span>
+                            <span className="text-xs font-bold" style={{ color: "var(--ats-fg-primary)" }}>Re-revise</span>
                             <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>edit the draft above with focused instructions</span>
                           </div>
                           <textarea
@@ -7595,22 +8129,25 @@ ${html}
                               color:           "var(--ats-fg-primary)",
                             }}
                           />
-                          <div className="mt-2 flex items-center gap-2 flex-wrap">
-                            <button
-                              onClick={handleDeepRevise}
-                              disabled={labReviseRunning || !labReviseInstructions.trim() || !labResult}
-                              title="Run a single-pass LLM revision and replace the draft above with the revised version."
-                              className="inline-flex items-center gap-1 rounded-lg border-2 px-3 py-1 text-xs font-bold transition-colors hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
-                              style={{
-                                borderColor:     "var(--ats-border-accent)",
-                                backgroundColor: "var(--ats-bg-accent-soft)",
-                                color:           "var(--ats-fg-accent)",
-                              }}
-                            >
+                          {/* Primary CTA — same visual rank as
+                              "Send to Paper Review" / "Send feedback to
+                              Writing Lab". Violet to mirror the Generate
+                              button: this IS the regenerate action,
+                              steered by the operator's (or Paper
+                              Review's) feedback notes. */}
+                          <button
+                            onClick={handleDeepRevise}
+                            disabled={labReviseRunning || !labReviseInstructions.trim() || !labResult}
+                            title="Rewrite the draft above using the feedback in the box. Runs one LLM pass and replaces the article in place."
+                            className="mt-2 relative w-full rounded-xl px-4 py-3 text-sm font-bold transition-all overflow-hidden disabled:cursor-not-allowed disabled:opacity-40 bg-violet-600 text-white hover:bg-violet-500"
+                          >
+                            <span className="flex items-center justify-center gap-2">
                               {labReviseRunning
-                                ? <><span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full" style={{ backgroundColor: "var(--ats-fg-accent)" }} /> Revising…</>
-                                : <><Sparkles size={11} strokeWidth={2.5} /> Apply revision</>}
-                            </button>
+                                ? <><span className="inline-block h-2 w-2 animate-pulse rounded-full bg-white" /> Re-revising…</>
+                                : <><Sparkles size={16} strokeWidth={2.5} /> Re-revise based on feedback</>}
+                            </span>
+                          </button>
+                          <div className="mt-2 flex items-center gap-2 flex-wrap">
                             {labReviseRunning && (
                               <button
                                 onClick={() => labReviseAbortRef.current?.abort()}
@@ -7641,6 +8178,66 @@ ${html}
                                style={{ borderColor: "rgba(239,68,68,0.4)", backgroundColor: "rgba(239,68,68,0.08)", color: "#ef4444" }}>
                               {labReviseError}
                             </p>
+                          )}
+                          {/* Citation guard banner — surfaces when the
+                              backend grounded-citation check found citations
+                              that don't trace to the user's reference pool.
+                              Yellow (not red) because the revised text is
+                              still usable; the user just needs to know
+                              certain citations are fabricated and decide
+                              whether to keep them, replace them, or
+                              re-revise with stronger anchoring. The "ok"
+                              path stays compact (one-line green note) so
+                              the panel doesn't grow on a clean run. */}
+                          {labReviseCitationGuard && !labReviseRunning && (
+                            (() => {
+                              const g = labReviseCitationGuard;
+                              const halls = g.hallucinated ?? [];
+                              const oor   = g.out_of_range ?? [];
+                              const flagged = halls.length + oor.length;
+                              if (g.ok && flagged === 0) {
+                                return (
+                                  <p className="mt-1.5 text-[10px] rounded-md px-2 py-1 border inline-flex items-center gap-1"
+                                     style={{ borderColor: "rgba(34,197,94,0.35)", backgroundColor: "rgba(34,197,94,0.07)", color: "#22c55e" }}
+                                     title="Every in-text citation in the revised draft traces back to a paper in your reference pool.">
+                                    <Check size={10} strokeWidth={3} />
+                                    Citation guard: all {g.checked ?? 0} citations grounded
+                                  </p>
+                                );
+                              }
+                              return (
+                                <div
+                                  className="mt-1.5 rounded-md px-2 py-1.5 border text-[11px]"
+                                  style={{
+                                    borderColor: "rgba(245,158,11,0.45)",
+                                    backgroundColor: "rgba(245,158,11,0.08)",
+                                    color: "#f59e0b",
+                                  }}
+                                >
+                                  <div className="flex items-center gap-1 font-bold mb-1">
+                                    <AlertTriangle size={11} strokeWidth={2.5} />
+                                    Citation guard: {flagged} citation{flagged === 1 ? "" : "s"} not grounded in your reference pool
+                                  </div>
+                                  <ul className="ml-3 list-disc space-y-0.5" style={{ color: "var(--ats-fg-secondary)" }}>
+                                    {[...halls, ...oor].slice(0, 5).map((it, i) => (
+                                      <li key={i}>
+                                        <code className="text-[10px] px-1 rounded" style={{ backgroundColor: "rgba(245,158,11,0.15)", color: "#f59e0b" }}>{it.cite}</code>
+                                        {" — "}
+                                        <span>{it.why}</span>
+                                      </li>
+                                    ))}
+                                    {flagged > 5 && (
+                                      <li className="italic">
+                                        …and {flagged - 5} more
+                                      </li>
+                                    )}
+                                  </ul>
+                                  <p className="mt-1 italic" style={{ color: "var(--ats-fg-muted)" }}>
+                                    Decide whether to keep, replace, or remove these — or click Re-revise again with anchoring instructions.
+                                  </p>
+                                </div>
+                              );
+                            })()
                           )}
                         </div>
                       )}

@@ -831,10 +831,16 @@ export default function AdminPage() {
 
   // ── Per-user analytics filter ─────────────────────────────────────────
   // Frontend-only filter that hides specific accounts (and optionally ALL
-  // tier="dev" accounts) from the per-user panels: All-users table, Top
-  // users by cost, Activity feed, Cost alerts, Feedback inbox. The
-  // aggregate cards (KPIs / time-series / conversion funnel) intentionally
-  // stay UNFILTERED — those numbers are pre-aggregated server-side and
+  // tier="dev" accounts) from every panel keyed on a user identity:
+  //   – per-user panels: All-users table, Top users by cost, Activity
+  //     feed, Cost alerts, Feedback inbox
+  //   – user-roster aggregates: Signed-in users KPI, Users-by-tier donut
+  //     (recomputed client-side from the same rawUserList the toolbar
+  //     operates on, so the filter visibly subtracts the cohort)
+  // ACTIVITY-aggregated cards (Active users, Searches, Lab runs, Cost,
+  // Conversations, Announcements, Feedback) and the time-series /
+  // conversion funnel charts intentionally stay UNFILTERED — those are
+  // pre-aggregated server-side from user_usage_daily / events tables and
   // would need a backend query parameter to slice by user. We surface a
   // small caption on the toolbar so operators know the limitation.
   //
@@ -1337,15 +1343,25 @@ export default function AdminPage() {
   // whose row type doesn't carry tier (Activity feed). email → user_id so
   // the toolbar can accept a typed-in email and resolve it to a stable
   // user_id (which is what we actually persist), and so the Feedback
-  // inbox (which only carries email) can be filtered.
+  // inbox (which only carries email) can be filtered. Tier values are
+  // normalised to lowercase here so the predicate's `"dev"` comparison
+  // catches "Dev"/"DEV"/" dev " from any upstream source the same way.
   const userIdToTier = useMemo(() => {
     const m = new Map<string, string>();
-    for (const u of rawUserList) m.set(u.id, u.tier);
+    for (const u of rawUserList) m.set(u.id, (u.tier ?? "").toString().trim().toLowerCase());
     return m;
   }, [rawUserList]);
   const userEmailToId = useMemo(() => {
     const m = new Map<string, string>();
     for (const u of rawUserList) if (u.email) m.set(u.email.toLowerCase(), u.id);
+    return m;
+  }, [rawUserList]);
+  // user_id → email so the email-pattern dev check below can reach the
+  // identifying address even when the panel passes only a user_id (top
+  // users / activity feed / cost alerts share this shape).
+  const userIdToEmail = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const u of rawUserList) if (u.email) m.set(u.id, u.email.toLowerCase());
     return m;
   }, [rawUserList]);
   // Anonymous user_id set — derived from server-tagged is_anonymous so panels
@@ -1357,23 +1373,44 @@ export default function AdminPage() {
     return s;
   }, [rawUserList]);
 
+  // Email-pattern fallback for "is this a dev account". Backs up the
+  // tier-based check so the toggle still drops dev rows when the
+  // backend's tier promotion is stale (e.g. profile.tier='free' but
+  // email is on the dev allow-list, or the userIdToTier map hasn't
+  // populated yet because /api/admin/users is mid-flight). Mirrors the
+  // backend's _ADMIN_DEV_EMAILS pattern (dev*@academicats.com).
+  const isDevEmail = (email: string | null | undefined): boolean => {
+    if (!email) return false;
+    return /^dev\d*@academicats\.com$/i.test(email.trim());
+  };
+
   // Two predicates (one keyed by user_id, one by email) — every panel
   // calls the one that matches its row shape. Both honour the global
   // `hideDevs` / `hideAnon` toggles + the explicit `extraHidden` set.
-  const isUserIdHidden = useCallback((userId: string | null | undefined, tier?: string | null): boolean => {
+  // Dev detection uses tier == "dev" first, then falls back to the
+  // dev-email pattern so a stale/missing tier still gets filtered.
+  const isUserIdHidden = useCallback((userId: string | null | undefined, tier?: string | null, email?: string | null): boolean => {
     if (!userId) return false;
     if (extraHidden.has(userId)) return true;
-    const t = tier ?? userIdToTier.get(userId);
-    if (hideDevs && t === "dev") return true;
+    if (hideDevs) {
+      const t = (tier ?? userIdToTier.get(userId) ?? "").toString().trim().toLowerCase();
+      if (t === "dev") return true;
+      const e = (email ?? userIdToEmail.get(userId) ?? "").toLowerCase();
+      if (isDevEmail(e)) return true;
+    }
     if (hideAnon && userIdAnonymous.has(userId)) return true;
     return false;
-  }, [extraHidden, hideDevs, hideAnon, userIdToTier, userIdAnonymous]);
+  }, [extraHidden, hideDevs, hideAnon, userIdToTier, userIdToEmail, userIdAnonymous]);
   const isEmailHidden = useCallback((email: string | null | undefined): boolean => {
     if (!email) return false;
+    // Dev-email match works even before the user list loads — important
+    // for the Feedback inbox, which can render before /api/admin/users
+    // returns.
+    if (hideDevs && isDevEmail(email)) return true;
     const uid = userEmailToId.get(email.toLowerCase());
     if (!uid) return false;
-    return isUserIdHidden(uid);
-  }, [userEmailToId, isUserIdHidden]);
+    return isUserIdHidden(uid, undefined, email);
+  }, [userEmailToId, isUserIdHidden, hideDevs]);
 
   // Add by typed input (UUID or email). Email path resolves to user_id so
   // we always persist a stable id. Returns null on success, error string
@@ -1439,7 +1476,7 @@ export default function AdminPage() {
       case "active":
       default:         arr.sort((a, b) => cmpDate(a.last_active_at, b.last_active_at)); break;
     }
-    const filtered = arr.filter(u => !isUserIdHidden(u.id, u.tier));
+    const filtered = arr.filter(u => !isUserIdHidden(u.id, u.tier, u.email));
     const q = userSearch.trim().toLowerCase();
     if (!q) return filtered;
     return filtered.filter(u => {
@@ -1448,6 +1485,35 @@ export default function AdminPage() {
       return e.includes(q) || idPrefix.includes(q);
     });
   }, [rawUserList, userSort, userSearch, isUserIdHidden]);
+
+  // ── Filter-aware user-roster stats ─────────────────────────────────────
+  // Drives the "Signed-in users" KPI and the "Users by tier" donut, which
+  // both used to read `ov.users.total` / `ov.users.by_tier` (server-aggregated,
+  // pre-filter). Now they recompute from `rawUserList` AFTER applying the
+  // global Per-user filter (hideDevs / hideAnon / extraHidden) so toggling
+  // a chip in the toolbar visibly updates both the headline number and the
+  // tier slices — matches the operator's mental model that the filter
+  // controls "which users count" everywhere they appear.
+  //
+  // Search (`userSearch`) is intentionally NOT applied here — it's a scratch
+  // input on the All Users table, not a global cohort selector. Squeezing
+  // the donut down to "1 slice" because someone typed an email would be
+  // surprising. Filter toolbar = global; search box = panel-local.
+  //
+  // Falls back to `ov` aggregates when rawUserList hasn't loaded yet (the
+  // /admin/users endpoint refreshes on a 5-min cadence vs /overview's 30s,
+  // so the donut would otherwise blank out after every overview poll).
+  const filteredUserStats = useMemo(() => {
+    if (!rawUserList.length) return null;
+    const visible = rawUserList.filter(u => !isUserIdHidden(u.id, u.tier, u.email));
+    const byTier: Record<string, number> = {};
+    let anonCount = 0;
+    for (const u of visible) {
+      byTier[u.tier] = (byTier[u.tier] ?? 0) + 1;
+      if (u.is_anonymous) anonCount += 1;
+    }
+    return { total: visible.length, byTier, anonCount, rawCount: rawUserList.length };
+  }, [rawUserList, isUserIdHidden]);
 
   // ── Gate screens ────────────────────────────────────────────────────────
   // All three gate screens inherit the day-mint theme wrapper below so
@@ -1649,14 +1715,20 @@ export default function AdminPage() {
         />
 
         {/* ── Per-user analytics filter ─────────────────────────────────
-             Hides specific accounts from the per-user panels (All users
-             table, Top users by cost, Activity feed, Cost alerts,
-             Feedback inbox). Aggregate cards (KPIs / time-series /
-             funnel) intentionally stay UNFILTERED — those are
-             pre-aggregated server-side and would need a backend
+             Hides specific accounts from every panel that's keyed on a
+             user identity:
+               – All users table, Top users by cost, Activity feed,
+                 Cost alerts, Feedback inbox  (per-user rows)
+               – Signed-in users KPI            (recomputed from rawUserList)
+               – Users by tier donut            (recomputed from rawUserList)
+             ACTIVITY-aggregated cards (Active users, Searches, Lab
+             runs, Cost, Conversations, Announcements, Feedback) and
+             the time-series / conversion funnel charts intentionally
+             stay UNFILTERED — those are pre-aggregated server-side from
+             user_usage_daily / events tables and would need a backend
              query parameter to slice. The caption on the right makes
-             that limitation explicit so operators don't expect
-             filtered KPIs. */}
+             that limitation explicit so operators don't expect a
+             dollar figure to drop when they hide their dev account. */}
         <AnalyticsFilterToolbar
           hideDevs={hideDevs}
           onToggleHideDevs={setHideDevs}
@@ -1714,20 +1786,27 @@ export default function AdminPage() {
                     authenticated-user roster, not the visitor roster.
                     Renamed 2026-04-28 because the prior "Total users"
                     label silently undercounted public-beta traffic. */}
-                {/* When Hide-anonymous is on we subtract the anon cohort from
-                    BOTH the headline number and the sublabel breakdown so the
-                    KPI matches what's visible in the user table below.
-                    `users.anonymous` is server-counted (profiles with email
-                    NULL) and is also excluded from `by_tier` adjustments
-                    because anon rows are bucketed under their stored tier
-                    (usually "free") server-side. */}
+                {/* Headline + sublabel honour the global Per-user filter
+                    (hideDevs / hideAnon / extraHidden). Numbers are
+                    recomputed from rawUserList via `filteredUserStats` so
+                    toggling a chip in the toolbar visibly subtracts the
+                    matching cohort here. Falls back to server aggregates
+                    (`ov.users.total` / `ov.users.by_tier`) only while the
+                    user list is still loading — the /users endpoint polls
+                    every 5 min vs /overview every 30s, so the KPI must
+                    survive a stale window without flashing "—". */}
                 {(() => {
-                  const total = ov?.users.total ?? null;
-                  const anon  = ov?.users.anonymous ?? 0;
-                  const shown = total === null ? null : (hideAnon ? Math.max(0, total - anon) : total);
-                  const sub = hideAnon
-                    ? `${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar · −${anon} anon hidden`
-                    : `${ov?.users.by_tier.dev ?? 0} dev · ${ov?.users.by_tier.scholar ?? 0} scholar · ${anon} anon`;
+                  const fs = filteredUserStats;
+                  const dev     = fs ? (fs.byTier.dev     ?? 0) : (ov?.users.by_tier.dev     ?? 0);
+                  const scholar = fs ? (fs.byTier.scholar ?? 0) : (ov?.users.by_tier.scholar ?? 0);
+                  const anon    = fs ? fs.anonCount               : (ov?.users.anonymous     ?? 0);
+                  const shown   = fs ? fs.total                   : (ov?.users.total ?? null);
+                  // When the filter is hiding cohorts, surface "X of Y"
+                  // so the operator sees what's been suppressed at a
+                  // glance instead of wondering why the headline dropped.
+                  const sub = fs && fs.rawCount !== fs.total
+                    ? `${dev} dev · ${scholar} scholar · ${anon} anon · ${fs.rawCount - fs.total} hidden`
+                    : `${dev} dev · ${scholar} scholar · ${anon} anon`;
                   return (
                     <KpiCard
                       icon={<Users size={14} />}
@@ -1852,26 +1931,46 @@ export default function AdminPage() {
             )}
           </div>
 
-          {/* Tier donut (1/3) */}
+          {/* Tier donut (1/3) — honours the global Per-user filter via
+              `filteredUserStats`. When the filter is active the slices
+              and centre total drop the matching cohort; the caption
+              below the title explains the suppression so a shrunken
+              donut doesn't read as a backend anomaly. Falls back to
+              `ov.users.by_tier` while the user list is still loading. */}
           <div className="rounded-2xl border p-4" style={panelStyle}>
             <h3 className="text-sm font-bold mb-1" style={{ color: "var(--ats-fg-primary)" }}>
               Users by tier
             </h3>
             <p className="text-[10px] mb-3" style={{ color: "var(--ats-fg-muted)" }}>
-              Distribution across pricing plans.
+              {filteredUserStats && filteredUserStats.rawCount !== filteredUserStats.total
+                ? `Distribution across pricing plans · ${filteredUserStats.rawCount - filteredUserStats.total} hidden by filter`
+                : "Distribution across pricing plans."}
             </p>
-            {ov ? (
-              <DonutChart
-                slices={Object.entries(ov.users.by_tier).map(([k, v]) => ({
-                  label: k, value: v, color: TIER_COLORS[k] ?? "#64748b",
-                }))}
-                total={ov.users.total}
-              />
-            ) : (
-              <div className="h-64 flex items-center justify-center text-xs" style={{ color: "var(--ats-fg-muted)" }}>
-                Loading…
-              </div>
-            )}
+            {(() => {
+              // Prefer the filter-aware client roster; fall back to the
+              // server aggregate only while the user list is empty.
+              const byTier = filteredUserStats
+                ? filteredUserStats.byTier
+                : (ov?.users.by_tier ?? null);
+              const total = filteredUserStats
+                ? filteredUserStats.total
+                : (ov?.users.total ?? null);
+              if (!byTier || total === null) {
+                return (
+                  <div className="h-64 flex items-center justify-center text-xs" style={{ color: "var(--ats-fg-muted)" }}>
+                    Loading…
+                  </div>
+                );
+              }
+              return (
+                <DonutChart
+                  slices={Object.entries(byTier).map(([k, v]) => ({
+                    label: k, value: v, color: TIER_COLORS[k] ?? "#64748b",
+                  }))}
+                  total={total}
+                />
+              );
+            })()}
           </div>
         </section>
 
@@ -1943,7 +2042,7 @@ export default function AdminPage() {
                 <RefreshCw size={10} /> Refresh
               </button>
             </div>
-            <CostAlertsPanel alerts={(costAlerts.data?.alerts ?? []).filter(a => !isUserIdHidden(a.user_id, a.tier))} />
+            <CostAlertsPanel alerts={(costAlerts.data?.alerts ?? []).filter(a => !isUserIdHidden(a.user_id, a.tier, a.email))} />
           </div>
 
           <div className="rounded-2xl border p-4" style={panelStyle}>
@@ -2064,7 +2163,7 @@ export default function AdminPage() {
             </div>
             {isPanelOpen("top-users") && (
             <TopUsersPanel
-              rows={(topUsers.data?.users ?? []).filter(u => !isUserIdHidden(u.user_id, u.tier))}
+              rows={(topUsers.data?.users ?? []).filter(u => !isUserIdHidden(u.user_id, u.tier, u.email))}
               onOpenDrawer={(row) => {
                 // Find the matching AdminUser (they share user_id). Fall
                 // back to a minimal synthesized row if the user list
@@ -2150,7 +2249,7 @@ export default function AdminPage() {
             // header above lets the user collapse the panel when it
             // gets long, which is the right control for "I don't want
             // to scroll past 50 rows of activity right now".
-            <ActivityFeed rows={(activity.data?.activity ?? []).filter(a => !isUserIdHidden(a.user_id))} />
+            <ActivityFeed rows={(activity.data?.activity ?? []).filter(a => !isUserIdHidden(a.user_id, undefined, a.email))} />
           )}
         </section>
 
@@ -4198,10 +4297,10 @@ function AnalyticsFilterToolbar({
         )}
 
         {/* Spacer + caption pinned right */}
-        <span className="ml-auto text-[10px] max-w-[320px] text-right"
+        <span className="ml-auto text-[10px] max-w-[360px] text-right"
               style={{ color: "var(--ats-fg-muted)" }}
-              title="KPIs and charts use server-aggregated data; filtering them would need a backend query parameter (TODO).">
-          Filters apply to per-user panels only — KPI cards / charts include all activity.
+              title="Activity-aggregated cards (Active, Searches, Lab runs, Cost, Conversations, Feedback) and time-series / funnel charts use server-aggregated data; filtering them would need a backend query parameter (TODO).">
+          Filter applies to per-user panels, Signed-in users, and the tier donut. Activity & cost charts include all traffic.
         </span>
       </div>
 
