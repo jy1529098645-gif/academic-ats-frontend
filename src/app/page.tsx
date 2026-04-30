@@ -221,7 +221,7 @@ type DeepReadResult = Record<string, any>;
 // flags back to true (frontend AND backend) once the upstream
 // claim-normalisation work is done.
 const EVIDENCE_CHAIN_ENABLED = false;
-const EVIDENCE_CHAIN_DISABLED_NOTE = "Evidence Chain is temporarily offline while we refine claim quality — back soon.";
+const EVIDENCE_CHAIN_DISABLED_NOTE = "Evidence Chain is paused while we improve claim accuracy — back soon.";
 
 type DragTarget = "left" | "center" | null;
 
@@ -1598,9 +1598,9 @@ function DesktopWorkspace() {
     const trimmed = deferredQuery.trim();
     const id = window.setTimeout(() => {
       if (trimmed.length === 0)        setAssessmentMessage("");
-      else if (trimmed.length < 4)     setAssessmentMessage("keep going…");
-      else if (trimmed.length < 25)    setAssessmentMessage("add a bit more or press Enter");
-      else                             setAssessmentMessage("ready — press Enter");
+      else if (trimmed.length < 4)     setAssessmentMessage("Keep typing…");
+      else if (trimmed.length < 25)    setAssessmentMessage("A bit more, or press Enter.");
+      else                             setAssessmentMessage("Looks good. Press Enter.");
     }, 350);
     return () => window.clearTimeout(id);
   }, [deferredQuery, buttonStep, hasRunSearch, isSubmitting]);
@@ -1611,7 +1611,7 @@ function DesktopWorkspace() {
   // sync if the step flips via any other path.
   useEffect(() => {
     if (hasRunSearch || isSubmitting) return;
-    if (buttonStep === 1) setAssessmentMessage("Quick or Deep? Press Enter to pick a mode and search your topic.");
+    if (buttonStep === 1) setAssessmentMessage("Pick Quick or Deep. Press Enter to search.");
     if (buttonStep === 2) setAssessmentMessage("Enter to go · ← → switch · Esc back");
   }, [buttonStep, hasRunSearch, isSubmitting]);
 
@@ -4271,7 +4271,7 @@ ${html}
             >
               {guestSignInBusy
                 ? "Starting guest session…"
-                : `Try without signing in · ${guestQuickLimit} Quick + ${guestCuratedLimit} Curated`}
+                : `Try without signing in · ${guestQuickLimit} Quick + ${guestCuratedLimit} Deep`}
             </button>
             {guestSignInError && (
               <p
@@ -4401,12 +4401,11 @@ ${html}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/Cats_01.png" alt="" className="h-14 w-14 mx-auto mb-3 select-none pointer-events-none" draggable={false} />
             <h2 className="text-lg font-bold mb-1" style={{ color: "var(--ats-fg-primary)" }}>
-              You&apos;ve used your guest trial
+              Your guest trial is up
             </h2>
             <p className="text-xs leading-relaxed mb-4" style={{ color: "var(--ats-fg-secondary)" }}>
-              Sign in to keep searching. Your account also stores history,
-              Lab outputs, and subscription state across devices — none of
-              which is kept for guests.
+              Sign in to keep searching. With an account you also keep your history,
+              Lab drafts, and quota across devices — guests don&apos;t.
             </p>
             <div className="mb-4 rounded-lg border p-2 text-[11px]" style={{
               borderColor:     "var(--ats-border-subtle)",
@@ -4418,7 +4417,7 @@ ${html}
                 <span className="tabular-nums">{guestQuickLimit - guestQuickRemaining} / {guestQuickLimit}</span>
               </div>
               <div className="flex items-center justify-between mt-0.5">
-                <span>Curated</span>
+                <span>Deep searches</span>
                 <span className="tabular-nums">{guestCuratedLimit - guestCuratedRemaining} / {guestCuratedLimit}</span>
               </div>
               {shortGuestId && (
@@ -4488,7 +4487,7 @@ ${html}
           {
             id:    "welcome",
             title: "Welcome to AcademiCats",
-            body:  "Quick tour. → next, ← back, Esc to skip.",
+            body:  "Quick tour. → next · ← back · Esc to skip.",
             onEnter: () => {
               setUserMenuOpen(false);
               setLeftVisible(false);
@@ -4500,8 +4499,8 @@ ${html}
           {
             id:        "search-input",
             target:    "search-input",
-            title:     "Enter your topic",
-            body:      "A topic or keywords work — full sentences not required. Press Enter to submit.",
+            title:     "Type your topic",
+            body:      "Keywords or a topic. No full sentences needed. Press Enter.",
             placement: "auto",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4521,7 +4520,7 @@ ${html}
             id:        "search-mode",
             target:    "search-mode",
             title:     "Quick or Deep",
-            body:      "Quick — broad scan across sources to surface trends and gaps. Deep — multi-agent screening for the highest-quality, highest-match papers, costs more quota.",
+            body:      "Quick: many papers, see trends. Deep: fewer papers, picked for quality. Deep costs more quota.",
             placement: "top",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4541,8 +4540,8 @@ ${html}
             // is purely about the LEFT side.
             id:        "left-panel",
             target:    "left-panel",
-            title:     "Brief & Charts",
-            body:      "After a search, this panel fills with the synthesised brief and citation/topic charts. Tabs at the top switch between them.",
+            title:     "Brief & Trend Chart",
+            body:      "After a search: a written summary and trend charts. Tabs at the top switch between them.",
             placement: "right",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4571,7 +4570,7 @@ ${html}
             id:        "right-panel",
             target:    "right-panel",
             title:     "Writing Lab & Paper Review",
-            body:      "Write essays, statements, or proposals from picked papers, or get a multi-agent critique of your own draft.",
+            body:      "Write essays, statements, or proposals from your picked papers — or paste your own draft for a multi-agent critique.",
             placement: "left",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4598,7 +4597,7 @@ ${html}
             id:        "user-menu",
             target:    "user-menu",
             title:     "Profile & help",
-            body:      "Profile, usage, and Help (which re-launches this tour) live behind your avatar.",
+            body:      "Your profile, usage, and Help (re-opens this tour) live here.",
             placement: "right",
             onEnter:   () => {
               setUserMenuOpen(true);
@@ -4618,7 +4617,7 @@ ${html}
             id:        "feedback-button",
             target:    "feedback-button",
             title:     "Send feedback",
-            body:      "Bug? Idea? Hit the bubble bottom-right — we read everything.",
+            body:      "Bug or idea? Tap the bubble bottom-right. We read everything.",
             placement: "left",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4639,7 +4638,7 @@ ${html}
             // behind the closing card.
             id:    "done",
             title: "All set",
-            body:  "User menu → Help re-launches this tour anytime.",
+            body:  "Re-open this tour from the user menu → Help.",
             onEnter: () => {
               setUserMenuOpen(false);
               setLeftVisible(false);
@@ -4756,7 +4755,7 @@ ${html}
                     color:           "var(--ats-fg-accent)",
                   }}
                   title={`Sign in for unlimited access · session ID: ${shortGuestId}`}
-                  {...helpProps(`${shortGuestId} · ${guestQuickRemaining} Quick + ${guestCuratedRemaining} Curated left · click to sign in`)}
+                  {...helpProps(`${shortGuestId} · ${guestQuickRemaining} Quick + ${guestCuratedRemaining} Deep left · click to sign in`)}
                 >
                   {shortGuestId || "Guest"} · {guestQuickRemaining}Q / {guestCuratedRemaining}C left
                 </button>
@@ -5577,7 +5576,7 @@ ${html}
             <div
               className="stage-reveal mt-4 rounded-2xl bg-slate-950/40 px-4 py-3"
             >
-              <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-2" onClick={() => setSettingsOpen(false)}><SlidersHorizontal size={14} /><span>Settings & Controls</span><ChevronDown size={12} className="ml-auto rotate-180" /></div>
+              <div className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-slate-200 mb-2" onClick={() => setSettingsOpen(false)}><SlidersHorizontal size={14} /><span>Search Settings</span><ChevronDown size={12} className="ml-auto rotate-180" /></div>
               <div className="mt-2 space-y-2.5">
                 {/* Row 1a: per-mode paper counts (Quick + Curated, side by side).
                     Each mode has its own slot so the user can keep Quick set
@@ -5586,7 +5585,7 @@ ${html}
                     so it's obvious which one a Run will actually use. */}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-400">Quick — paper count</label>
+                    <label className="mb-1 block text-xs font-medium text-slate-400">Quick — how many papers</label>
                     <input
                       type="number"
                       min={3}
@@ -5608,7 +5607,7 @@ ${html}
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs font-medium text-slate-400">Curated — paper count</label>
+                    <label className="mb-1 block text-xs font-medium text-slate-400">Deep — how many papers</label>
                     <input
                       type="number"
                       min={3}
@@ -5636,9 +5635,9 @@ ${html}
                     Settings panel. Single source of truth lives there. */}
                 {/* Row 2: checkboxes */}
                 <div className="flex flex-wrap gap-2">
-                  <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300"><input type="checkbox" checked={preferAbstracts} onChange={(e) => setPreferAbstracts(e.target.checked)} />Prefer abstracts</label>
-                  <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300"><input type="checkbox" checked={strictCoreOnly} onChange={(e) => setStrictCoreOnly(e.target.checked)} />Strict core only</label>
-                  <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300"><input type="checkbox" checked={openAccessOnly} onChange={(e) => setOpenAccessOnly(e.target.checked)} />Open access only</label>
+                  <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300" title="Prefer papers that have an abstract over those that don't."><input type="checkbox" checked={preferAbstracts} onChange={(e) => setPreferAbstracts(e.target.checked)} />Need abstract</label>
+                  <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300" title="Only show papers tightly on-topic — drops broader related work."><input type="checkbox" checked={strictCoreOnly} onChange={(e) => setStrictCoreOnly(e.target.checked)} />On-topic only</label>
+                  <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2 py-1 text-xs text-slate-300" title="Only show papers with a free full-text version available."><input type="checkbox" checked={openAccessOnly} onChange={(e) => setOpenAccessOnly(e.target.checked)} />Free to read only</label>
                 </div>
                 {/* Row 3: year range */}
                 <div className="flex flex-wrap items-center gap-2">
@@ -5670,7 +5669,7 @@ ${html}
                     }}
                     className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-1 text-xs font-semibold text-slate-400 transition hover:border-red-500/40 hover:text-red-400 hover:bg-red-500/5"
                   ><span className="flex items-center gap-1.5"><Trash2 size={12} />Clear Cache</span></button>
-                  <span className="text-xs text-slate-600">Clears in-memory backend cache</span>
+                  <span className="text-xs text-slate-600">Clears server-side search cache</span>
                 </div>
               </div>
             </div>
@@ -5853,17 +5852,17 @@ ${html}
             {(hasRunSearch || isSubmitting || displayedPapers.length > 0) && (
             <div className={`mt-6 border-t border-slate-800 pt-6 ${firstInteractionDone ? "retrieved-papers-rise" : "hidden"}`}>
               <div className="mb-3 flex items-center gap-3">
-                <span className="flex items-center gap-2 text-xl font-black"><BookOpen size={18} /><span>Retrieved Papers</span></span>
+                <span className="flex items-center gap-2 text-xl font-black"><BookOpen size={18} /><span>Papers</span></span>
                 {papersAreStreaming && (
                   <span className="flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-xs font-semibold text-blue-400">
                     <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
-                    Deep analysis running…
+                    Deep analysis…
                   </span>
                 )}
                 {displayedPapers.length > 0 && (
                   <span className="text-sm text-slate-500">
                     {retrievedPoolSize > displayedPapers.length
-                      ? <>Selected <span className="font-semibold text-slate-300">{displayedPapers.length}</span> from <span className="font-semibold text-slate-300">{retrievedPoolSize.toLocaleString()}</span> retrieved</>
+                      ? <>Showing <span className="font-semibold text-slate-300">{displayedPapers.length}</span> of <span className="font-semibold text-slate-300">{retrievedPoolSize.toLocaleString()}</span> found</>
                       : <>{displayedPapers.length} papers</>}
                   </span>
                 )}
@@ -5892,8 +5891,8 @@ ${html}
               {(result as any)?._papers_fallback && !isSubmitting && (
                 <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-xs text-amber-300">
                   {fastMode
-                    ? "This run returned 0 papers — showing the previous result instead. Try broadening sources or the query."
-                    : "Curated mode returned 0 papers — showing your previous result instead. Sources may have timed out, or filters were too strict. Try Quick mode or a broader query."}
+                    ? "Got 0 papers this time — showing the last result. Try broader keywords or more sources."
+                    : "Got 0 papers this time — showing the last result. Filters may be too tight, or a source timed out. Try Quick mode or broader keywords."}
                 </div>
               )}
               {papersAreStreaming && (
@@ -5933,11 +5932,11 @@ ${html}
                       aria-hidden
                     />
                     <span className="italic truncate">
-                      {rawProgressMsg || "Initialising deep validation…"}
+                      {rawProgressMsg || "Starting deep analysis…"}
                     </span>
                   </div>
                   <div className="mt-1 text-[10px] text-slate-600">
-                    {displayedPapers.length} candidates found · Scores available after analysis completes
+                    {displayedPapers.length} papers found so far · scores arrive when analysis finishes
                   </div>
                 </div>
               )}
@@ -5958,7 +5957,7 @@ ${html}
                             return (
                               <button
                                 onClick={() => inLab ? removeFromLab(paperKey) : addToLab(paper, paperKey)}
-                                title={inLab ? "Remove from writing references" : "Use this paper as a reference in the writing tools"}
+                                title={inLab ? "Remove from your writing references" : "Add to your writing references"}
                                 className={`shrink-0 mt-1 flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all ${
                                   inLab
                                     ? "border-blue-500/50 bg-blue-500/10 text-blue-300 hover:border-rose-500/50 hover:text-rose-400 hover:bg-rose-500/10"
@@ -6006,9 +6005,9 @@ ${html}
                             // "undisclosed" apart from "zero citations".
                             if (raw === null || raw === undefined || raw === "") {
                               return (
-                                <span className="inline-flex items-center gap-1 rounded-full border border-slate-600/50 bg-slate-700/30 px-2 py-0.5 text-[11px] font-medium text-slate-400" title="The source API did not publish a citation count for this paper.">
+                                <span className="inline-flex items-center gap-1 rounded-full border border-slate-600/50 bg-slate-700/30 px-2 py-0.5 text-[11px] font-medium text-slate-400" title="The source didn't publish a citation count for this paper.">
                                   <Quote size={10} />
-                                  <span>Citations undisclosed</span>
+                                  <span>Citations: unknown</span>
                                 </span>
                               );
                             }
@@ -6288,7 +6287,7 @@ ${html}
                           <div className="mt-3 rounded-xl border border-slate-700/60 bg-slate-800/40 px-4 py-2.5 text-xs text-slate-400 flex items-start gap-2">
                             <ShieldCheck size={14} className="shrink-0 mt-0.5 text-slate-500" />
                             <span>
-                              Evidence Chain couldn&apos;t extract structured claims from this paper&apos;s metadata. Try the abstract on the paper&apos;s source page via <span className="font-semibold">Open Paper</span>, or add this paper to Writing Lab where its full-text processing lives.
+                              Evidence Chain couldn&apos;t pull structured claims from this paper. Open the source page via <span className="font-semibold">Open Paper</span>, or add it to Writing Lab where the full text gets processed.
                             </span>
                           </div>
                         )}
@@ -8019,7 +8018,7 @@ ${html}
                           className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] text-slate-600 cursor-not-allowed shrink-0"
                         >Add</button>
                       </div>
-                      <p className="text-[9px] text-slate-600">Email login coming soon · use Google to sign in</p>
+                      <p className="text-[9px] text-slate-600">Email login coming soon — use Google for now</p>
                     </div>
 
                     {/* Sign out */}
@@ -8190,7 +8189,7 @@ ${html}
             {/* Inner column: nodes row + clear-all row (both scroll together; clear-all is sticky-left) */}
             <div className="flex flex-col min-w-max px-4 pt-2 pb-1">
               {!historyLoading && historyList.length === 0 && (
-                <p className="text-xs text-slate-500 py-2">No history yet. Run a search to get started.</p>
+                <p className="text-xs text-slate-500 py-2">No searches yet. Run one to get started.</p>
               )}
               {!historyLoading && historyList.length > 0 && (
                 <div data-history-row className="relative flex items-start">

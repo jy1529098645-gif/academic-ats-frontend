@@ -168,8 +168,8 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
   // without wrapping. Wording deliberately leans on "what each mode is FOR"
   // rather than "how it works" — readers pick a mode based on their
   // research goal, not on the implementation.
-  const MODE_HELP_QUICK = "Quick scan across many articles to surface trends and gaps.";
-  const MODE_HELP_DEEP  = "Deep selection of high-quality, high-match articles.";
+  const MODE_HELP_QUICK = "Many papers. See trends and gaps.";
+  const MODE_HELP_DEEP  = "Fewer papers, picked for quality and fit.";
 
   // Keyboard-focus → hover-help bridge. Mouse hover already pipes the
   // mode description through `hh()` below, but keyboard arrow nav (←/→)
@@ -316,7 +316,7 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
             className="sprite-voice voice-fade inline-flex items-center gap-2 leading-snug flex-wrap justify-center"
             style={{ color: "var(--ats-fg-muted)" }}
           >
-            <span>Tell me what to explore</span>
+            <span>What do you want to research?</span>
             <span
               aria-hidden
               className="sprite-badge inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-semibold tracking-wide animate-pulse"
@@ -423,7 +423,7 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
               key={`term-${i}`}
               onClick={() => onPickRecommendedTerm(term)}
               title={`Use "${term}" as your search`}
-              {...hh(`use "${term}" — then pick Quick or Deep`)}
+              {...hh(`Try "${term}". Then pick Quick or Deep.`)}
               data-focused={isFocused(`term-${i}`) || undefined}
               data-selected={isSelected || undefined}
               tabIndex={showRecommendedTerms ? 0 : -1}

@@ -137,24 +137,24 @@ const LANGUAGE_OPTIONS = [
 //   sketch   — ~2 grades more lenient. An early outline that's on the
 //              right track gets Minor Revision instead of Reject.
 const DRAFT_LEVELS: Array<{ id: "working" | "final" | "sketch"; label: string; blurb: string }> = [
-  { id: "working", label: "Working draft",            blurb: "Default — calibrate to in-progress writing" },
-  { id: "final",   label: "Final / submission-ready", blurb: "Apply full publication-grade scrutiny" },
-  { id: "sketch",  label: "Early sketch / outline",   blurb: "Focus on structure + direction; skip polish" },
+  { id: "working", label: "Working draft",     blurb: "Default — for in-progress writing." },
+  { id: "final",   label: "Final / submitting", blurb: "Strict — publication-grade review." },
+  { id: "sketch",  label: "Outline / sketch",  blurb: "Lenient — focus on structure, skip polish." },
 ];
 
 const DRAFT_TYPES: Array<{ id: string; label: string; hint: string }> = [
-  { id: "auto",                 label: "Let reviewers infer",    hint: "" },
-  { id: "research_paper",       label: "Research paper",         hint: "Full empirical / theoretical research paper — expect Methods, Results, Discussion." },
-  { id: "literature_review",    label: "Literature review",      hint: "A synthesis of prior work. Weight the review of coverage + organisation." },
-  { id: "research_proposal",    label: "Research proposal",      hint: "Proposal for future work. Weight research-question clarity + feasibility." },
-  { id: "thesis_dissertation",  label: "Thesis / dissertation section", hint: "A chapter or section of a longer thesis — expect deeper scaffolding." },
-  { id: "essay",                label: "Academic essay",         hint: "Argumentative essay. Weight thesis strength + paragraph-level logic." },
-  { id: "abstract",             label: "Abstract",               hint: "A short (<= 300 word) abstract. Weight compression + information density." },
-  { id: "introduction",         label: "Introduction section",   hint: "Opening section of a paper — weight gap statement + motivation." },
-  { id: "discussion",           label: "Discussion section",     hint: "Discussion / interpretation section — weight alignment with evidence." },
-  { id: "grant_application",    label: "Grant application",      hint: "Grant proposal — weight significance, innovation, feasibility." },
+  { id: "auto",                 label: "Let the AI infer",       hint: "" },
+  { id: "research_paper",       label: "Research paper",         hint: "Full empirical or theoretical paper — expects Methods, Results, Discussion." },
+  { id: "literature_review",    label: "Literature review",      hint: "Synthesis of prior work. Reviewers weight coverage and organisation." },
+  { id: "research_proposal",    label: "Research proposal",      hint: "Plan for future work. Reviewers weight question clarity and feasibility." },
+  { id: "thesis_dissertation",  label: "Thesis / dissertation section", hint: "Chapter or section of a longer thesis — expects deeper scaffolding." },
+  { id: "essay",                label: "Academic essay",         hint: "Argumentative essay. Reviewers weight thesis strength and paragraph logic." },
+  { id: "abstract",             label: "Abstract",               hint: "Short abstract (≤ 300 words). Reviewers weight compression and density." },
+  { id: "introduction",         label: "Introduction section",   hint: "Opening section — reviewers weight the gap statement and motivation." },
+  { id: "discussion",           label: "Discussion section",     hint: "Discussion / interpretation — reviewers weight fit with the evidence." },
+  { id: "grant_application",    label: "Grant application",      hint: "Grant proposal — reviewers weight significance, innovation, feasibility." },
   { id: "conference_paper",     label: "Conference paper",       hint: "Short conference submission — tighter word budget than a journal paper." },
-  { id: "other",                label: "Other / I'm not sure",   hint: "" },
+  { id: "other",                label: "Other / not sure",       hint: "" },
 ];
 
 const SEVERITY_STYLES: Record<Severity, { fg: string; bg: string; border: string; label: string }> = {
@@ -240,7 +240,7 @@ export function PaperReviewPanel() {
   // ── File extraction ────────────────────────────────────────────────────────
   const handleFile = useCallback(async (file: File) => {
     if (!/\.(pdf|txt|md)$/i.test(file.name)) {
-      setExtractError("Only .pdf, .txt, and .md files are supported.");
+      setExtractError("Only PDF, TXT, and Markdown files work here.");
       return;
     }
     setExtractBusy(true);
@@ -270,7 +270,7 @@ export function PaperReviewPanel() {
   const handleRun = useCallback(async () => {
     const text = paperText.trim();
     if (!text) {
-      setError("Paste a draft or upload a file first.");
+      setError("Paste your draft or upload a file first.");
       return;
     }
     if (generating) return;
@@ -569,7 +569,7 @@ export function PaperReviewPanel() {
         <button
           onClick={() => void handleRun()}
           disabled={!paperText.trim() || generating}
-          title="Shares daily quota with Synthesis Lab."
+          title="Shares the daily quota with Writing Lab."
           className="relative flex-1 rounded-xl px-4 py-3 text-sm font-bold transition-all disabled:cursor-not-allowed disabled:opacity-50 overflow-hidden"
           style={{
             borderWidth: "1px",
