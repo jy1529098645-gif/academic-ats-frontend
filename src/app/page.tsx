@@ -2769,16 +2769,17 @@ function DesktopWorkspace() {
       // papers are actually visible. Without these flips, a user clicking
       // a history entry from the landing screen would silently load the
       // result into state but the UI would still show the chips + Quick /
-      // Curated buttons because hasRunSearch was false. Snap to a
-      // default-style 1:3:1 layout with both side panels open — same shape
-      // the user would have seen at the END of the original search.
+      // Curated buttons because hasRunSearch was false. Snap to the same
+      // post-search shape used by snapToWorkingLayout() — 1:1 left+center
+      // with the right Lab panel collapsed, since restoring a past search
+      // is conceptually equivalent to landing on its results page fresh.
       setHasRunSearch(true);
       setIntroStage("full");
       setButtonStep(0);
       setAssessmentMessage("");
       setGridTransitioning(true);
-      setLeftVisible(true); setAnalyticsVisible(true);
-      setLeftPct(25); setCenterPct(50);
+      setLeftVisible(true); setAnalyticsVisible(false);
+      setLeftPct(50); setCenterPct(50);
       setLeftTab("brief");
       window.setTimeout(() => setGridTransitioning(false), 950);
     }
@@ -3093,13 +3094,42 @@ function DesktopWorkspace() {
     return () => clearTimeout(t);
   }, [leftVisible, analyticsVisible]);
 
-  /** Animate the layout to 1:3:1 (20 / 60 / 20) with the same grid-transition
-   *  feel used for panel toggles — the user sees the dividers slide into
-   *  their "working" positions exactly like they dragged them there. */
+  /** Animate the layout to 1:1 left+center with the right panel hidden —
+   *  the post-search "browsing results" shape. Same grid-transition feel
+   *  used for panel toggles, so the user sees the dividers slide into
+   *  their working positions exactly like they dragged them there.
+   *
+   *  Rationale (2026-04 redesign): the previous post-search snap was
+   *  1:3:1 with the right panel pre-expanded, but the right panel
+   *  (Writing Lab / Paper Review) is empty until the user has actually
+   *  added some references — keeping it open just stole horizontal
+   *  pixels from the brief + result list, which ARE useful right after
+   *  search lands. Now we keep the right panel collapsed and let the
+   *  first "Add as reference" click expand it (see snapToReferenceLayout
+   *  below). */
   const snapToWorkingLayout = useCallback(() => {
     setGridTransitioning(true);
-    setLeftPct(25);
+    setLeftVisible(true);
+    setAnalyticsVisible(false);
+    setLeftPct(50);
     setCenterPct(50);
+    window.setTimeout(() => setGridTransitioning(false), 950);
+  }, []);
+
+  /** Animate to 0:1:1 — left panel hidden, center + right panel equal.
+   *  Triggered by the first "Add as reference" click on a paper card,
+   *  because adding a paper signals the user has shifted from BROWSING
+   *  results (left + center is the relevant surface) to PREPARING TO
+   *  WRITE (center + right). The right Lab needs the horizontal real
+   *  estate so the reference list, brief inputs, and writer settings
+   *  fit comfortably; the left brief / charts panel can be reopened
+   *  on demand from the layout dropdown. */
+  const snapToReferenceLayout = useCallback(() => {
+    setGridTransitioning(true);
+    setLeftVisible(false);
+    setAnalyticsVisible(true);
+    setLeftPct(0);
+    setCenterPct(50);   // → right = 50, center:right = 1:1
     window.setTimeout(() => setGridTransitioning(false), 950);
   }, []);
 
@@ -3823,13 +3853,17 @@ ${html}
     // search layout after an explicit abort.
     prePuttingSearchLayoutRef.current = { leftVisible, analyticsVisible, leftPct, centerPct };
 
-    // Apply the user's chosen layout mode (default / scholar / student /
-    // writing). The mode dictates which side panels open and how the
-    // column ratios divide — replaces the old hardcoded 1:3:1 snap so a
-    // user who picked, say, Scholar mode keeps the right panel collapsed
-    // when they hit Run instead of seeing it pop open against their will.
+    // Snap to the post-search "browsing results" shape — left + center
+    // 1:1, right panel collapsed. The previous version called
+    // applyLayoutMode(layoutMode) here so a user-picked mode (Default /
+    // Scholar / Student / Writing) survived the search; we now hard-snap
+    // to a single layout so the right Lab panel doesn't pre-expand on a
+    // user who hasn't added any references yet (it would be empty
+    // anyway — see snapToWorkingLayout's docstring for the full
+    // rationale). The layoutMode dropdown still works for users who
+    // explicitly want a different shape post-search.
     _autoSnappedRef.current = false;
-    applyLayoutMode(layoutMode);
+    snapToWorkingLayout();
     _autoSnappedRef.current = true;
 
     const _usedUnderstand = directionData !== null;
@@ -4532,10 +4566,24 @@ ${html}
   }
 
   // ── Synthesis Lab helpers ─────────────────────────────────────────────────
+  // Adding the FIRST reference triggers a layout snap — left panel
+  // collapses, right panel expands, center:right ratio 1:1. This mirrors
+  // the user's intent transition: they've gone from "browsing results"
+  // (left + center is relevant) to "preparing to write" (center + right
+  // is relevant). Subsequent adds only nudge the right panel back open
+  // if the user manually closed it; they don't keep re-snapping the
+  // dividers on every paper added (which would feel jumpy).
   const addToLab = useCallback((paper: Paper, key: string) => {
+    const isAlreadyAdded = labRefs.some(r => r.key === key);
+    if (isAlreadyAdded) return;
+    const isFirstAdd = labRefs.length === 0;
     setLabRefs(prev => prev.some(r => r.key === key) ? prev : [...prev, { key, paper }]);
-    setAnalyticsVisible(true);
-  }, []);
+    if (isFirstAdd) {
+      snapToReferenceLayout();
+    } else {
+      setAnalyticsVisible(true);
+    }
+  }, [labRefs, snapToReferenceLayout]);
 
   const removeFromLab = useCallback((key: string) => {
     setLabRefs(prev => prev.filter(r => r.key !== key));
