@@ -4929,6 +4929,44 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
             );
           })}
         </tbody>
+        {/* Totals row — sums every visible user's window counters so an
+            operator can read aggregate volume / cost at a glance without
+            mental arithmetic. The values respect whatever filter +
+            window the operator picked above (the table receives the
+            already-filtered list), so the totals always describe the
+            visible roster, never the hidden one. Bonus quota isn't
+            summed here because the bonus values are PER-USER additive
+            grants, not throughput, and adding them would invite a
+            "why is the bonus column also tallying?" mis-read. */}
+        {(() => {
+          const totals = users.reduce((acc, u) => {
+            const w = u.window ?? u.today;
+            acc.quick += w.quick_search_count;
+            acc.deep  += w.deep_search_count;
+            acc.synth += w.synthesis_count;
+            acc.chain += w.deep_read_count;
+            acc.cost  += w.llm_cost_usd;
+            return acc;
+          }, { quick: 0, deep: 0, synth: 0, chain: 0, cost: 0 });
+          return (
+            <tfoot>
+              <tr
+                className="text-[10px] uppercase tracking-wider border-t"
+                style={{ color: "var(--ats-fg-secondary)", borderColor: "var(--ats-border-subtle)" }}
+              >
+                <td className="pt-2 pr-3 font-bold" colSpan={3}>
+                  Totals · {users.length} user{users.length === 1 ? "" : "s"}
+                </td>
+                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.quick}</td>
+                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.deep}</td>
+                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.synth}</td>
+                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.chain}</td>
+                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.cost.toFixed(4)}</td>
+                <td className="pt-2 pr-3" colSpan={4} />
+              </tr>
+            </tfoot>
+          );
+        })()}
       </table>
     </div>
   );
