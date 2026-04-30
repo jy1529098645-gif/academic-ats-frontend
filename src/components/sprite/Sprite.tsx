@@ -389,8 +389,8 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
           className="sprite-bubble inline-flex items-center justify-center gap-2 rounded-full border-2 px-5 py-2.5 text-base font-bold tracking-tight transition-all shadow-md hover:brightness-105 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
           style={{
             borderColor:     "var(--ats-border-accent)",
-            backgroundColor: "var(--ats-fg-accent)",
-            color:           "var(--ats-bg-section)",
+            backgroundColor: "var(--ats-bg-accent-soft)",
+            color:           "var(--ats-fg-accent)",
           }}
         >
           <FlaskConical size={16} strokeWidth={2.5} />
