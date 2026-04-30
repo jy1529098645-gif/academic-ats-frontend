@@ -164,8 +164,12 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
   // mouse hover-help (`hh()` factory below) AND the keyboard-focus
   // surface (the useEffect underneath). Keeps the two paths from
   // drifting out of sync.
-  const MODE_HELP_QUICK   = "Scan at scale for trends";
-  const MODE_HELP_CURATED = "Select for quality and reliability";
+  // Hover / focus help text — kept short so it fits the sprite voice slot
+  // without wrapping. Wording deliberately leans on "what each mode is FOR"
+  // rather than "how it works" — readers pick a mode based on their
+  // research goal, not on the implementation.
+  const MODE_HELP_QUICK = "Quick scan across many articles to surface trends and gaps.";
+  const MODE_HELP_DEEP  = "Deep selection of high-quality, high-match articles.";
 
   // Keyboard-focus → hover-help bridge. Mouse hover already pipes the
   // mode description through `hh()` below, but keyboard arrow nav (←/→)
@@ -186,11 +190,11 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
       // don't fight a different surface (e.g. a layout button hover)
       // that may have replaced our value in the meantime.
       useHoverHelpStore.getState().clearIfMatches(MODE_HELP_QUICK);
-      useHoverHelpStore.getState().clearIfMatches(MODE_HELP_CURATED);
+      useHoverHelpStore.getState().clearIfMatches(MODE_HELP_DEEP);
       return;
     }
     if (focusedKey === "mode-quick")        useHoverHelpStore.getState().setText(MODE_HELP_QUICK);
-    else if (focusedKey === "mode-curated") useHoverHelpStore.getState().setText(MODE_HELP_CURATED);
+    else if (focusedKey === "mode-curated") useHoverHelpStore.getState().setText(MODE_HELP_DEEP);
   }, [focusedKey, showButtonFocusRing]);
 
   useImperativeHandle(ref, () => ({
@@ -341,46 +345,56 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
           fine as an instant flip. */}
       {!hasRunSearch && (
       <div
-        className="flex flex-row items-center justify-center gap-2"
+        className="flex flex-row items-center justify-center gap-3"
         style={{
-          minHeight:     "2.5rem",
+          minHeight:     "3rem",
           opacity:       showSearchModeButtons ? 1 : 0,
           pointerEvents: showSearchModeButtons ? "auto" : "none",
           transition:    "none",
         }}
         aria-hidden={!showSearchModeButtons}
       >
+        {/* Two primary actions of the entire app — Quick scan vs. Deep
+            curated. Made deliberately heavier than other chrome:
+            larger padding (px-5 py-2.5), bigger label (text-base),
+            chunkier icon (size 16), accent-tinted background + accent
+            border so they read as a primary CTA pair against the
+            translucent sprite-bubble panel rest. The accent palette
+            tokens (var(--ats-fg-accent) / --ats-bg-accent-soft) keep
+            the buttons themed under day / night / morning-mint /
+            warm-paper, so this stays consistent across the user's
+            chosen theme. */}
         <button
           onClick={() => onStartSearch("quick")}
           title={MODE_HELP_QUICK}
           {...hh(MODE_HELP_QUICK)}
           data-focused={(showButtonFocusRing && isFocused("mode-quick")) || undefined}
           tabIndex={showSearchModeButtons ? 0 : -1}
-          className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+          className="sprite-bubble inline-flex items-center justify-center gap-2 rounded-full border-2 px-5 py-2.5 text-base font-bold tracking-tight transition-all shadow-md hover:brightness-105 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
           style={{
-            borderColor:     "var(--ats-border-subtle)",
-            backgroundColor: "var(--ats-bg-panel)",
-            color:           "var(--ats-fg-secondary)",
+            borderColor:     "var(--ats-border-accent)",
+            backgroundColor: "var(--ats-bg-accent-soft)",
+            color:           "var(--ats-fg-accent)",
           }}
         >
-          <Zap size={14} />
+          <Zap size={16} strokeWidth={2.5} />
           <span>Quick Search</span>
         </button>
         <button
           onClick={() => onStartSearch("curated")}
-          title={MODE_HELP_CURATED}
-          {...hh(MODE_HELP_CURATED)}
+          title={MODE_HELP_DEEP}
+          {...hh(MODE_HELP_DEEP)}
           data-focused={(showButtonFocusRing && isFocused("mode-curated")) || undefined}
           tabIndex={showSearchModeButtons ? 0 : -1}
-          className="sprite-bubble inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 font-semibold transition-all hover:brightness-110 hover:border-[var(--ats-border-accent)] data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
+          className="sprite-bubble inline-flex items-center justify-center gap-2 rounded-full border-2 px-5 py-2.5 text-base font-bold tracking-tight transition-all shadow-md hover:brightness-105 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm data-[focused]:ring-2 data-[focused]:ring-[var(--ats-fg-accent)] data-[focused]:ring-offset-2 data-[focused]:ring-offset-[var(--ats-bg-section)]"
           style={{
-            borderColor:     "var(--ats-border-subtle)",
-            backgroundColor: "var(--ats-bg-panel)",
-            color:           "var(--ats-fg-secondary)",
+            borderColor:     "var(--ats-border-accent)",
+            backgroundColor: "var(--ats-fg-accent)",
+            color:           "var(--ats-bg-section)",
           }}
         >
-          <FlaskConical size={14} />
-          <span>Curated Analysis</span>
+          <FlaskConical size={16} strokeWidth={2.5} />
+          <span>Deep Search</span>
         </button>
       </div>
       )}
@@ -409,7 +423,7 @@ const _SpriteImpl = forwardRef<SpriteHandle, SpriteProps>(function Sprite(props,
               key={`term-${i}`}
               onClick={() => onPickRecommendedTerm(term)}
               title={`Use "${term}" as your search`}
-              {...hh(`use "${term}" — then pick Quick or Curated`)}
+              {...hh(`use "${term}" — then pick Quick or Deep`)}
               data-focused={isFocused(`term-${i}`) || undefined}
               data-selected={isSelected || undefined}
               tabIndex={showRecommendedTerms ? 0 : -1}

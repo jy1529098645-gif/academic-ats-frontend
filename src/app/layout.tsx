@@ -32,14 +32,14 @@ export const metadata: Metadata = {
     default:  "AcademiCats",
     template: "%s · AcademiCats",
   },
-  description: "An academic assistant for structuring and verifying thought.",
+  description: "From research to writing — in minutes, not days.",
   // OpenGraph / Twitter card meta so a link share to Slack, Twitter, or
   // iMessage renders with the mascot card instead of a generic Next.js
   // preview. Image is the existing landing mascot — it's the asset
   // every cold visitor already sees.
   openGraph: {
     title:       "AcademiCats",
-    description: "An academic assistant for structuring and verifying thought.",
+    description: "From research to writing — in minutes, not days.",
     type:        "website",
     siteName:    "AcademiCats",
     images: [{ url: "/Cats_01.png", alt: "AcademiCats mascot" }],
@@ -47,7 +47,7 @@ export const metadata: Metadata = {
   twitter: {
     card:        "summary",
     title:       "AcademiCats",
-    description: "An academic assistant for structuring and verifying thought.",
+    description: "From research to writing — in minutes, not days.",
     images:      ["/Cats_01.png"],
   },
   // Tells Next to honour the public/robots.txt we ship rather than the

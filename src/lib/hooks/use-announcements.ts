@@ -30,7 +30,17 @@ export type Announcement = {
 
 const FEED_LIMIT = 50;
 
-export function useAnnouncements() {
+/**
+ * `enabled` defaults to true for backwards compat, but the main app
+ * passes `!!authUser` so the REST fetch + Realtime subscription don't
+ * fire while the user is sitting on the login overlay. Without this
+ * gate we were opening a Supabase realtime channel + hitting
+ * /api/announcements on every cold visit, including bots / scrapers
+ * that never sign in — pure waste on the WebSocket connection pool
+ * and on the dyno's CPU. The channel cleans up if `enabled` flips
+ * back to false (e.g. on sign-out).
+ */
+export function useAnnouncements(enabled: boolean = true) {
   const [items, setItems] = useState<Announcement[]>([]);
   const [error, setError] = useState<string>("");
 
@@ -46,9 +56,13 @@ export function useAnnouncements() {
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!enabled) return;
+    void refresh();
+  }, [refresh, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     // Live subscription — INSERT prepends, DELETE drops. Dedup on id in
     // both directions so REST refresh + Realtime echo of the same row
     // stay consistent.
@@ -80,7 +94,7 @@ export function useAnnouncements() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, []);
+  }, [enabled]);
 
   /** Fire-and-forget post; relies on Realtime to echo the new row back.
    *  `anonymous: true` asks the server to record the row with an empty

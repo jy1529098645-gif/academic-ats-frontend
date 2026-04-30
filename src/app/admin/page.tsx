@@ -880,6 +880,19 @@ export default function AdminPage() {
   }, []);
   const sourceStats = usePolling(fetchSourceStats, 30_000, enabled);
 
+  // Usage-tracking health probe — diffs today's history_entries vs.
+  // user_usage_daily so a broken increment_user_usage_daily RPC is
+  // visible at a glance instead of silently skewing every per-user
+  // KPI. Polled at the slower DETAIL_POLL_MS rate because a write-path
+  // regression doesn't change minute-to-minute and the operator just
+  // needs an hourly-ish heads-up.
+  const fetchUsageHealth = useCallback(async (): Promise<{ day_utc: string; history_users: number; usage_daily_users: number; missing_from_usage_daily: string[]; ok: boolean }> => {
+    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/usage-tracking-health"));
+    if (!res.ok) throw new Error(`usage-tracking-health HTTP ${res.status}`);
+    return res.json();
+  }, []);
+  const usageHealth = usePolling(fetchUsageHealth, DETAIL_POLL_MS, enabled);
+
   // Conversion funnel — scopes to `tsDays` (same window as the Usage
   // chart) so admins can see alpha retention across different
   // observation windows without adding a second toggle.
@@ -1491,6 +1504,30 @@ export default function AdminPage() {
             {timeseries.error   && <p>Time-series: {timeseries.error}</p>}
             {users.error        && <p>Users: {users.error}</p>}
             {announcements.error&& <p>Announcements: {announcements.error}</p>}
+          </div>
+        )}
+
+        {/* ── Usage-tracking write-path warning ─────────────────────────
+             Surfaced when /api/admin/usage-tracking-health reports any
+             user_id with a history_entries row today but no matching
+             user_usage_daily row. That gap means the
+             increment_user_usage_daily RPC failed silently — the
+             search ran (compute spent, brief generated) but the
+             counter / cost ledger wasn't updated, so KPIs and cost
+             alerts will under-report until the RPC pipeline is fixed.
+             Banner stays absent on the happy path so steady-state
+             dashboards don't get a permanent yellow stripe. */}
+        {usageHealth.data && usageHealth.data.ok === false && usageHealth.data.missing_from_usage_daily.length > 0 && (
+          <div className="rounded-xl border px-4 py-3 text-xs space-y-1"
+               style={{ borderColor: "rgba(245,158,11,0.55)", backgroundColor: "rgba(245,158,11,0.10)", color: "#f59e0b" }}>
+            <p className="font-semibold">
+              ⚠ Usage tracking write gap: {usageHealth.data.missing_from_usage_daily.length} user{usageHealth.data.missing_from_usage_daily.length === 1 ? "" : "s"} have search activity today but no user_usage_daily row.
+            </p>
+            <p className="text-[11px] opacity-80">
+              History entries today: {usageHealth.data.history_users} · usage_daily entries today: {usageHealth.data.usage_daily_users}.
+              The increment_user_usage_daily RPC is silently failing for at least one search path — KPIs and cost alerts will under-report until it&apos;s fixed.
+              First missing id: <code className="font-mono">{usageHealth.data.missing_from_usage_daily[0]?.slice(0, 8)}…</code>
+            </p>
           </div>
         )}
 

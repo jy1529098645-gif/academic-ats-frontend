@@ -1546,16 +1546,13 @@ function DesktopWorkspace() {
   const [leftTab, setLeftTab] = useState<"brief" | "analytics">("brief");
 
   // ── Announcement / messaging state ─────────────────────────────────────────
-  // The shared public ticker feed comes from useAnnouncements (REST seed +
-  // Supabase Realtime INSERT subscription). Local `publicMsgs` / danmu state
-  // was removed when the per-tab localStorage scheme was replaced by the
-  // server-backed feed — every open tab now sees the same list.
-  const announcementsFeed = useAnnouncements();
-  // Daily-rotated recommended-term chips. The hook returns both the
-  // chip strings AND a source label ("OpenAlex recent publications"
-  // etc.) the Sprite renders as a small attribution under the strip.
-  // See src/lib/hooks/use-recommended-terms.ts for the fetch + fallback.
-  const { terms: recommendedTerms, source: recommendedTermsSource, sourceUrl: recommendedTermsSourceUrl } = useRecommendedTerms();
+  // useAnnouncements + useRecommendedTerms are gated on authUser below
+  // (see the call sites near where authUser is declared) so the login
+  // overlay doesn't open a Supabase Realtime channel + hit
+  // /api/announcements / /api/workspace/recommended-terms on every cold
+  // visit by a bot or unauthenticated user. The hooks fall back to a
+  // local seed pool / empty state until auth lands, keeping the UI
+  // visible during sign-in.
 
   // Three-step Quick / Curated reveal flow (driven by Enter on the textarea):
   //   0 → user has typed but the action buttons are still hidden
@@ -1614,7 +1611,7 @@ function DesktopWorkspace() {
   // sync if the step flips via any other path.
   useEffect(() => {
     if (hasRunSearch || isSubmitting) return;
-    if (buttonStep === 1) setAssessmentMessage("Quick or Curated? Press Enter");
+    if (buttonStep === 1) setAssessmentMessage("Quick or Deep? Press Enter to pick a mode and search your topic.");
     if (buttonStep === 2) setAssessmentMessage("Enter to go · ← → switch · Esc back");
   }, [buttonStep, hasRunSearch, isSubmitting]);
 
@@ -1810,6 +1807,12 @@ function DesktopWorkspace() {
   // full UUID is what the backend logs against every request, so
   // matching the short form to a real session is a one-step lookup.
   const [authUser, setAuthUser] = useState<{ id?: string; email?: string; is_anonymous?: boolean } | null>(null);
+  // Polling hooks gated on signed-in state — see comment block above
+  // (where the relocated definitions used to live). The shared public
+  // ticker feed (REST seed + Supabase Realtime INSERT subscription) and
+  // the daily recommended-term chips both fire only after auth resolves.
+  const announcementsFeed = useAnnouncements(!!authUser);
+  const { terms: recommendedTerms, source: recommendedTermsSource, sourceUrl: recommendedTermsSourceUrl } = useRecommendedTerms(!!authUser);
   // ── Anonymous-guest mode ────────────────────────────────────────────────
   // Anonymous (Supabase `is_anonymous`) sessions get a strictly bounded
   // trial: GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
@@ -4517,8 +4520,8 @@ ${html}
             // query on close.
             id:        "search-mode",
             target:    "search-mode",
-            title:     "Quick or Curated",
-            body:      "Quick — broad scan across sources. Curated — multi-agent screening for deeper analysis, costs more quota.",
+            title:     "Quick or Deep",
+            body:      "Quick — broad scan across sources to surface trends and gaps. Deep — multi-agent screening for the highest-quality, highest-match papers, costs more quota.",
             placement: "top",
             onEnter:   () => {
               setUserMenuOpen(false);
@@ -4541,12 +4544,6 @@ ${html}
             title:     "Brief & Charts",
             body:      "After a search, this panel fills with the synthesised brief and citation/topic charts. Tabs at the top switch between them.",
             placement: "right",
-            // The left panel slides in over 0.9s when leftVisible flips
-            // true (transform: translateX). Freeze the spotlight on the
-            // previous step's target until the slide finishes, then jump
-            // it to the settled rect in a single motion. 1000ms = 0.9s
-            // panel transition + 100ms safety buffer.
-            holdMs:    1000,
             onEnter:   () => {
               setUserMenuOpen(false);
               setLeftVisible(true);
@@ -4573,13 +4570,9 @@ ${html}
             // hovering behind them and obstructing the spotlight.
             id:        "right-panel",
             target:    "right-panel",
-            title:     "Synthesis Lab & Paper Review",
+            title:     "Writing Lab & Paper Review",
             body:      "Write essays, statements, or proposals from picked papers, or get a multi-agent critique of your own draft.",
             placement: "left",
-            // Mirror of the left-panel step: the right ASIDE has the same
-            // 0.9s translateX. Freeze the spotlight until the panel is
-            // fully on-screen, then a single slide commits.
-            holdMs:    1000,
             onEnter:   () => {
               setUserMenuOpen(false);
               setLeftVisible(false);
@@ -4607,13 +4600,6 @@ ${html}
             title:     "Profile & help",
             body:      "Profile, usage, and Help (which re-launches this tour) live behind your avatar.",
             placement: "right",
-            // Coming from right-panel: this step's onEnter collapses the
-            // right panel (setAnalyticsVisible(false)), and that collapse
-            // is itself a 0.9s translateX. Hide the prior spotlight for
-            // the duration so it doesn't visibly chase the panel off
-            // the right edge of the viewport before settling onto the
-            // user-menu dropdown.
-            holdMs:    1000,
             onEnter:   () => {
               setUserMenuOpen(true);
               setLeftVisible(false);
@@ -4753,7 +4739,7 @@ ${html}
                 fits within the wordmark + mascot row width above — no
                 overflow past the mascot's right edge. */}
             <p className="mt-1.5 text-[0.7rem] leading-snug text-slate-400 whitespace-nowrap">
-              An academic assistant for structuring and verifying thought. <span className="text-[0.6rem] text-slate-600">{APP_VERSION}</span>
+              From <span className="font-bold text-slate-200">research</span> to <span className="font-bold text-slate-200">writing</span> → in <span className="font-bold text-slate-200">minutes</span>, not <span className="font-bold text-slate-200">days</span>. <span className="text-[0.6rem] text-slate-600">{APP_VERSION}</span>
               {/* Guest-mode pill — only shown for anonymous (Supabase
                   is_anonymous) sessions. Numbers count REMAINING credits
                   rather than used so the user reads it as "what I have
@@ -4978,26 +4964,33 @@ ${html}
                 aria-label="Hide left panel"
                 className="absolute top-[11px] left-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-[var(--ats-border-subtle)] bg-[var(--ats-bg-panel)] text-slate-400 hover:text-blue-400 hover:border-blue-500/60 transition-colors"
               ><PanelLeftClose size={15} /></button>
-              {/* Tab bar — leading padding reserves space for the absolute collapse button. */}
-              <div className="shrink-0 flex items-center gap-1.5 pl-12 pr-3 py-2.5 border-b border-slate-800/60">
+              {/* Tab bar — leading padding reserves space for the absolute
+                  collapse button. The left panel is a SECONDARY analytics
+                  surface (post-search summary + chart), not a core action,
+                  so it intentionally reads quieter than the search-results
+                  area in the middle and the writing tools on the right.
+                  Smaller text (text-xs uppercase) + a subtle underline on
+                  the active tab instead of a filled chip keeps it as a
+                  navigational header rather than an attention-grabber. */}
+              <div className="shrink-0 flex items-center gap-3 pl-12 pr-3 py-2 border-b border-slate-800/60">
                 <button
                   onClick={() => setLeftTab("brief")}
                   {...helpProps("Synthesised paper summary")}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                  className={`flex items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider transition-colors border-b-2 ${
                     leftTab === "brief"
-                      ? "bg-slate-900/70 text-slate-100"
-                      : "text-slate-500 hover:text-slate-300"
+                      ? "border-slate-300 text-slate-200"
+                      : "border-transparent text-slate-500 hover:text-slate-300"
                   }`}
-                ><ClipboardList size={14} /><span>Research Brief</span></button>
+                ><ClipboardList size={12} /><span>Research Brief</span></button>
                 <button
                   onClick={() => setLeftTab("analytics")}
                   {...helpProps("Year / venue / citation stats")}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+                  className={`flex items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider transition-colors border-b-2 ${
                     leftTab === "analytics"
-                      ? "bg-slate-900/70 text-slate-100"
-                      : "text-slate-500 hover:text-slate-300"
+                      ? "border-slate-300 text-slate-200"
+                      : "border-transparent text-slate-500 hover:text-slate-300"
                   }`}
-                ><BarChart2 size={14} /><span>Charts</span></button>
+                ><BarChart2 size={12} /><span>Trend Chart</span></button>
                 {/* Collapse action moved to the fold-side edge — see absolute button above. */}
               </div>
 
@@ -5220,7 +5213,7 @@ ${html}
             <div className="mb-4 grid grid-cols-3 items-center text-xl font-bold">
               <span aria-hidden="true" />
               <div className="flex items-center justify-center gap-2">
-                <LayoutGrid size={18} /><span>Workspace</span>
+                <LayoutGrid size={18} /><span>Search Space</span>
               </div>
               <div className="flex justify-end">
                 {/* Start over — clears query, sprite results, layout, and
@@ -6295,7 +6288,7 @@ ${html}
                           <div className="mt-3 rounded-xl border border-slate-700/60 bg-slate-800/40 px-4 py-2.5 text-xs text-slate-400 flex items-start gap-2">
                             <ShieldCheck size={14} className="shrink-0 mt-0.5 text-slate-500" />
                             <span>
-                              Evidence Chain couldn&apos;t extract structured claims from this paper&apos;s metadata. Try the abstract on the paper&apos;s source page via <span className="font-semibold">Open Paper</span>, or add this paper to Synthesis Lab where its full-text processing lives.
+                              Evidence Chain couldn&apos;t extract structured claims from this paper&apos;s metadata. Try the abstract on the paper&apos;s source page via <span className="font-semibold">Open Paper</span>, or add this paper to Writing Lab where its full-text processing lives.
                             </span>
                           </div>
                         )}
@@ -6573,7 +6566,7 @@ ${html}
                     title="Write from selected papers"
                   >
                     <PenLine size={18} />
-                    <span>Synthesis Lab</span>
+                    <span>Writing Lab</span>
                     {labRefs.length > 0 && (
                     // Badge uses --ats-* tokens so contrast holds across
                     // every theme. Previous slate-* classes had no day-
@@ -7667,7 +7660,7 @@ ${html}
           <button
             data-tour="feedback-button"
             onClick={() => { setFeedbackOpen(true); setFeedbackMsg(null); }}
-            className="group fixed right-4 z-50 flex items-center justify-center rounded-full border shadow-lg backdrop-blur-sm transition-all duration-200 hover:brightness-110 hover:scale-110 h-11 w-11"
+            className="group fixed right-5 z-50 flex items-center justify-center rounded-full border-2 shadow-xl backdrop-blur-sm transition-all duration-200 hover:brightness-110 hover:scale-110 h-14 w-14"
             style={{
               bottom:          historyPanelOpen ? historyPanelHeight + 12 : 16,
               borderColor:     "var(--ats-border-accent)",
@@ -7680,7 +7673,7 @@ ${html}
                 every other icon in the app (Search, Brain, Trash2, etc).
                 Previously an emoji bug 🐛 which looked foreign next to
                 the rest of the UI. */}
-            <MessageCircle size={18} aria-hidden />
+            <MessageCircle size={22} strokeWidth={2.25} aria-hidden />
             {/* Hover tooltip — appears to the left so it never clips off-screen. */}
             <span
               className="pointer-events-none absolute right-full mr-2 whitespace-nowrap rounded-md border px-2 py-1 text-[11px] font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-150"

@@ -55,7 +55,14 @@ export type RecommendedTermsBundle = {
   sourceUrl:  string;
 };
 
-export function useRecommendedTerms(): RecommendedTermsBundle {
+/**
+ * `enabled` lets the caller defer the network fetch until the user is
+ * past the login gate. The fallback pool is already on screen via
+ * useState's initialiser, so the login overlay still has trending
+ * chips to render — we just don't burn the GET round-trip on every
+ * unauthenticated visit.
+ */
+export function useRecommendedTerms(enabled: boolean = true): RecommendedTermsBundle {
   const [bundle, setBundle] = useState<RecommendedTermsBundle>(() => ({
     terms:     dailySeededShuffle(FALLBACK_POOL),
     source:    "",
@@ -63,6 +70,7 @@ export function useRecommendedTerms(): RecommendedTermsBundle {
   }));
 
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     (async () => {
       try {
@@ -86,7 +94,7 @@ export function useRecommendedTerms(): RecommendedTermsBundle {
       }
     })();
     return () => { alive = false; };
-  }, []);
+  }, [enabled]);
 
   return bundle;
 }

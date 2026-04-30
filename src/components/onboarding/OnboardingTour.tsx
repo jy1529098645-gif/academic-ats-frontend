@@ -75,23 +75,6 @@ export type TourStep = {
    *  whatever the previous/next step did. The parent should snapshot
    *  pre-tour state and restore on close so the tour leaves no trace. */
   onEnter?: () => void;
-  /** Spotlight-rect freeze window in milliseconds.
-   *
-   *  When `onEnter` triggers a layout transition that the spotlight's
-   *  target element is part of (e.g. the left/right panels' 0.9s
-   *  translateX slide-in), the RAF tracker would otherwise chase the
-   *  target frame-by-frame as it slides in — visually that reads as
-   *  "the spotlight first deforms to follow the moving panel, then
-   *  settles", a two-step motion. Setting `holdMs` tells the tracker
-   *  to NOT touch the rect state for that many milliseconds after
-   *  this step becomes active. The spotlight stays parked on the
-   *  PREVIOUS step's rect (or invisible if there was none) until the
-   *  hold expires, after which a single setRect commits the now-
-   *  settled rect and the CSS transition does ONE smooth slide.
-   *
-   *  Set this to ~100ms longer than the longest CSS transition you
-   *  trigger in onEnter. For the panels' 0.9s slide we use 1000ms. */
-  holdMs?: number;
 };
 
 type Props = {
@@ -216,125 +199,62 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   const lastFiredRef = useRef<number>(-1);
 
   // Reset to step 0 every time the tour re-opens. (Otherwise re-opening
-  // from the Help panel after a Skip would resume mid-tour.) We do NOT
-  // wipe rect here — keeping the previous rect across reopens means the
-  // CSS transitions on top/left/width/height can carry the spotlight
-  // smoothly to its first target instead of popping into existence.
+  // from the Help panel after a Skip would resume mid-tour.) Wipe rect
+  // too so the prior session's spotlight doesn't leak into the welcome
+  // step's centred backdrop.
   useEffect(() => {
     if (open) {
       setStepIdx(0);
+      setRect(null);
       lastFiredRef.current = -1;
     }
   }, [open]);
 
-  // Latest `steps` array, captured into a ref so the onEnter effect
-  // below can read the current step without listing `steps` as a dep
-  // (parent re-renders pass a fresh inline `steps={[...]}` every render).
+  // Latest `steps` array captured into a ref so the onEnter effect below
+  // can read the current step without listing `steps` as a dep — parent
+  // re-renders pass a fresh inline `steps={[...]}` every render, and we
+  // want side-effects to fire exactly once per real step transition.
   const stepsRef = useRef(steps);
   useEffect(() => { stepsRef.current = steps; }, [steps]);
 
-  // onEnter side-effect — fires once per real step transition. Keyed
-  // ONLY on `[open, stepIdx]` so a parent re-render (which swaps the
-  // steps array reference) doesn't re-fire side-effects. We do NOT
-  // wipe rect here either: keeping the previous rect lets the CSS
-  // transitions on top/left/width/height slide the spotlight from the
-  // old target's position to the new one in a single continuous motion
-  // (the user's complaint with the prior fade+slide combo was that the
-  // ring would visually appear at the new location and then expand —
-  // a clean slide reads cleaner).
-  useEffect(() => {
-    if (!open) return;
-    if (lastFiredRef.current === stepIdx) return;
-    lastFiredRef.current = stepIdx;
-    const step = stepsRef.current[stepIdx];
-    if (step?.onEnter) {
-      try { step.onEnter(); } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("[onboarding] step.onEnter threw:", err);
-      }
-    }
-  }, [open, stepIdx]);
-
-  // RAF rect-tracking effect — keyed on `steps` so a parent re-render
-  // that swaps the inline array reference re-arms the loop.
-  //
-  // Stability gate: we only call setRect once the target's rect has
-  // been STABLE for STABLE_FRAMES consecutive frames. If we updated
-  // every frame the rect changed (the prior implementation), each
-  // setRect would re-start the spotlight's CSS transition, so when
-  // the underlying target itself was animating (e.g. right-panel's
-  // 0.9s translateX slide-in) the spotlight chased it with a visible
-  // two-step "first deform, then move" feel. Waiting for stability
-  // means the spotlight performs ONE continuous transition to the
-  // final settled rect — what the user asked for.
-  //
-  // We never setRect(null) when readRect returns null: leaving the
-  // previous rect in place keeps the spotlight at the old target
-  // (or invisible, for centred → targeted) instead of blinking to
-  // an undefined intermediate state.
-  const STABLE_FRAMES = 3; // ~50ms at 60fps — enough to filter mid-animation
-
-  // stepStartedAtRef: timestamp of when the CURRENT stepIdx first became
-  // active. Survives parent re-renders (which recompose `steps` and re-run
-  // the RAF effect below). Without this, every parent re-render would
-  // recompute `startedAt = Date.now()` and the hold-window would keep
-  // sliding into the future, so the spotlight rect would NEVER commit
-  // for a step that has `holdMs` set when the parent polls anything in
-  // the background. Only resets on a real step transition.
-  //
-  // Also clears `rect` to null when the incoming step has a holdMs > 0.
-  // Per the user's "third/fourth/fifth step" feedback: when the panel
-  // is mid-slide-in, the previous step's highlight no longer points at
-  // anything meaningful, so leaving it on screen is worse than hiding
-  // it. With rect=null both the SVG cutout and the spotlight ring
-  // disappear during the hold; the dim layer falls back to the
-  // full-screen variant; then RAF (which honours holdMs) measures and
-  // commits the new rect once the panel has settled, and the ring
-  // fades in directly at the new location.
-  const stepStartedAtRef = useRef(0);
-  useEffect(() => {
-    if (!open) return;
-    stepStartedAtRef.current = Date.now();
-    const step = stepsRef.current[stepIdx];
-    if (step?.holdMs && step.holdMs > 0) {
-      setRect(null);
-    }
-  }, [open, stepIdx]);
-
+  // Combined per-step lifecycle effect. Two responsibilities:
+  //   1. Fire onEnter exactly once per real stepIdx change. Guarded by
+  //      lastFiredRef so the effect re-running on parent re-renders
+  //      (because `steps` is in the dep array) doesn't re-fire side
+  //      effects.
+  //   2. Run a RAF loop that polls the current target's bounding rect
+  //      every frame and commits to state on change. No CSS transitions,
+  //      no fade, no stability gate, no hold window — the simplest
+  //      possible behaviour: the spotlight points wherever the target
+  //      currently is, painted that frame. Clicking Next jumps the
+  //      highlight to the new step's target immediately.
   useEffect(() => {
     if (!open) return;
     const step = steps[stepIdx];
-    if (!step?.target) return;
+    if (!step) return;
 
-    let rafId = 0;
-    const holdMs = step.holdMs ?? 0;
-    let stableCandidate: Rect | null = null;
-    let stableCount = 0;
-    let lastCommitted: Rect | null = null;
-
-    const tick = () => {
-      // Hold window: don't read OR commit. The spotlight stays on the
-      // previous step's rect (state untouched) so the user sees zero
-      // motion while the page transition is running. Once we cross
-      // the hold deadline (computed against the stepIdx-pinned start
-      // ref so it survives re-arms), the stability gate engages
-      // normally and the first settled rect commits in one shot.
-      if (Date.now() < stepStartedAtRef.current + holdMs) {
-        rafId = requestAnimationFrame(tick);
-        return;
+    if (lastFiredRef.current !== stepIdx) {
+      lastFiredRef.current = stepIdx;
+      // Clear stale rect so the previous step's spotlight doesn't leak
+      // into a centred (no-target) step. For targeted steps the RAF
+      // below will repopulate within one frame.
+      setRect(null);
+      if (step.onEnter) {
+        try { step.onEnter(); } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[onboarding] step.onEnter threw:", err);
+        }
       }
+    }
+
+    if (!step.target) return;
+    let rafId = 0;
+    let prev: Rect | null = null;
+    const tick = () => {
       const next = readRect(step.target);
-      if (next) {
-        if (stableCandidate && rectsEqual(stableCandidate, next)) {
-          stableCount += 1;
-        } else {
-          stableCandidate = next;
-          stableCount = 1;
-        }
-        if (stableCount >= STABLE_FRAMES && !rectsEqual(lastCommitted, next)) {
-          lastCommitted = next;
-          setRect(next);
-        }
+      if (!rectsEqual(prev, next)) {
+        prev = next;
+        setRect(next);
       }
       rafId = requestAnimationFrame(tick);
     };
@@ -444,117 +364,41 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
       role="dialog"
       aria-labelledby="onboarding-tour-title"
     >
-      {/* Dim backdrop — always rendered, never animated. Uses an SVG
-          mask to punch a transparent hole at the spotlight rect when
-          one is active; otherwise the mask covers nothing and the
-          full viewport is dimmed (welcome / done states).
-          Decoupling the dim from the spotlight ring is what lets the
-          ring fade in on step changes WITHOUT the page brightness
-          flickering — the dim layer is the same DOM element across
-          every step, so its opacity stays steady. The SVG element
-          itself updates its <rect x="…" y="…" /> attributes to move
-          the cutout instantly between steps.
-          pointer-events:auto on the centred branch so welcome / done
-          cards block interaction with what's behind. When a target
-          is highlighted the dim is pointer-events-none — clicks pass
-          through to the spotlit element (try-as-you-learn). */}
+      {/* Spotlight + dim — single donut element. The 9999px box-shadow
+          paints "everything outside this rect" dark while the inner
+          shadows draw the accent ring. Updates inline on every RAF tick;
+          no CSS transitions, no fade. When there's no rect yet (centred
+          welcome / done steps, or the brief frame before RAF measures a
+          new step's target) the fallback dim div covers the viewport. */}
       {hole ? (
-        <svg
-          className="fixed inset-0 pointer-events-none"
-          width="100%"
-          height="100%"
-          aria-hidden="true"
-        >
-          <defs>
-            <mask id="ats-tour-dim-cutout">
-              <rect x="0" y="0" width="100%" height="100%" fill="white" />
-              <rect
-                x={hole.left}
-                y={hole.top}
-                width={hole.width}
-                height={hole.height}
-                rx="12"
-                ry="12"
-                fill="black"
-              />
-            </mask>
-          </defs>
-          <rect
-            x="0" y="0" width="100%" height="100%"
-            fill="rgba(0, 0, 0, 0.55)"
-            mask="url(#ats-tour-dim-cutout)"
-          />
-        </svg>
-      ) : (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto" />
-      )}
-
-      {/* Spotlight ring — JUST the accent outline. Fades in at the
-          new rect on every step change via the .ats-tour-reveal
-          opacity keyframe + key-based remount. The dim is in the
-          separate SVG above so this animation never affects page
-          darkening. Mid-step rect drift (RAF tick) re-keys this
-          element and re-fires the fade — typically a no-op because
-          the stability gate in the RAF effect only commits new rects
-          after the target has settled. */}
-      {hole && (
         <div
-          // Key derived ONLY from rect-derived values, NOT stepIdx. During
-          // a holdMs window the rect state is intentionally pinned at the
-          // previous step's value, so a stepIdx-keyed ring would unmount
-          // on Next click and re-fade at the OLD rect — visually that
-          // reads as "highlight blinks off, then back on at the same
-          // place, then off again, then back on at the new place" when
-          // the hold expires. Keying on hole alone means: stepIdx change
-          // with stable rect → same key → no remount → ring stays put.
-          // Rect actually commits to a new value → new key → remount →
-          // fade in at the new location. One blink per real move.
-          key={`ring-${hole.top}-${hole.left}-${hole.width}-${hole.height}`}
-          className="fixed pointer-events-none rounded-xl ats-tour-reveal"
+          className="fixed pointer-events-none rounded-xl"
           style={{
             top:    hole.top,
             left:   hole.left,
             width:  hole.width,
             height: hole.height,
             boxShadow: [
+              "0 0 0 9999px rgba(0, 0, 0, 0.55)",
               "0 0 0 2px var(--ats-fg-accent)",
               "0 0 0 6px rgba(59, 130, 246, 0.25)",
             ].join(", "),
           }}
         />
+      ) : (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto" />
       )}
 
-      {/* Floating card. Uses translate-centring for centred steps and
-          absolute top/left for targeted steps. No CSS transition on
-          top/left — the card jumps to its new position and rides the
-          .ats-tour-reveal opacity fade for a clean reveal. Re-mounted
-          on every position change via the React key below so the
-          animation re-fires on each Next / Back. The dim backdrop
-          layer renders separately and is NOT animated, so the page
-          darkening stays steady across step transitions.
+      {/* Floating card. Always rendered — for centred steps it sits in
+          the viewport centre via translate, for targeted steps it
+          anchors to the rect via cardPosition. No animations.
           pointer-events:auto re-enabled (wrapper is none) so the
-          Back / Next / Skip buttons remain clickable.
-          cardRef feeds the post-render height measurement back into
-          cardPosition's bottom-clamp — see useLayoutEffect below.
-
-          Conditionally rendered: when this is a TARGETED step but the
-          rect hasn't been measured yet (RAF hasn't committed, or we're
-          inside a holdMs window where it's intentionally null), we
-          DON'T render a card-at-centre placeholder. That extra
-          centred-then-jump frame was the "二步定位" the user pushed
-          back on — by skipping the placeholder entirely, the card
-          appears exactly once at its final position, in lock-step
-          with the spotlight ring, when the new rect lands. Centred
-          steps (welcome / done) still always render because they
-          have no target rect to wait for. */}
-      {(!step.target || !!rect) && (
+          Back / Next / Skip buttons remain clickable. cardRef feeds
+          the post-render height measurement back into cardPosition's
+          bottom-clamp — see useLayoutEffect below. */}
       <div
-        // Same reasoning as the ring above — key only on the resolved
-        // position so a held step doesn't blink the card off/on while
-        // we wait for the panel slide-in to finish.
-        key={`card-${isCentred ? "centred" : `${cardStyle.top}-${cardStyle.left}`}`}
         ref={cardRef}
-        className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto ats-tour-reveal"
+        className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto"
         style={{
           ...cardStyle,
           borderColor:     "var(--ats-border-subtle)",
@@ -620,7 +464,6 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
           >{isLast ? "Got it" : "Next →"}</button>
         </div>
       </div>
-      )}
     </div>,
     document.body,
   );
