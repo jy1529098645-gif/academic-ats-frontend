@@ -817,45 +817,11 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBe
         <div>
           <div className="flex flex-nowrap items-center gap-2 mb-2 overflow-hidden">
             <span className="shrink min-w-0 truncate text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>Review letter</span>
-            {/* Closed-loop hand-off — only rendered when the parent provided
-                a callback (the desktop right-panel host does; standalone
-                mounts hide it cleanly). Packages the structured top-issues
-                + the markdown letter into a single instructions string and
-                hands it back to Writing Lab via the parent callback so
-                the user can hit Deep Revise without copy/pasting. */}
-            {onPushFeedbackToLab && (
-              <button
-                onClick={() => {
-                  // Prefer the structured top-issues list (compact, actionable)
-                  // and append a small "for full context, see review letter
-                  // below" pointer so the user knows the source of truth.
-                  // Falls back to the raw markdown letter when there's no
-                  // bundle (e.g. an old SSE response without the final
-                  // structured frame).
-                  const issues = bundle?.crosscheck?.top_issues ?? [];
-                  let packaged = "";
-                  if (issues.length > 0) {
-                    packaged = "Apply these revisions, ordered by priority:\n\n"
-                      + issues.map((it, i) => `${i + 1}. ${it.title}: ${it.suggestion || it.problem}`).join("\n\n")
-                      + "\n\nFull review letter for context:\n\n"
-                      + result;
-                  } else {
-                    packaged = "Apply the revisions below (from a Paper Review pass):\n\n" + result;
-                  }
-                  onPushFeedbackToLab(packaged);
-                }}
-                title="Drop this review's top issues into Writing Lab's Deep Revise box, switch back to Writing Lab"
-                className="ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border-2 px-2 py-1 text-xs font-bold transition-colors hover:brightness-110"
-                style={{
-                  borderColor:     "var(--ats-border-accent)",
-                  backgroundColor: "var(--ats-bg-accent-soft)",
-                  color:           "var(--ats-fg-accent)",
-                }}
-              >
-                <ArrowLeft size={12} strokeWidth={2.5} className="shrink-0" />
-                <span className="truncate">Send feedback to Writing Lab</span>
-              </button>
-            )}
+            {/* "Send feedback to Writing Lab" lives as a big CTA bar
+                directly below the review letter (see further down) —
+                that's the primary discovery surface, on visual par
+                with the Lab's "Send to Paper Review" button. The
+                header keeps just Copy for the quick instant action. */}
             <button
               onClick={async () => {
                 try {
@@ -864,7 +830,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBe
                   window.setTimeout(() => setCopied(false), 1500);
                 } catch { /* blocked */ }
               }}
-              className={`${onPushFeedbackToLab ? "" : "ml-auto"} shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors`}
+              className="ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors"
               style={{
                 borderColor: copied ? "rgba(16,185,129,0.5)" : "var(--ats-border-subtle)",
                 color:       copied ? "#10b981" : "var(--ats-fg-muted)",
@@ -906,6 +872,40 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBe
             <ReactMarkdown>{result}</ReactMarkdown>
             {generating && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm animate-pulse align-text-bottom" style={{ backgroundColor: "var(--ats-fg-accent)" }} />}
           </div>
+
+          {/* ── Send feedback to Writing Lab — primary closed-loop CTA ─
+              Same visual weight as the Writing Lab's "Send to Paper
+              Review for critique" button (full-width, rounded-xl
+              px-4 py-3, font-bold, accent fill) so the bidirectional
+              loop reads symmetrically. Only rendered when the parent
+              passed onPushFeedbackToLab — standalone mounts of the
+              panel still work without it. Hidden during the
+              streaming pass since shipping a half-formed review's
+              feedback would be misleading. */}
+          {onPushFeedbackToLab && !generating && result && (
+            <button
+              onClick={() => {
+                const issues = bundle?.crosscheck?.top_issues ?? [];
+                let packaged = "";
+                if (issues.length > 0) {
+                  packaged = "Apply these revisions, ordered by priority:\n\n"
+                    + issues.map((it, i) => `${i + 1}. ${it.title}: ${it.suggestion || it.problem}`).join("\n\n")
+                    + "\n\nFull review letter for context:\n\n"
+                    + result;
+                } else {
+                  packaged = "Apply the revisions below (from a Paper Review pass):\n\n" + result;
+                }
+                onPushFeedbackToLab(packaged);
+              }}
+              title="Drop this review's top issues into Writing Lab's Deep Revise box, switch back to Writing Lab"
+              className="mt-3 relative w-full rounded-xl px-4 py-3 text-sm font-bold transition-all overflow-hidden bg-violet-600 text-white hover:bg-violet-500"
+            >
+              <span className="flex items-center justify-center gap-2">
+                <ArrowLeft size={16} strokeWidth={2.5} />
+                Send feedback to Writing Lab
+              </span>
+            </button>
+          )}
         </div>
       )}
 
