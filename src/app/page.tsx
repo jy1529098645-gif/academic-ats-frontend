@@ -1717,6 +1717,12 @@ function DesktopWorkspace() {
   const [labReviseRunning,  setLabReviseRunning]  = useState(false);
   const [labReviseError,    setLabReviseError]    = useState("");
   const labReviseAbortRef = useRef<AbortController | null>(null);
+  // Ref on the Deep Revise textarea so the Paper Review → Writing Lab
+  // hand-off can scroll the operator straight to the instructions box
+  // (otherwise they land on the Writing Lab tab and the box is below
+  // the article body, easy to miss). focus() also fires so the cursor
+  // is parked ready for edits.
+  const labReviseTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // ── Lab multi-generation: tabbed result history ──────────────────────────
   // Each completed Generate run is archived in `labRuns` (newest first
@@ -3939,11 +3945,29 @@ ${html}
 
   /** Receive packaged feedback from Paper Review and pipe it into Writing
    *  Lab's Deep Revise instructions field, then flip back to synthesis
-   *  tab so the user sees the populated input + the Apply button. */
+   *  tab AND scroll/focus the textarea so the operator lands directly
+   *  on the input — without this the user arrives in Writing Lab but
+   *  the Deep Revise box is below a long generated article and gets
+   *  missed. Scroll-into-view runs after a paint tick so the panel's
+   *  visibility flip has actually committed before we measure. */
   const handleFeedbackToWritingLab = useCallback((feedback: string) => {
     setLabReviseInstructions(feedback || "");
     setLabReviseError("");
     setLabModule("synthesis");
+    // Two animation frames: first lets React commit the labModule swap
+    // (Writing Lab tab becomes visible); the second lets the layout
+    // settle so getBoundingClientRect inside scrollIntoView is correct.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = labReviseTextareaRef.current;
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        // Slight delay before focus so the smooth scroll isn't fighting
+        // the browser's auto-scroll-to-focused-element. 350 ms covers
+        // the scroll animation comfortably.
+        window.setTimeout(() => { try { el.focus({ preventScroll: true }); } catch { /* old browsers */ } }, 350);
+      });
+    });
   }, []);
 
   /** Single-pass deep revise. Streams /api/forge/revise SSE: token frames
@@ -7558,6 +7582,7 @@ ${html}
                             <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>edit the draft above with focused instructions</span>
                           </div>
                           <textarea
+                            ref={labReviseTextareaRef}
                             value={labReviseInstructions}
                             onChange={(e) => setLabReviseInstructions(e.target.value)}
                             disabled={labReviseRunning}
