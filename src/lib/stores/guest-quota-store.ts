@@ -30,11 +30,14 @@ import { fetchWithApiFallback } from "@/lib/api";
 
 /** Compile-time default — used until the server-sourced value arrives,
  *  and as the fallback for SSR / offline / fetch-failure paths.
- *  Public-beta tuning: 3 quick searches before the sign-in gate. */
-export const GUEST_QUICK_MAX   = 3;
-/** Compile-time default — see GUEST_QUICK_MAX comment.
- *  Public-beta tuning: 1 curated search before the sign-in gate. */
-export const GUEST_CURATED_MAX = 1;
+ *  Mirrors backend TIER_LIMITS["anonymous"] in quota.py: bumped from
+ *  3 → 8 on 2026-04-30 so unsigned visitors can take a proper test
+ *  drive before the sign-in gate fires. */
+export const GUEST_QUICK_MAX   = 8;
+/** Compile-time default — mirrors backend TIER_LIMITS["anonymous"]
+ *  deep_search: bumped from 1 → 3 on 2026-04-30 so guests can compare
+ *  Quick vs Deep on a couple of topics before being asked to sign in. */
+export const GUEST_CURATED_MAX = 3;
 
 const STORAGE_KEY = "ats-guest-quota-v1";
 

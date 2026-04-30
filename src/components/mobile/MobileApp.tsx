@@ -2809,7 +2809,7 @@ function SignInGate({
                   className="text-center text-[11px]"
                   style={{ color: "var(--ats-fg-muted)" }}
                 >
-                  {guestQuickLimit} Quick + {guestCuratedLimit} Curated · no signup
+                  {guestQuickLimit} Quick + {guestCuratedLimit} Deep · no signup
                 </p>
               )}
             </div>
