@@ -1687,9 +1687,11 @@ function DesktopWorkspace() {
   // Synthesis Lab (paper-writer) and the newer Paper Review (multi-agent
   // peer review of a user-submitted draft) both live in the same panel
   // and swap via the header tab bar.
-  // Default to Paper Review — it's the more common starting point and sits
-  // first in the tab bar now.
-  const [labModule, setLabModule] = useState<"synthesis" | "review">("review");
+  // Default to Writing Lab — that's the panel users came here for (the
+  // search-then-write loop is the product's core flow), so opening the
+  // right panel should drop them onto the writing surface, not the
+  // peer-review one.
+  const [labModule, setLabModule] = useState<"synthesis" | "review">("synthesis");
 
   // ── Lab multi-generation: tabbed result history ──────────────────────────
   // Each completed Generate run is archived in `labRuns` (newest first
@@ -5945,8 +5947,8 @@ ${html}
                                 onClick={() => inLab ? removeFromLab(paperKey) : addToLab(paper, paperKey)}
                                 title={inLab ? "Remove from your writing references" : "Add to your writing references"}
                                 {...helpProps(inLab
-                                  ? "Already saved. Click to remove from your writing references."
-                                  : "Save this paper to use in Writing Lab.")}
+                                  ? "Added. Click to remove this reference from Writing Lab."
+                                  : "Add to Writing Lab as a reference.")}
                                 className={`shrink-0 mt-1 flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all ${
                                   inLab
                                     ? "border-blue-500/50 bg-blue-500/10 text-blue-300 hover:border-rose-500/50 hover:text-rose-400 hover:bg-rose-500/10"
