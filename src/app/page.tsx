@@ -2770,16 +2770,17 @@ function DesktopWorkspace() {
       // a history entry from the landing screen would silently load the
       // result into state but the UI would still show the chips + Quick /
       // Curated buttons because hasRunSearch was false. Snap to the same
-      // post-search shape used by snapToWorkingLayout() — 1:1 left+center
-      // with the right Lab panel collapsed, since restoring a past search
-      // is conceptually equivalent to landing on its results page fresh.
+      // post-search shape used by snapToWorkingLayout() — 1:2 left+center
+      // (33/67) with the right Lab panel collapsed, since restoring a
+      // past search is conceptually equivalent to landing on its
+      // results page fresh.
       setHasRunSearch(true);
       setIntroStage("full");
       setButtonStep(0);
       setAssessmentMessage("");
       setGridTransitioning(true);
       setLeftVisible(true); setAnalyticsVisible(false);
-      setLeftPct(50); setCenterPct(50);
+      setLeftPct(33); setCenterPct(67);
       setLeftTab("brief");
       window.setTimeout(() => setGridTransitioning(false), 950);
     }
@@ -3094,7 +3095,7 @@ function DesktopWorkspace() {
     return () => clearTimeout(t);
   }, [leftVisible, analyticsVisible]);
 
-  /** Animate the layout to 1:1 left+center with the right panel hidden —
+  /** Animate the layout to 1:2 left+center with the right panel hidden —
    *  the post-search "browsing results" shape. Same grid-transition feel
    *  used for panel toggles, so the user sees the dividers slide into
    *  their working positions exactly like they dragged them there.
@@ -3104,15 +3105,22 @@ function DesktopWorkspace() {
    *  (Writing Lab / Paper Review) is empty until the user has actually
    *  added some references — keeping it open just stole horizontal
    *  pixels from the brief + result list, which ARE useful right after
-   *  search lands. Now we keep the right panel collapsed and let the
-   *  first "Add as reference" click expand it (see snapToReferenceLayout
-   *  below). */
+   *  search lands. We keep the right panel collapsed and let the first
+   *  "Add as reference" click expand it (see snapToReferenceLayout
+   *  below).
+   *
+   *  Width split (2026-04 follow-up): 33 / 67 — the result list is the
+   *  primary surface a user reads after search, and at 50/50 the long
+   *  paper titles (typical 80–120 chars) wrapped onto 3+ lines, making
+   *  the cards feel cramped. Giving the centre column twice the width
+   *  of the brief lets cards lay out comfortably while still leaving
+   *  room for the brief to stay readable. */
   const snapToWorkingLayout = useCallback(() => {
     setGridTransitioning(true);
     setLeftVisible(true);
     setAnalyticsVisible(false);
-    setLeftPct(50);
-    setCenterPct(50);
+    setLeftPct(33);
+    setCenterPct(67);
     window.setTimeout(() => setGridTransitioning(false), 950);
   }, []);
 
