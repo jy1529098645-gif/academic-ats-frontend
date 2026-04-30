@@ -4789,6 +4789,24 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
       </div>
     );
   }
+  // Column totals computed once at the table level so we can surface them
+  // BOTH in the always-visible header (no scrolling required to read the
+  // aggregate) and in the tfoot row at the bottom of the table (which
+  // sits below the last user row when fewer than ~12 users are visible).
+  // The previous tfoot-only placement got hidden inside the table's
+  // max-h scroll container as soon as the user list grew — operators
+  // saw the "(Total)" header label but had to scroll to find the actual
+  // number, which read as "totals are missing".
+  const colTotals = users.reduce((acc, u) => {
+    const w = u.window ?? u.today;
+    acc.quick += w.quick_search_count;
+    acc.deep  += w.deep_search_count;
+    acc.synth += w.synthesis_count;
+    acc.chain += w.deep_read_count;
+    acc.cost  += w.llm_cost_usd;
+    return acc;
+  }, { quick: 0, deep: 0, synth: 0, chain: 0, cost: 0 });
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
@@ -4801,16 +4819,29 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
             <th className="pb-2 pr-3 font-semibold">Tier</th>
             <th className="pb-2 pr-3 font-semibold">Status</th>
             {/* Each numeric column displays the SUM across the operator-
-                selected window for that user (today / 7d / 30d / all),
-                so we suffix every header with "(Total)" — without it,
-                "Quick" reads ambiguously as "the most recent quick
-                search" or "a daily count". The tfoot below tallies
-                these per-column. */}
-            <th className="pb-2 pr-3 font-semibold text-right" title="Total Quick searches in the selected window">Quick (Total)</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Total Deep searches in the selected window">Deep (Total)</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Total Synthesis Lab runs in the selected window">Synth (Total)</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Total Evidence Chain reports in the selected window">Chain (Total)</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Total LLM cost in USD over the selected window">Cost USD (Total)</th>
+                selected window for that user. The header now embeds
+                the COLUMN total in parentheses — "Quick (Total: 47)" —
+                so the operator sees the aggregate without scrolling
+                to the tfoot. The total respects the search filter +
+                window picker (the table receives the already-filtered
+                list), so flipping windows or typing in the search box
+                updates these inline numbers in lockstep with the rows
+                below. */}
+            <th className="pb-2 pr-3 font-semibold text-right" title={`Total Quick searches in the selected window: ${colTotals.quick}`}>
+              Quick <span style={{ color: "var(--ats-fg-secondary)" }}>(Total: <span className="tabular-nums">{colTotals.quick}</span>)</span>
+            </th>
+            <th className="pb-2 pr-3 font-semibold text-right" title={`Total Deep searches in the selected window: ${colTotals.deep}`}>
+              Deep <span style={{ color: "var(--ats-fg-secondary)" }}>(Total: <span className="tabular-nums">{colTotals.deep}</span>)</span>
+            </th>
+            <th className="pb-2 pr-3 font-semibold text-right" title={`Total Synthesis Lab runs in the selected window: ${colTotals.synth}`}>
+              Synth <span style={{ color: "var(--ats-fg-secondary)" }}>(Total: <span className="tabular-nums">{colTotals.synth}</span>)</span>
+            </th>
+            <th className="pb-2 pr-3 font-semibold text-right" title={`Total Evidence Chain reports in the selected window: ${colTotals.chain}`}>
+              Chain <span style={{ color: "var(--ats-fg-secondary)" }}>(Total: <span className="tabular-nums">{colTotals.chain}</span>)</span>
+            </th>
+            <th className="pb-2 pr-3 font-semibold text-right" title={`Total LLM cost in USD over the selected window: ${colTotals.cost.toFixed(4)}`}>
+              Cost USD <span style={{ color: "var(--ats-fg-secondary)" }}>(Total: <span className="tabular-nums">{colTotals.cost.toFixed(2)}</span>)</span>
+            </th>
             <th className="pb-2 pr-3 font-semibold">Last active</th>
             <th className="pb-2 pr-3 font-semibold">First seen</th>
             <th className="pb-2 pr-3 font-semibold">Tier changed</th>
@@ -4935,44 +4966,30 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
             );
           })}
         </tbody>
-        {/* Totals row — sums every visible user's window counters so an
-            operator can read aggregate volume / cost at a glance without
-            mental arithmetic. The values respect whatever filter +
-            window the operator picked above (the table receives the
-            already-filtered list), so the totals always describe the
-            visible roster, never the hidden one. Bonus quota isn't
-            summed here because the bonus values are PER-USER additive
-            grants, not throughput, and adding them would invite a
-            "why is the bonus column also tallying?" mis-read. */}
-        {(() => {
-          const totals = users.reduce((acc, u) => {
-            const w = u.window ?? u.today;
-            acc.quick += w.quick_search_count;
-            acc.deep  += w.deep_search_count;
-            acc.synth += w.synthesis_count;
-            acc.chain += w.deep_read_count;
-            acc.cost  += w.llm_cost_usd;
-            return acc;
-          }, { quick: 0, deep: 0, synth: 0, chain: 0, cost: 0 });
-          return (
-            <tfoot>
-              <tr
-                className="text-[10px] uppercase tracking-wider border-t"
-                style={{ color: "var(--ats-fg-secondary)", borderColor: "var(--ats-border-subtle)" }}
-              >
-                <td className="pt-2 pr-3 font-bold" colSpan={3}>
-                  Totals · {users.length} user{users.length === 1 ? "" : "s"}
-                </td>
-                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.quick}</td>
-                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.deep}</td>
-                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.synth}</td>
-                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.chain}</td>
-                <td className="pt-2 pr-3 text-right font-bold tabular-nums">{totals.cost.toFixed(4)}</td>
-                <td className="pt-2 pr-3" colSpan={4} />
-              </tr>
-            </tfoot>
-          );
-        })()}
+        {/* Totals row — same colTotals that headline the column headers,
+            repeated at the bottom of the table so an operator who
+            scrolls down still sees the aggregate. Cost rendered to
+            4 decimals here (vs. 2 in the header) because by the time
+            the operator's down here they're inspecting per-user
+            spend, where fractional cents matter. Bonus quota
+            deliberately not tallied — those are per-user additive
+            grants, not throughput. */}
+        <tfoot>
+          <tr
+            className="text-[10px] uppercase tracking-wider border-t"
+            style={{ color: "var(--ats-fg-secondary)", borderColor: "var(--ats-border-subtle)" }}
+          >
+            <td className="pt-2 pr-3 font-bold" colSpan={3}>
+              Totals · {users.length} user{users.length === 1 ? "" : "s"}
+            </td>
+            <td className="pt-2 pr-3 text-right font-bold tabular-nums">{colTotals.quick}</td>
+            <td className="pt-2 pr-3 text-right font-bold tabular-nums">{colTotals.deep}</td>
+            <td className="pt-2 pr-3 text-right font-bold tabular-nums">{colTotals.synth}</td>
+            <td className="pt-2 pr-3 text-right font-bold tabular-nums">{colTotals.chain}</td>
+            <td className="pt-2 pr-3 text-right font-bold tabular-nums">{colTotals.cost.toFixed(4)}</td>
+            <td className="pt-2 pr-3" colSpan={4} />
+          </tr>
+        </tfoot>
       </table>
     </div>
   );
@@ -5952,13 +5969,18 @@ function TierLimitsEditor({
 }) {
   const TIERS: string[] = ["free", "basic", "scholar", "dev"];
   // Internal feature keys stay as-is (matches the quota table's column
-  // names); only the display labels map to the renamed "Evidence Chain"
-  // for deep_read.
-  const FEATURES: { key: string; label: string }[] = [
-    { key: "quick_search", label: "Quick Search"   },
-    { key: "deep_search",  label: "Deep Search"    },
-    { key: "synthesis",    label: "Synthesis"      },
-    { key: "deep_read",    label: "Evidence Chain" },
+  // names); display labels are humanised for the operator. The
+  // `synthesis` row represents BOTH the Writing Lab writing flow AND
+  // the Paper Review multi-agent flow — they intentionally share one
+  // daily quota bucket on the backend (see TIER_LIMITS in quota.py),
+  // so editing this row caps both surfaces at once. The label spells
+  // it out so an operator looking for "Paper Review" doesn't think
+  // it's missing from this panel.
+  const FEATURES: { key: string; label: string; hint?: string }[] = [
+    { key: "quick_search", label: "Quick Search"               },
+    { key: "deep_search",  label: "Deep Search"                },
+    { key: "synthesis",    label: "Writing Lab + Paper Review", hint: "Shared daily quota: edits here cap BOTH the Writing Lab generation flow and the Paper Review multi-agent critique flow." },
+    { key: "deep_read",    label: "Evidence Chain"             },
   ];
 
   // Draft state keyed by tier → feature. Seed + re-seed from `data.effective`
@@ -6082,7 +6104,14 @@ function TierLimitsEditor({
           <tr className="text-left text-[10px] uppercase tracking-wider border-b" style={{ color: "var(--ats-fg-muted)", borderColor: "var(--ats-border-subtle)" }}>
             <th className="pb-2 pr-3 font-semibold">Tier</th>
             {FEATURES.map(f => (
-              <th key={f.key} className="pb-2 pr-3 font-semibold">{f.label}</th>
+              <th
+                key={f.key}
+                className="pb-2 pr-3 font-semibold"
+                title={f.hint}
+                style={f.hint ? { textDecoration: "underline dotted", textUnderlineOffset: "3px", cursor: "help" } : undefined}
+              >
+                {f.label}
+              </th>
             ))}
           </tr>
         </thead>
