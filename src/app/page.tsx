@@ -4869,7 +4869,7 @@ ${html}
               }}
             >
               <Zap size={12} strokeWidth={2.5} />
-              <span>Sign in with Google for a higher daily quota</span>
+              <span>Sign in for the best experience</span>
             </div>
             <button
               onClick={handleGoogleLogin}
@@ -5078,7 +5078,7 @@ ${html}
               }}
             >
               <Zap size={12} strokeWidth={2.5} />
-              <span>Sign in with Google for a higher daily quota</span>
+              <span>Sign in for the best experience</span>
             </div>
             <button
               onClick={handleGoogleLogin}
