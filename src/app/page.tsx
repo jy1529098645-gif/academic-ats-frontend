@@ -4103,6 +4103,14 @@ ${html}
   async function handleSynthesize() {
     if (labRefs.length === 0) return;
     if (!ensureQuota("synthesis")) return;
+    // Auto-switch to the Writing layout (right panel expanded, others
+    // collapsed) the moment the user kicks off a generation. Reading
+    // a streaming draft is the dominant task for the next minute or
+    // two — the search results / analytics columns aren't useful
+    // while that's happening, and surfacing a wider Writing Lab
+    // saves the user a manual layout flip. Mirrors the auto-switch
+    // we do for Paper Review's run handler.
+    applyLayoutMode("writing");
     // Funnel telemetry — see search_submitted in handleSearch.
     labStartedAtRef.current = Date.now();
     void track("lab_started", {
@@ -6765,6 +6773,7 @@ ${html}
                     seedDraft={reviewSeedDraft}
                     seedKey={reviewSeedKey}
                     onPushFeedbackToLab={handleFeedbackToWritingLab}
+                    onBeforeRun={() => applyLayoutMode("writing")}
                   />
                 </ErrorBoundary>
               </div>

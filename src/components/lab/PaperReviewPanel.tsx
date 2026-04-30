@@ -226,14 +226,19 @@ const INPUT_STYLE: React.CSSProperties = {
  *   when the operator hits the "Send feedback to Writing Lab"
  *   button below the review output. The parent then pipes that into
  *   Writing Lab's revise instructions + switches tabs.
+ * - `onBeforeRun` fires the moment the operator clicks Run, BEFORE
+ *   the SSE stream opens. Lets the host page flip the column layout
+ *   (collapse left / expand right) so the streaming review letter
+ *   has the most reading space. No-op when omitted.
  */
 type PaperReviewPanelProps = {
   seedDraft?:           string | null;
   seedKey?:             number;
   onPushFeedbackToLab?: (feedback: string) => void;
+  onBeforeRun?:         () => void;
 };
 
-export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab }: PaperReviewPanelProps = {}) {
+export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBeforeRun }: PaperReviewPanelProps = {}) {
   const [paperText,    setPaperText]    = useState("");
   const [contextHint,  setContextHint]  = useState("");
   const [draftType,    setDraftType]    = useState("auto");
@@ -309,6 +314,12 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab }: Pa
       return;
     }
     if (generating) return;
+    // Host hook — fires BEFORE the SSE stream opens so the parent
+    // can flip the column layout (collapse left / expand right) for
+    // the streaming review letter. Falls through silently if the
+    // parent didn't supply the prop or the host is the standalone
+    // mount that has no surrounding panels to collapse.
+    try { onBeforeRun?.(); } catch { /* host crash is not our problem */ }
     // Funnel telemetry — fires before any LLM call. Currently a
     // no-op stub (see analytics.ts header).
     const reviewStartedAt = Date.now();
@@ -430,7 +441,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab }: Pa
       setGenerating(false);
       setStatus("");
     }
-  }, [paperText, contextHint, draftType, language, generating]);
+  }, [paperText, contextHint, draftType, language, generating, onBeforeRun]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
