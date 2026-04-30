@@ -4719,21 +4719,22 @@ ${html}
               )}
             </p>
           </div>
-          {/* Megaphone + Day/Night toggles — own column, vertically
-              stretches to span exactly from wordmark TOP to slogan
-              BOTTOM via `self-stretch` + each button taking flex-1.
-              Bigger than before (was h/w 26px, now stretches with the
-              wordmark height ≈ 32-34px each) so the icons are visible
-              at a glance and the column reads as a chrome control
-              strip rather than two stray pills. */}
-          <div className="shrink-0 self-stretch flex flex-col gap-1.5 py-1">
+          {/* Megaphone + Day/Night toggles — own column, perfect circles.
+              h-8 w-8 (32×32) + gap-1 (4px) totals 68px, which matches
+              the wordmark+slogan stack height (text-5xl ≈ 48px + mt-1.5
+              gap + ≈ 14px slogan ≈ 68px), so the top edge of the
+              megaphone aligns with "AcademiCats" top and the bottom
+              edge of the theme toggle aligns with the slogan baseline.
+              `self-stretch` + `justify-center` on the column keeps the
+              alignment robust if either text size is tweaked later. */}
+          <div className="shrink-0 self-stretch flex flex-col items-center justify-center gap-1 py-1">
             <button
               onClick={() => setAnnouncementsVisible(v => !v)}
               title={announcementsVisible ? "Hide announcements" : "Show announcements"}
               aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
               aria-pressed={announcementsVisible}
               {...helpProps(announcementsVisible ? "hide public ticker" : "show public ticker")}
-              className={`flex flex-1 items-center justify-center w-9 rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
+              className={`flex h-8 w-8 items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
               style={{
                 borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
                 backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
@@ -4747,7 +4748,7 @@ ${html}
               title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
               aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
               {...helpProps(themeMode === "night" ? "switch to Day mode" : "switch to Night mode")}
-              className="flex flex-1 items-center justify-center w-9 rounded-full border transition-all duration-200 hover:brightness-110"
+              className="flex h-8 w-8 items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
               style={{
                 borderColor:     "var(--ats-border-subtle)",
                 backgroundColor: "var(--ats-bg-accent-soft)",
