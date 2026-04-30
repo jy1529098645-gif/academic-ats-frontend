@@ -1491,11 +1491,11 @@ function DesktopWorkspace() {
   const [uiError, setUiError] = useState("");
   const [nowMs, setNowMs] = useState(Date.now());
 
-  // Initial layout is 1 : 5 : 1 (≈ 14.3 / 71.4 / 14.3) to give the Workspace the most breathing room on mount.
-  // A single click on either divider snaps to the classic 1 : 3 : 1 (20 / 60 / 20) working layout.
-  // After that, the user can drag freely from whichever ratio they just landed on.
-  const [leftPct, setLeftPct] = useState(14.3);
-  const [centerPct, setCenterPct] = useState(71.4);
+  // Initial layout is 1 : 2 : 1 (25 / 50 / 25) — same ratio is also the
+  // snap-to-default a user gets by clicking either divider. After that,
+  // dragging adjusts freely from wherever they just landed.
+  const [leftPct, setLeftPct] = useState(25);
+  const [centerPct, setCenterPct] = useState(50);
   // Layout mode preset — the user picks one of four templates from the
   // header bar, and `applyLayoutMode` writes the matching visibility +
   // column ratios. handleSearch reads `layoutMode` instead of always
@@ -1516,8 +1516,8 @@ function DesktopWorkspace() {
   }>(null);
   const rightPct = Math.max(100 - leftPct - centerPct, 12);
   const snapDividerToDefault = useCallback(() => {
-    setLeftPct(20);
-    setCenterPct(60);
+    setLeftPct(25);
+    setCenterPct(50);
   }, []);
   // Both panels start collapsed — preserves the "clean landing" first
   // impression. The Lab's INNER content (Paper Review draft pad,
@@ -2499,7 +2499,7 @@ function DesktopWorkspace() {
       setAssessmentMessage("");
       setGridTransitioning(true);
       setLeftVisible(true); setAnalyticsVisible(true);
-      setLeftPct(20); setCenterPct(60);
+      setLeftPct(25); setCenterPct(50);
       setLeftTab("brief");
       window.setTimeout(() => setGridTransitioning(false), 950);
     }
@@ -2760,8 +2760,8 @@ function DesktopWorkspace() {
       const x = event.clientX - rect.left;
       const pct = (x / rect.width) * 100;
 
-      // Generous clamps — the floor sits below the 1:5:1 initial layout (leftPct≈14.3)
-      // so dragging immediately expands the left panel instead of snapping to a wider
+      // Generous clamps — the floor sits below the 1:2:1 initial layout (leftPct=25)
+      // so dragging immediately shrinks the left panel instead of snapping to a wider
       // minimum. The ceiling gives each panel enough headroom to dominate the screen.
       if (dragRef.current === "left") {
         const newLeft = clamp(pct, 8, 72);
@@ -2819,8 +2819,8 @@ function DesktopWorkspace() {
    *  their "working" positions exactly like they dragged them there. */
   const snapToWorkingLayout = useCallback(() => {
     setGridTransitioning(true);
-    setLeftPct(20);
-    setCenterPct(60);
+    setLeftPct(25);
+    setCenterPct(50);
     window.setTimeout(() => setGridTransitioning(false), 950);
   }, []);
 
@@ -2838,7 +2838,7 @@ function DesktopWorkspace() {
       // left tab back to "brief" — otherwise a user who toggled to
       // Charts in a previous session would still see Charts here.
       setLeftVisible(true); setAnalyticsVisible(true);
-      setLeftPct(20); setCenterPct(60);
+      setLeftPct(25); setCenterPct(50);
       setLeftTab("brief");
     } else if (mode === "scholar") {
       // Scholar = focus on the Research Brief — right panel hidden so
@@ -3875,7 +3875,7 @@ ${html}
 
   // Full pristine reset — drops the user back at the landing exactly
   // as they first saw it. Aborts any in-flight search, clears the query
-  // + sprite results, restores the default 14.3/71.4/14.3 layout and
+  // + sprite results, restores the default 25/50/25 layout and
   // re-collapses both side panels. Different from handleStop, which
   // PRESERVES the query + directions so the user can resume.
   // Defined as `const` (not `function`) because Turbopack's HMR
@@ -3915,8 +3915,8 @@ ${html}
     setGridTransitioning(true);
     setLeftVisible(false);
     setAnalyticsVisible(false);
-    setLeftPct(14.3);
-    setCenterPct(71.4);
+    setLeftPct(25);
+    setCenterPct(50);
     window.setTimeout(() => setGridTransitioning(false), 950);
     prePuttingSearchLayoutRef.current = null;
     _autoSnappedRef.current = false;
@@ -3935,8 +3935,8 @@ ${html}
     setGridTransitioning(true);
     setLeftVisible(false);
     setAnalyticsVisible(false);
-    setLeftPct(14.3);
-    setCenterPct(71.4);
+    setLeftPct(25);
+    setCenterPct(50);
     window.setTimeout(() => setGridTransitioning(false), 950);
     setIntroStage("blank");
     setHasRunSearch(false);
@@ -4603,8 +4603,8 @@ ${html}
               setUserMenuOpen(true);
               setLeftVisible(false);
               setAnalyticsVisible(false);
-              setLeftPct(14.3);
-              setCenterPct(71.4);
+              setLeftPct(25);
+              setCenterPct(50);
               setQuery("");
               setButtonStep(0);
             },
@@ -4623,8 +4623,8 @@ ${html}
               setUserMenuOpen(false);
               setLeftVisible(false);
               setAnalyticsVisible(false);
-              setLeftPct(14.3);
-              setCenterPct(71.4);
+              setLeftPct(25);
+              setCenterPct(50);
               setQuery("");
               setButtonStep(0);
             },
@@ -4643,8 +4643,8 @@ ${html}
               setUserMenuOpen(false);
               setLeftVisible(false);
               setAnalyticsVisible(false);
-              setLeftPct(14.3);
-              setCenterPct(71.4);
+              setLeftPct(25);
+              setCenterPct(50);
               setQuery("");
               setButtonStep(0);
             },
@@ -5962,6 +5962,9 @@ ${html}
                               <button
                                 onClick={() => inLab ? removeFromLab(paperKey) : addToLab(paper, paperKey)}
                                 title={inLab ? "Remove from your writing references" : "Add to your writing references"}
+                                {...helpProps(inLab
+                                  ? "Already saved. Click to remove from your writing references."
+                                  : "Save this paper to use in Writing Lab.")}
                                 className={`shrink-0 mt-1 flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-all ${
                                   inLab
                                     ? "border-blue-500/50 bg-blue-500/10 text-blue-300 hover:border-rose-500/50 hover:text-rose-400 hover:bg-rose-500/10"

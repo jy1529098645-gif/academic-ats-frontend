@@ -143,7 +143,7 @@ const DRAFT_LEVELS: Array<{ id: "working" | "final" | "sketch"; label: string; b
 ];
 
 const DRAFT_TYPES: Array<{ id: string; label: string; hint: string }> = [
-  { id: "auto",                 label: "Let the AI infer",       hint: "" },
+  { id: "auto",                 label: "Auto-detect from draft", hint: "" },
   { id: "research_paper",       label: "Research paper",         hint: "Full empirical or theoretical paper — expects Methods, Results, Discussion." },
   { id: "literature_review",    label: "Literature review",      hint: "Synthesis of prior work. Reviewers weight coverage and organisation." },
   { id: "research_proposal",    label: "Research proposal",      hint: "Plan for future work. Reviewers weight question clarity and feasibility." },
