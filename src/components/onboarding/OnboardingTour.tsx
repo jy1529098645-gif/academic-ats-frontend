@@ -484,7 +484,17 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
           after the target has settled. */}
       {hole && (
         <div
-          key={`ring-${stepIdx}-${hole.top}-${hole.left}-${hole.width}-${hole.height}`}
+          // Key derived ONLY from rect-derived values, NOT stepIdx. During
+          // a holdMs window the rect state is intentionally pinned at the
+          // previous step's value, so a stepIdx-keyed ring would unmount
+          // on Next click and re-fade at the OLD rect — visually that
+          // reads as "highlight blinks off, then back on at the same
+          // place, then off again, then back on at the new place" when
+          // the hold expires. Keying on hole alone means: stepIdx change
+          // with stable rect → same key → no remount → ring stays put.
+          // Rect actually commits to a new value → new key → remount →
+          // fade in at the new location. One blink per real move.
+          key={`ring-${hole.top}-${hole.left}-${hole.width}-${hole.height}`}
           className="fixed pointer-events-none rounded-xl ats-tour-reveal"
           style={{
             top:    hole.top,
@@ -512,7 +522,10 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
           cardRef feeds the post-render height measurement back into
           cardPosition's bottom-clamp — see useLayoutEffect below. */}
       <div
-        key={`card-${stepIdx}-${isCentred ? "centred" : `${cardStyle.top}-${cardStyle.left}`}`}
+        // Same reasoning as the ring above — key only on the resolved
+        // position so a held step doesn't blink the card off/on while
+        // we wait for the panel slide-in to finish.
+        key={`card-${isCentred ? "centred" : `${cardStyle.top}-${cardStyle.left}`}`}
         ref={cardRef}
         className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto ats-tour-reveal"
         style={{
