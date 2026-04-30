@@ -4800,11 +4800,17 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
             <th className="pb-2 pr-3 font-semibold">Email</th>
             <th className="pb-2 pr-3 font-semibold">Tier</th>
             <th className="pb-2 pr-3 font-semibold">Status</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Quick Search">Quick</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Deep Search">Deep</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Synthesis Lab runs">Synth</th>
-            <th className="pb-2 pr-3 font-semibold text-right" title="Evidence Chain reports">Chain</th>
-            <th className="pb-2 pr-3 font-semibold text-right">Cost (USD)</th>
+            {/* Each numeric column displays the SUM across the operator-
+                selected window for that user (today / 7d / 30d / all),
+                so we suffix every header with "(Total)" — without it,
+                "Quick" reads ambiguously as "the most recent quick
+                search" or "a daily count". The tfoot below tallies
+                these per-column. */}
+            <th className="pb-2 pr-3 font-semibold text-right" title="Total Quick searches in the selected window">Quick (Total)</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Total Deep searches in the selected window">Deep (Total)</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Total Synthesis Lab runs in the selected window">Synth (Total)</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Total Evidence Chain reports in the selected window">Chain (Total)</th>
+            <th className="pb-2 pr-3 font-semibold text-right" title="Total LLM cost in USD over the selected window">Cost USD (Total)</th>
             <th className="pb-2 pr-3 font-semibold">Last active</th>
             <th className="pb-2 pr-3 font-semibold">First seen</th>
             <th className="pb-2 pr-3 font-semibold">Tier changed</th>
