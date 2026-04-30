@@ -4262,12 +4262,16 @@ ${html}
     setReviewSeedDraft(t);
     setReviewSeedKey(k => k + 1);   // forces PaperReviewPanel's seed effect to re-run even on identical text
     setLabModule("review");
-    // Same auto-expand we do for Compose / Re-revise — the operator just
-    // committed to running a review pass, the right panel is now the
-    // dominant surface. Without this, users on a 1:3:1 layout had to
-    // manually widen the panel to see the seeded textarea + Run button.
-    applyLayoutMode("writing");
-  }, [applyLayoutMode]);
+    // Snap to the right-panel-dominant geometry so the seeded textarea
+    // + Run button get full width to lay out comfortably. We use
+    // `snapToWritingFocusKeepingTab()` (NOT `applyLayoutMode("writing")`)
+    // here on purpose — the latter ALSO calls setLabModule("synthesis")
+    // internally, which would immediately undo the
+    // setLabModule("review") above and dump the user back on the
+    // Writing Lab tab. The "KeepingTab" sibling exists for exactly
+    // this reason: same column geometry, no module override.
+    snapToWritingFocusKeepingTab();
+  }, [snapToWritingFocusKeepingTab]);
 
   /** Receive packaged feedback from Paper Review and pipe it into Writing
    *  Lab's Deep Revise instructions field, then flip back to synthesis
@@ -4280,6 +4284,13 @@ ${html}
     setLabReviseInstructions(feedback || "");
     setLabReviseError("");
     setLabModule("synthesis");
+    // Defensive: ensure the right panel is open before the scroll
+    // attempt. The Paper Review panel was just visible (since the
+    // user is clicking from inside it), but a parallel layout-mode
+    // toggle could have collapsed analyticsVisible since then —
+    // setting it true again is idempotent and guarantees the
+    // textarea is mounted and reachable.
+    setAnalyticsVisible(true);
     // Two animation frames: first lets React commit the labModule swap
     // (Writing Lab tab becomes visible); the second lets the layout
     // settle so getBoundingClientRect inside scrollIntoView is correct.
