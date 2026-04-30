@@ -281,9 +281,24 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   // sliding into the future, so the spotlight rect would NEVER commit
   // for a step that has `holdMs` set when the parent polls anything in
   // the background. Only resets on a real step transition.
+  //
+  // Also clears `rect` to null when the incoming step has a holdMs > 0.
+  // Per the user's "third/fourth/fifth step" feedback: when the panel
+  // is mid-slide-in, the previous step's highlight no longer points at
+  // anything meaningful, so leaving it on screen is worse than hiding
+  // it. With rect=null both the SVG cutout and the spotlight ring
+  // disappear during the hold; the dim layer falls back to the
+  // full-screen variant; then RAF (which honours holdMs) measures and
+  // commits the new rect once the panel has settled, and the ring
+  // fades in directly at the new location.
   const stepStartedAtRef = useRef(0);
   useEffect(() => {
-    if (open) stepStartedAtRef.current = Date.now();
+    if (!open) return;
+    stepStartedAtRef.current = Date.now();
+    const step = stepsRef.current[stepIdx];
+    if (step?.holdMs && step.holdMs > 0) {
+      setRect(null);
+    }
   }, [open, stepIdx]);
 
   useEffect(() => {

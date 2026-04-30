@@ -4607,6 +4607,13 @@ ${html}
             title:     "Profile & help",
             body:      "Profile, usage, and Help (which re-launches this tour) live behind your avatar.",
             placement: "right",
+            // Coming from right-panel: this step's onEnter collapses the
+            // right panel (setAnalyticsVisible(false)), and that collapse
+            // is itself a 0.9s translateX. Hide the prior spotlight for
+            // the duration so it doesn't visibly chase the panel off
+            // the right edge of the viewport before settling onto the
+            // user-menu dropdown.
+            holdMs:    1000,
             onEnter:   () => {
               setUserMenuOpen(true);
               setLeftVisible(false);
