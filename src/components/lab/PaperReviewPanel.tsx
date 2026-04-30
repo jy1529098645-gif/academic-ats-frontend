@@ -21,7 +21,7 @@ import ReactMarkdown from "react-markdown";
 import {
   Upload, FolderOpen, FileText, Sparkles, Square, Bot,
   ChevronDown, ChevronRight, ClipboardList, Check, X as XIcon, Play,
-  Award, Gauge, AlertTriangle, Clock, ArrowLeft,
+  Award, Gauge, AlertTriangle, Clock, ArrowRight,
   ThumbsUp, Target, Globe, Lightbulb,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
@@ -901,8 +901,8 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBe
               className="mt-3 relative w-full rounded-xl px-4 py-3 text-sm font-bold transition-all overflow-hidden bg-violet-600 text-white hover:bg-violet-500"
             >
               <span className="flex items-center justify-center gap-2">
-                <ArrowLeft size={16} strokeWidth={2.5} />
                 Send feedback to Writing Lab
+                <ArrowRight size={16} strokeWidth={2.5} />
               </span>
             </button>
           )}
