@@ -4676,7 +4676,7 @@ ${html}
             id:        "search-mode",
             target:    "search-mode",
             title:     "Quick or Deep",
-            body:      "Quick: many papers, see trends. Deep: fewer papers, picked for quality. Deep costs more quota.",
+            body:      "Quick: many papers, see trends. Deep: fewer papers, picked for quality.",
             placement: "top",
             onEnter:   () => {
               setUserMenuOpen(false);
