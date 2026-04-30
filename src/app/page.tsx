@@ -7493,10 +7493,16 @@ ${html}
                           discoverable CTA most users will click. Hidden
                           while a generation stream is mid-flight (you
                           can't ship a half-formed draft). */}
-                      {!labGenerating && labResult && (
+                      {/* Visibility gate: render whenever there's a draft
+                          on screen (live OR a past run loaded via the
+                          history tabs) and we're not mid-stream. The
+                          earlier `labResult`-only check missed past-run
+                          views — operators who clicked an older tab saw
+                          the article body but no Send-to-Review CTA. */}
+                      {!labGenerating && !!displayedLabResult && (
                         <button
                           onClick={() => handleSendLabResultToReview(displayedLabResult)}
-                          disabled={labReviseRunning || !displayedLabResult}
+                          disabled={labReviseRunning}
                           title="Send the generated text to Paper Review for a multi-agent critique."
                           className="mt-3 relative w-full rounded-xl px-4 py-3 text-sm font-bold transition-all overflow-hidden disabled:cursor-not-allowed disabled:opacity-40 bg-blue-600 text-white hover:bg-blue-500"
                         >
