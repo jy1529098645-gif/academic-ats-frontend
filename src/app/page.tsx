@@ -4541,6 +4541,12 @@ ${html}
             title:     "Brief & Charts",
             body:      "After a search, this panel fills with the synthesised brief and citation/topic charts. Tabs at the top switch between them.",
             placement: "right",
+            // The left panel slides in over 0.9s when leftVisible flips
+            // true (transform: translateX). Freeze the spotlight on the
+            // previous step's target until the slide finishes, then jump
+            // it to the settled rect in a single motion. 1000ms = 0.9s
+            // panel transition + 100ms safety buffer.
+            holdMs:    1000,
             onEnter:   () => {
               setUserMenuOpen(false);
               setLeftVisible(true);
@@ -4570,6 +4576,10 @@ ${html}
             title:     "Synthesis Lab & Paper Review",
             body:      "Write essays, statements, or proposals from picked papers, or get a multi-agent critique of your own draft.",
             placement: "left",
+            // Mirror of the left-panel step: the right ASIDE has the same
+            // 0.9s translateX. Freeze the spotlight until the panel is
+            // fully on-screen, then a single slide commits.
+            holdMs:    1000,
             onEnter:   () => {
               setUserMenuOpen(false);
               setLeftVisible(false);

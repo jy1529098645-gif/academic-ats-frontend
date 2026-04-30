@@ -75,6 +75,23 @@ export type TourStep = {
    *  whatever the previous/next step did. The parent should snapshot
    *  pre-tour state and restore on close so the tour leaves no trace. */
   onEnter?: () => void;
+  /** Spotlight-rect freeze window in milliseconds.
+   *
+   *  When `onEnter` triggers a layout transition that the spotlight's
+   *  target element is part of (e.g. the left/right panels' 0.9s
+   *  translateX slide-in), the RAF tracker would otherwise chase the
+   *  target frame-by-frame as it slides in — visually that reads as
+   *  "the spotlight first deforms to follow the moving panel, then
+   *  settles", a two-step motion. Setting `holdMs` tells the tracker
+   *  to NOT touch the rect state for that many milliseconds after
+   *  this step becomes active. The spotlight stays parked on the
+   *  PREVIOUS step's rect (or invisible if there was none) until the
+   *  hold expires, after which a single setRect commits the now-
+   *  settled rect and the CSS transition does ONE smooth slide.
+   *
+   *  Set this to ~100ms longer than the longest CSS transition you
+   *  trigger in onEnter. For the panels' 0.9s slide we use 1000ms. */
+  holdMs?: number;
 };
 
 type Props = {
@@ -256,17 +273,41 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
   // (or invisible, for centred → targeted) instead of blinking to
   // an undefined intermediate state.
   const STABLE_FRAMES = 3; // ~50ms at 60fps — enough to filter mid-animation
+
+  // stepStartedAtRef: timestamp of when the CURRENT stepIdx first became
+  // active. Survives parent re-renders (which recompose `steps` and re-run
+  // the RAF effect below). Without this, every parent re-render would
+  // recompute `startedAt = Date.now()` and the hold-window would keep
+  // sliding into the future, so the spotlight rect would NEVER commit
+  // for a step that has `holdMs` set when the parent polls anything in
+  // the background. Only resets on a real step transition.
+  const stepStartedAtRef = useRef(0);
+  useEffect(() => {
+    if (open) stepStartedAtRef.current = Date.now();
+  }, [open, stepIdx]);
+
   useEffect(() => {
     if (!open) return;
     const step = steps[stepIdx];
     if (!step?.target) return;
 
     let rafId = 0;
+    const holdMs = step.holdMs ?? 0;
     let stableCandidate: Rect | null = null;
     let stableCount = 0;
     let lastCommitted: Rect | null = null;
 
     const tick = () => {
+      // Hold window: don't read OR commit. The spotlight stays on the
+      // previous step's rect (state untouched) so the user sees zero
+      // motion while the page transition is running. Once we cross
+      // the hold deadline (computed against the stepIdx-pinned start
+      // ref so it survives re-arms), the stability gate engages
+      // normally and the first settled rect commits in one shot.
+      if (Date.now() < stepStartedAtRef.current + holdMs) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
       const next = readRect(step.target);
       if (next) {
         if (stableCandidate && rectsEqual(stableCandidate, next)) {
@@ -388,59 +429,94 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
       role="dialog"
       aria-labelledby="onboarding-tour-title"
     >
+      {/* Dim backdrop — always rendered, never animated. Uses an SVG
+          mask to punch a transparent hole at the spotlight rect when
+          one is active; otherwise the mask covers nothing and the
+          full viewport is dimmed (welcome / done states).
+          Decoupling the dim from the spotlight ring is what lets the
+          ring fade in on step changes WITHOUT the page brightness
+          flickering — the dim layer is the same DOM element across
+          every step, so its opacity stays steady. The SVG element
+          itself updates its <rect x="…" y="…" /> attributes to move
+          the cutout instantly between steps.
+          pointer-events:auto on the centred branch so welcome / done
+          cards block interaction with what's behind. When a target
+          is highlighted the dim is pointer-events-none — clicks pass
+          through to the spotlit element (try-as-you-learn). */}
       {hole ? (
-        // Spotlight cutout — single donut element. The 9999px
-        // box-shadow paints "everything outside this rect" dark,
-        // giving us a perfectly aligned cutout with no edge-sync
-        // problems. The accent ring is layered onto the same
-        // element via the second box-shadow term so the outline
-        // is automatically tied to the rect's geometry.
-        // pointer-events-none lets the user click through to the
-        // real target underneath (try-as-you-learn).
-        // CSS transitions on top/left/width/height drive a single
-        // continuous slide from the previous step's target to the
-        // current one — no opacity fade so the ring never visually
-        // "appears at the new spot then expands". Mid-step rect
-        // drift (scroll / layout shift) rides the same transitions.
+        <svg
+          className="fixed inset-0 pointer-events-none"
+          width="100%"
+          height="100%"
+          aria-hidden="true"
+        >
+          <defs>
+            <mask id="ats-tour-dim-cutout">
+              <rect x="0" y="0" width="100%" height="100%" fill="white" />
+              <rect
+                x={hole.left}
+                y={hole.top}
+                width={hole.width}
+                height={hole.height}
+                rx="12"
+                ry="12"
+                fill="black"
+              />
+            </mask>
+          </defs>
+          <rect
+            x="0" y="0" width="100%" height="100%"
+            fill="rgba(0, 0, 0, 0.55)"
+            mask="url(#ats-tour-dim-cutout)"
+          />
+        </svg>
+      ) : (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto" />
+      )}
+
+      {/* Spotlight ring — JUST the accent outline. Fades in at the
+          new rect on every step change via the .ats-tour-reveal
+          opacity keyframe + key-based remount. The dim is in the
+          separate SVG above so this animation never affects page
+          darkening. Mid-step rect drift (RAF tick) re-keys this
+          element and re-fires the fade — typically a no-op because
+          the stability gate in the RAF effect only commits new rects
+          after the target has settled. */}
+      {hole && (
         <div
-          className="fixed pointer-events-none rounded-xl"
+          key={`ring-${stepIdx}-${hole.top}-${hole.left}-${hole.width}-${hole.height}`}
+          className="fixed pointer-events-none rounded-xl ats-tour-reveal"
           style={{
             top:    hole.top,
             left:   hole.left,
             width:  hole.width,
             height: hole.height,
-            transition: "top 320ms cubic-bezier(0.4,0,0.2,1), left 320ms cubic-bezier(0.4,0,0.2,1), width 320ms cubic-bezier(0.4,0,0.2,1), height 320ms cubic-bezier(0.4,0,0.2,1)",
             boxShadow: [
-              "0 0 0 9999px rgba(0, 0, 0, 0.55)",
               "0 0 0 2px var(--ats-fg-accent)",
               "0 0 0 6px rgba(59, 130, 246, 0.25)",
             ].join(", "),
           }}
         />
-      ) : (
-        // No target (or rect not yet measured) → full-screen dim for
-        // centred welcome / done cards. Plain dim, no spotlight ring.
-        // pointer-events:auto re-enabled here (wrapper is none) so
-        // the dim layer blocks page interaction during welcome /
-        // done — there's nothing to interact with under those.
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto" />
       )}
 
       {/* Floating card. Uses translate-centring for centred steps and
-          absolute top/left for targeted steps. CSS transitions on
-          top/left smooth out both per-step jumps and per-frame RAF
-          rect chases. The duration matches the spotlight (320ms)
-          so the card and the ring move together as one motion.
+          absolute top/left for targeted steps. No CSS transition on
+          top/left — the card jumps to its new position and rides the
+          .ats-tour-reveal opacity fade for a clean reveal. Re-mounted
+          on every position change via the React key below so the
+          animation re-fires on each Next / Back. The dim backdrop
+          layer renders separately and is NOT animated, so the page
+          darkening stays steady across step transitions.
           pointer-events:auto re-enabled (wrapper is none) so the
           Back / Next / Skip buttons remain clickable.
           cardRef feeds the post-render height measurement back into
           cardPosition's bottom-clamp — see useLayoutEffect below. */}
       <div
+        key={`card-${stepIdx}-${isCentred ? "centred" : `${cardStyle.top}-${cardStyle.left}`}`}
         ref={cardRef}
-        className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto"
+        className="fixed rounded-2xl border shadow-2xl p-5 pointer-events-auto ats-tour-reveal"
         style={{
           ...cardStyle,
-          transition: "top 320ms cubic-bezier(0.4,0,0.2,1), left 320ms cubic-bezier(0.4,0,0.2,1)",
           borderColor:     "var(--ats-border-subtle)",
           backgroundColor: "var(--ats-bg-panel)",
           color:           "var(--ats-fg-primary)",

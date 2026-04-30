@@ -526,6 +526,23 @@ body {
   .stage-reveal { animation: none; }
 }
 
+/* ── Tour reveal ──────────────────────────────────────────────────────────
+   Pure opacity fade for the onboarding tour's spotlight ring + card. No
+   translate / scale here on purpose: the spotlight is positioned absolutely
+   over its target and any transform would shift it off-target during the
+   animation. Re-fired by giving the element a new React key whenever the
+   measured rect changes — see OnboardingTour.tsx. The dim backdrop layer
+   does NOT use this class so the page-darkening stays steady across step
+   changes (avoids a strobe effect every Next click). */
+@keyframes atsTourReveal {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.ats-tour-reveal { animation: atsTourReveal 220ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .ats-tour-reveal { animation: none; }
+}
+
 /* Sprite dot — two modes:
    - `.sprite-dot-think` : fast two-beat pulse, used while the sprite is
      actively chewing on a keystroke (pre-reveal) OR the debounced AI
