@@ -7423,26 +7423,12 @@ ${html}
                       <div className="flex flex-nowrap items-center gap-2 mb-1 overflow-hidden">
                         <span className="shrink min-w-0 truncate text-sm font-semibold text-slate-200">Generated Text</span>
                         <div className="ml-auto flex flex-nowrap items-center gap-1.5 min-w-0">
-                          {/* Closed-loop hand-off — "Send to Paper Review"
-                              ships the displayed text to the sibling tab.
-                              Accent-tinted so it reads as the next-step
-                              CTA rather than a peer of Copy. Disabled
-                              while a Deep Revise pass is mid-stream so
-                              the user doesn't ship a half-formed draft. */}
-                          <button
-                            onClick={() => handleSendLabResultToReview(displayedLabResult)}
-                            disabled={labReviseRunning || !displayedLabResult}
-                            title="Send the generated text to Paper Review for a multi-agent critique."
-                            className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border-2 px-2 py-1 text-xs font-bold transition-colors hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
-                            style={{
-                              borderColor:     "var(--ats-border-accent)",
-                              backgroundColor: "var(--ats-bg-accent-soft)",
-                              color:           "var(--ats-fg-accent)",
-                            }}
-                          >
-                            <ShieldCheck size={11} strokeWidth={2.5} className="shrink-0" />
-                            <span className="truncate">Send to Paper Review</span>
-                          </button>
+                          {/* "Send to Paper Review" lives as a big CTA bar
+                              right below the article body (see further down)
+                              — that's the primary discovery surface. The
+                              header keeps just Copy for the quick instant
+                              action; piling another big button here would
+                              compete with the title for attention. */}
                           {/* Quick copy — stays in the header because it's
                               instantaneous and most users want it close to
                               the title. Download / Translate are consolidated
@@ -7497,6 +7483,29 @@ ${html}
                         </ReactMarkdown>
                         {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
+
+                      {/* ── Send to Paper Review — primary next-step CTA ──
+                          Same visual weight as the "Write it for me"
+                          Generate button so the user reads it as the
+                          obvious follow-up action. The smaller chip in
+                          the Generated Text header above is the
+                          power-user shortcut; this big bar is the
+                          discoverable CTA most users will click. Hidden
+                          while a generation stream is mid-flight (you
+                          can't ship a half-formed draft). */}
+                      {!labGenerating && labResult && (
+                        <button
+                          onClick={() => handleSendLabResultToReview(displayedLabResult)}
+                          disabled={labReviseRunning || !displayedLabResult}
+                          title="Send the generated text to Paper Review for a multi-agent critique."
+                          className="mt-3 relative w-full rounded-xl px-4 py-3 text-sm font-bold transition-all overflow-hidden disabled:cursor-not-allowed disabled:opacity-40 bg-blue-600 text-white hover:bg-blue-500"
+                        >
+                          <span className="flex items-center justify-center gap-2">
+                            <ShieldCheck size={16} strokeWidth={2.5} />
+                            Send to Paper Review for critique
+                          </span>
+                        </button>
+                      )}
 
                       {/* ── Deep Revise — closes the Lab ↔ Review loop ─────
                           Single-LLM-pass revision of the displayed text
