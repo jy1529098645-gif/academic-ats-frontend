@@ -4230,10 +4230,25 @@ ${html}
             <h2 className="text-lg font-bold mb-1" style={{ color: "var(--ats-fg-primary)" }}>
               Sign in to continue
             </h2>
-            <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--ats-fg-secondary)" }}>
+            <p className="text-xs mb-3 leading-relaxed" style={{ color: "var(--ats-fg-secondary)" }}>
               AcademiCats requires a free account to keep your search history,
               Lab outputs, and subscription in sync across devices.
             </p>
+            {/* Quota highlight — every login surface advertises the
+                "Google = more quota" upgrade so guests landing here get
+                an explicit benefit-of-signing-in prompt rather than
+                just two buttons of equal visual weight. */}
+            <div
+              className="mb-3 flex items-center justify-center gap-1.5 rounded-lg border-2 px-3 py-2 text-[11px] font-bold"
+              style={{
+                borderColor:     "var(--ats-border-accent)",
+                backgroundColor: "var(--ats-bg-accent-soft)",
+                color:           "var(--ats-fg-accent)",
+              }}
+            >
+              <Zap size={12} strokeWidth={2.5} />
+              <span>Sign in with Google for a higher daily quota</span>
+            </div>
             <button
               onClick={handleGoogleLogin}
               className="w-full flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold hover:brightness-105 transition-all"
@@ -4428,6 +4443,20 @@ ${html}
                   <span className="font-mono tabular-nums select-all" style={{ color: "var(--ats-fg-secondary)" }}>{shortGuestId}</span>
                 </div>
               )}
+            </div>
+            {/* Quota highlight — same callout as the main login overlay,
+                hammered home in the upsell modal where the user is most
+                primed to convert. */}
+            <div
+              className="mb-3 flex items-center justify-center gap-1.5 rounded-lg border-2 px-3 py-2 text-[11px] font-bold"
+              style={{
+                borderColor:     "var(--ats-border-accent)",
+                backgroundColor: "var(--ats-bg-accent-soft)",
+                color:           "var(--ats-fg-accent)",
+              }}
+            >
+              <Zap size={12} strokeWidth={2.5} />
+              <span>Sign in with Google for a higher daily quota</span>
             </div>
             <button
               onClick={handleGoogleLogin}

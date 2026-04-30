@@ -68,6 +68,18 @@ export default function LoginPage() {
           <p className="text-sm text-gray-500">Sign in to continue</p>
         </div>
 
+        {/* Quota highlight — same callout used on the main app's auth
+            gate so any login surface in the product carries the
+            "Google = more quota" benefit prompt. Inline SVG bolt
+            instead of the lucide-react Zap so this standalone /login
+            route doesn't pull the icon library into its bundle. */}
+        <div className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-blue-500/50 bg-blue-50 px-3 py-2 text-[11px] font-bold text-blue-700">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+          <span>Sign in with Google for a higher daily quota</span>
+        </div>
+
         {/* ── Google login ── */}
         <button
           onClick={handleGoogleLogin}

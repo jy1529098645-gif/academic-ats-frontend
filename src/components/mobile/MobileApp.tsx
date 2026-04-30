@@ -2740,6 +2740,20 @@ function SignInGate({
 
           {/* ── CTAs ─────────────────────────────────────────────────── */}
           <div className="mt-10 w-full space-y-3">
+            {/* Quota highlight — same callout as the desktop login
+                surfaces. Sits above the Google CTA so the benefit
+                lands before the click. */}
+            <div
+              className="flex items-center justify-center gap-1.5 rounded-xl border-2 px-3 py-2 text-[12px] font-bold"
+              style={{
+                borderColor:     "var(--ats-border-accent)",
+                backgroundColor: "var(--ats-bg-accent-soft)",
+                color:           "var(--ats-fg-accent)",
+              }}
+            >
+              <Zap size={13} strokeWidth={2.5} />
+              <span>Sign in with Google for a higher daily quota</span>
+            </div>
             {/* Primary: Continue with Google. Accent fill so it's
                 unmistakeably the recommended path. min-h 56 px = WCAG /
                 Apple HIG comfortable tap target. */}
