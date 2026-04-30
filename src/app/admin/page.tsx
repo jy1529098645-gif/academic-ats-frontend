@@ -163,6 +163,19 @@ type AdminUser = {
     deep_read_count:    number;
     llm_cost_usd:       number;
   };
+  // `window` carries the per-user counters summed over the operator's
+  // selected window (today / 7 / 30 / all). The legacy `today` block
+  // is kept on each row for backwards compatibility but the table
+  // reads from `window` whenever the operator picks anything other
+  // than "today".
+  window?: {
+    window_days:        number;
+    quick_search_count: number;
+    deep_search_count:  number;
+    synthesis_count:    number;
+    deep_read_count:    number;
+    llm_cost_usd:       number;
+  };
 };
 
 type UserSort =
@@ -417,6 +430,63 @@ function usePolling<T>(
   return { data, error, lastUpdated, refresh };
 }
 
+// ── Relative-time component ───────────────────────────────────────────────
+// Renders "5s ago" / "2m ago" / "1h ago" / "3d ago" given a millisecond
+// timestamp + the operator-current `now` ms. Stateless and cheap; the
+// parent passes `now` from a 5s-ticking state so the label updates
+// without each instance owning its own interval.
+function RelativeTime({ ms, now }: { ms: number; now: number }) {
+  if (!ms) return <>—</>;
+  const elapsedSec = Math.max(0, Math.floor((now - ms) / 1000));
+  let label: string;
+  if (elapsedSec < 5)            label = "just now";
+  else if (elapsedSec < 60)      label = `${elapsedSec}s ago`;
+  else if (elapsedSec < 3600)    label = `${Math.floor(elapsedSec / 60)}m ago`;
+  else if (elapsedSec < 86400)   label = `${Math.floor(elapsedSec / 3600)}h ago`;
+  else                           label = `${Math.floor(elapsedSec / 86400)}d ago`;
+  return <span title={new Date(ms).toLocaleString()}>{label}</span>;
+}
+
+// ── CSV export helper for All Users ───────────────────────────────────────
+// Builds a CSV from the currently-visible roster (filter + window already
+// applied by the caller) and triggers a download. Blob URL revoked on the
+// next macrotask so the browser doesn't leak handles. The window_days
+// gets baked into the filename so an operator looking at three exports
+// can tell which is which.
+function exportUsersAsCsv(users: AdminUser[], windowDays: number): void {
+  const headers = [
+    "id", "email", "is_anonymous", "tier", "is_banned",
+    "first_seen_at", "last_active_at",
+    "quick_search", "deep_search", "synthesis", "deep_read", "llm_cost_usd",
+  ];
+  const escape = (v: unknown): string => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines: string[] = [headers.join(",")];
+  for (const u of users) {
+    const w = u.window ?? u.today;
+    lines.push([
+      u.id, u.email ?? "", String(!!u.is_anonymous), u.tier, String(!!u.is_banned),
+      u.first_seen_at ?? "", u.last_active_at ?? "",
+      w.quick_search_count, w.deep_search_count, w.synthesis_count, w.deep_read_count,
+      w.llm_cost_usd.toFixed(6),
+    ].map(escape).join(","));
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  const tag  = windowDays === 0 ? "all-time"
+             : windowDays === 1 ? "today"
+             : `${windowDays}d`;
+  a.href     = url;
+  a.download = `ats-admin-users-${tag}-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 // ── Tier colour map ─────────────────────────────────────────────────────────
 const TIER_COLORS: Record<string, string> = {
   free:    "#64748b",  // slate-500
@@ -470,6 +540,16 @@ export default function AdminPage() {
   }, [pollPaused]);
   const enabled = authChecked && isDev && !pollPaused;
 
+  // Coarse "now" ticker for relative-time labels ("fetched 5s ago",
+  // "12m ago" etc.). 5s cadence is enough for our resolution and
+  // keeps re-render cost negligible. Ticking stops when the operator
+  // signs out (component unmounts).
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 5000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // ── Time-range state (must precede fetchers that close over it) ────────
   // Chart time-range selector — persisted so a refresh keeps the operator's
   // preferred view. Four windows: last week (daily granularity), month
@@ -506,17 +586,33 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tsDays]);
 
+  // `userWindowDays` controls the per-user counter window the All Users
+  // table renders (today / 7 / 30 / all-time). Persisted so a refresh
+  // during an investigation keeps the operator's chosen view. 0 means
+  // all-time (the backend skips the day filter on the user_usage_daily
+  // join when window_days=0).
+  const [userWindowDays, setUserWindowDays] = useState<0 | 1 | 7 | 30>(() => {
+    if (typeof window === "undefined") return 1;
+    try {
+      const raw = window.localStorage.getItem("ats-admin-user-window");
+      const n = raw ? Number(raw) : 1;
+      return [0, 1, 7, 30].includes(n) ? (n as 0 | 1 | 7 | 30) : 1;
+    } catch { return 1; }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem("ats-admin-user-window", String(userWindowDays)); } catch { /* ignore */ }
+  }, [userWindowDays]);
+
   const fetchUsers = useCallback(async (): Promise<{ users: AdminUser[] }> => {
     // Default limit 2000 (matches the backend's new upper bound). The
-    // backend now sorts by last-activity, so ACTIVE users bubble to the
-    // top regardless of signup date — and we're confident the full
-    // alpha roster fits in one fetch. If we ever exceed 2000 real
-    // users, switch to pagination; until then a single fetch keeps
-    // admin UX simple.
-    const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/users?limit=2000"));
+    // backend sorts by last-activity, so ACTIVE users bubble to the
+    // top regardless of signup date. window_days={0|1|7|30} chooses
+    // whether the per-user counters are today / week / month / all-time.
+    const res = await fetchWithAdminAuth(buildApiUrl(`/api/admin/users?limit=2000&window_days=${userWindowDays}`));
     if (!res.ok) throw new Error(`users HTTP ${res.status}`);
     return res.json();
-  }, []);
+  }, [userWindowDays]);
 
   const fetchAnnouncements = useCallback(async (): Promise<{ announcements: AdminAnnouncement[] }> => {
     const res = await fetchWithAdminAuth(buildApiUrl("/api/admin/announcements-all"));
@@ -1311,15 +1407,19 @@ export default function AdminPage() {
     });
   }, []);
 
-  // Sorted view of the user list — defaults to the server-provided order
-  // (most-recent activity desc) so the panel keeps its existing behaviour
-  // until an admin picks a different sort. Adding alphabetical email is
-  // the explicit ask; the other keys piggy-back on the same dropdown so
-  // an admin can also slice by the columns they actually read.
-  // Filtered AFTER sorting so the visible roster matches the toolbar
-  // (rather than silently shrinking the count below).
+  // Free-text search input on the All Users panel. Matches against email
+  // substring (case-insensitive) and the leading 8 hex of the user_id
+  // (so an operator with a session id can paste it). Empty = no filter.
+  const [userSearch, setUserSearch] = useState("");
+
+  // Sorted + filtered view of the user list. Sort reads from `window`
+  // (current operator-selected counter window) with `today` as the
+  // legacy fallback for any row a stale backend might still serve.
+  // Filter happens AFTER sort so the visible roster matches the
+  // toolbar (rather than silently shrinking the count below).
   const userList = useMemo(() => {
     const arr = rawUserList.slice();
+    const win = (u: AdminUser) => u.window ?? u.today;
     const cmpStr  = (a: string | null | undefined, b: string | null | undefined) =>
       (a ?? "").toLocaleLowerCase().localeCompare((b ?? "").toLocaleLowerCase());
     const cmpDate = (a: string | null | undefined, b: string | null | undefined) =>
@@ -1329,18 +1429,25 @@ export default function AdminPage() {
       case "email_az": arr.sort((a, b) => cmpStr(a.email, b.email)); break;
       case "email_za": arr.sort((a, b) => cmpStr(b.email, a.email)); break;
       case "tier":     arr.sort((a, b) => (TIER_RANK[a.tier] ?? 99) - (TIER_RANK[b.tier] ?? 99)); break;
-      case "quick":    arr.sort((a, b) => b.today.quick_search_count - a.today.quick_search_count); break;
-      case "deep":     arr.sort((a, b) => b.today.deep_search_count  - a.today.deep_search_count);  break;
-      case "synth":    arr.sort((a, b) => b.today.synthesis_count    - a.today.synthesis_count);    break;
-      case "chain":    arr.sort((a, b) => b.today.deep_read_count    - a.today.deep_read_count);    break;
-      case "cost":     arr.sort((a, b) => b.today.llm_cost_usd       - a.today.llm_cost_usd);       break;
+      case "quick":    arr.sort((a, b) => win(b).quick_search_count - win(a).quick_search_count); break;
+      case "deep":     arr.sort((a, b) => win(b).deep_search_count  - win(a).deep_search_count);  break;
+      case "synth":    arr.sort((a, b) => win(b).synthesis_count    - win(a).synthesis_count);    break;
+      case "chain":    arr.sort((a, b) => win(b).deep_read_count    - win(a).deep_read_count);    break;
+      case "cost":     arr.sort((a, b) => win(b).llm_cost_usd       - win(a).llm_cost_usd);       break;
       case "first_new":arr.sort((a, b) => cmpDate(a.first_seen_at, b.first_seen_at)); break;
       case "first_old":arr.sort((a, b) => -cmpDate(a.first_seen_at, b.first_seen_at)); break;
       case "active":
       default:         arr.sort((a, b) => cmpDate(a.last_active_at, b.last_active_at)); break;
     }
-    return arr.filter(u => !isUserIdHidden(u.id, u.tier));
-  }, [rawUserList, userSort, isUserIdHidden]);
+    const filtered = arr.filter(u => !isUserIdHidden(u.id, u.tier));
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return filtered;
+    return filtered.filter(u => {
+      const e = (u.email || "").toLowerCase();
+      const idPrefix = (u.id || "").toLowerCase().slice(0, 8);
+      return e.includes(q) || idPrefix.includes(q);
+    });
+  }, [rawUserList, userSort, userSearch, isUserIdHidden]);
 
   // ── Gate screens ────────────────────────────────────────────────────────
   // All three gate screens inherit the day-mint theme wrapper below so
@@ -2049,17 +2156,63 @@ export default function AdminPage() {
 
         {/* ── Recent users table ─────────────────────────────────────── */}
         <section className="rounded-2xl border p-4" style={panelStyle}>
-          <div className="flex items-center justify-between mb-3">
-            <div>
+          <div className="flex items-start justify-between mb-2 gap-3 flex-wrap">
+            <div className="min-w-0">
               <h3 className="text-sm font-bold" style={{ color: "var(--ats-fg-primary)" }}>
                 All users
               </h3>
               <p className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>
-                All signed-up accounts, sorted by <span className="font-semibold">{USER_SORT_LABEL[userSort]}</span>. Showing {userList.length}
-                {userList.length >= 2000 && " (capped at 2000 — paginate if you need older)"}.
+                Counters show <span className="font-semibold">
+                  {userWindowDays === 0 ? "all-time totals"
+                    : userWindowDays === 1 ? "today only"
+                    : `last ${userWindowDays} days`}</span>
+                {" · sorted by "}<span className="font-semibold">{USER_SORT_LABEL[userSort]}</span>
+                {" · showing "}{userList.length}{rawUserList.length !== userList.length && ` of ${rawUserList.length}`}
+                {userSearch.trim() && " (filtered)"}
+                {rawUserList.length >= 2000 && " · capped at 2000"}.
+                {users.lastUpdated > 0 && (
+                  <span className="ml-1.5 italic" style={{ color: "var(--ats-fg-muted)" }}>
+                    fetched <RelativeTime ms={users.lastUpdated} now={nowMs} />
+                  </span>
+                )}
               </p>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {/* Window picker — drives the per-user counter columns. */}
+              <div className="inline-flex items-center rounded-md border overflow-hidden" style={{ borderColor: "var(--ats-border-subtle)" }}>
+                {([
+                  { id: 1  as const, label: "Today" },
+                  { id: 7  as const, label: "7d"    },
+                  { id: 30 as const, label: "30d"   },
+                  { id: 0  as const, label: "All"   },
+                ]).map(({ id, label }) => {
+                  const active = userWindowDays === id;
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => setUserWindowDays(id)}
+                      className="px-2 py-0.5 text-[10px] font-semibold transition-colors"
+                      style={{
+                        backgroundColor: active ? "var(--ats-bg-accent-soft)" : "transparent",
+                        color:           active ? "var(--ats-fg-accent)"      : "var(--ats-fg-secondary)",
+                      }}
+                    >{label}</button>
+                  );
+                })}
+              </div>
+              {/* Free-text search — email substring or 8-char id prefix. */}
+              <input
+                type="search"
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                placeholder="search email or id"
+                className="text-[10px] rounded border px-1.5 py-0.5 w-36 transition-colors"
+                style={{
+                  borderColor:     "var(--ats-border-subtle)",
+                  backgroundColor: "var(--ats-bg-panel)",
+                  color:           "var(--ats-fg-secondary)",
+                }}
+              />
               <select
                 value={userSort}
                 onChange={(e) => setUserSort(e.target.value as UserSort)}
@@ -2075,14 +2228,22 @@ export default function AdminPage() {
                 <option value="email_az">Email (A → Z)</option>
                 <option value="email_za">Email (Z → A)</option>
                 <option value="tier">Tier (dev first)</option>
-                <option value="quick">Quick today (high → low)</option>
-                <option value="deep">Deep today (high → low)</option>
-                <option value="synth">Synth today (high → low)</option>
-                <option value="chain">Chain today (high → low)</option>
-                <option value="cost">Cost today (high → low)</option>
+                <option value="quick">Quick (high → low)</option>
+                <option value="deep">Deep (high → low)</option>
+                <option value="synth">Synth (high → low)</option>
+                <option value="chain">Chain (high → low)</option>
+                <option value="cost">Cost (high → low)</option>
                 <option value="first_new">First seen (newest)</option>
                 <option value="first_old">First seen (oldest)</option>
               </select>
+              <button
+                onClick={() => exportUsersAsCsv(userList, userWindowDays)}
+                title="Download the currently-visible roster as a CSV (respects the search box and window picker)"
+                className="text-[10px] inline-flex items-center gap-1 transition-colors hover:text-emerald-400"
+                style={{ color: "var(--ats-fg-muted)" }}
+              >
+                <Database size={10} /> Export CSV
+              </button>
               <button
                 onClick={openAnonCleanup}
                 title="List anonymous profiles older than N days with zero activity, then optionally delete them"
@@ -4717,12 +4878,12 @@ function UserTable({ users, onOpenDrawer }: { users: AdminUser[]; onOpenDrawer: 
                     <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>—</span>
                   )}
                 </td>
-                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.quick_search_count}</td>
-                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.deep_search_count}</td>
-                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.synthesis_count}</td>
-                <td className="py-1.5 pr-3 text-right tabular-nums">{u.today.deep_read_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{(u.window ?? u.today).quick_search_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{(u.window ?? u.today).deep_search_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{(u.window ?? u.today).synthesis_count}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{(u.window ?? u.today).deep_read_count}</td>
                 <td className="py-1.5 pr-3 text-right tabular-nums" style={{ color: "var(--ats-fg-secondary)" }}>
-                  {u.today.llm_cost_usd.toFixed(4)}
+                  {(u.window ?? u.today).llm_cost_usd.toFixed(4)}
                 </td>
                 {/* Last active — colour-codes recency so admins can tell
                     "still engaged" vs "signed up and vanished" at a glance.

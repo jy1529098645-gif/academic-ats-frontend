@@ -4668,7 +4668,7 @@ ${html}
             and pushing content by a pixel or two when the banner did or
             didn't render. Row uses items-start so the banner pins to
             the top instead of vertically centering against the mascot. */}
-        <div className="flex-none flex items-start gap-4">
+        <div className="flex-none flex items-stretch gap-4">
           {/* Title block — the mascot sits in the SAME row as the AcademiCats
               wordmark (right after "Cats"), NOT spanning down to the subtitle.
               That keeps the subtitle on its own line directly below the brand. */}
@@ -4688,51 +4688,6 @@ ${html}
                 className="h-12 w-12 object-contain select-none pointer-events-none shrink-0"
                 draggable={false}
               />
-              {/* Megaphone toggle (banner show/hide) on top + Day/Night
-                  toggle directly below it — stacked vertically in a single
-                  flex column so both buttons share the same horizontal
-                  slot. Stacking keeps them out of the wordmark + tagline
-                  width, so the title row never gets pushed when extra
-                  controls land here in the future. */}
-              <div className="shrink-0 self-start mt-0.5 flex flex-col items-center gap-1">
-                <button
-                  onClick={() => setAnnouncementsVisible(v => !v)}
-                  title={announcementsVisible ? "Hide announcements" : "Show announcements"}
-                  aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
-                  aria-pressed={announcementsVisible}
-                  {...helpProps(announcementsVisible ? "hide public ticker" : "show public ticker")}
-                  className={`flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
-                  style={{
-                    height: "26px",
-                    width: "26px",
-                    borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
-                    backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
-                    color:           announcementsVisible ? "var(--ats-fg-accent)"     : "var(--ats-fg-muted)",
-                  }}
-                >
-                  <Megaphone size={13} />
-                </button>
-                {/* Day / Night toggle — always visible, even when the
-                    announcement banner is hidden. Sits directly below the
-                    megaphone so the two share one column instead of
-                    crowding the title row left/right. */}
-                <button
-                  onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
-                  title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
-                  aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
-                  {...helpProps(themeMode === "night" ? "switch to Day mode" : "switch to Night mode")}
-                  className="flex items-center justify-center rounded-full border transition-all duration-200 hover:brightness-110"
-                  style={{
-                    height: "26px",
-                    width: "26px",
-                    borderColor:     "var(--ats-border-subtle)",
-                    backgroundColor: "var(--ats-bg-accent-soft)",
-                    color:           "var(--ats-fg-accent)",
-                  }}
-                >
-                  {themeMode === "night" ? <Sun size={13} /> : <Moon size={13} />}
-                </button>
-              </div>
             </div>
             {/* Tagline is sized so the whole line (descriptor + version)
                 fits within the wordmark + mascot row width above — no
@@ -4762,56 +4717,51 @@ ${html}
               )}
             </p>
           </div>
-          {/* Announcement banner — ALWAYS mounted so its height is
-              always part of the top-bar flex row, preventing any pixel
-              shift when the user toggles visibility. When off, we hide
-              via opacity:0 + pointer-events:none (screen readers also
-              ignore it via aria-hidden). That means the layout below
-              is set in stone the moment the page renders. Fade timing
-              is driven by CSS transition here instead of the
-              stage-reveal keyframe because we're toggling opacity on an
-              already-mounted element. */}
-          {/* Right column = announcement banner with the layout-mode
-              picker absolutely positioned in its top-right corner. The
-              picker takes ZERO layout height (it floats over the
-              banner's right edge), so it never pushes the rest of the
-              UI down — even on short viewports. */}
-          <div className="relative min-w-0 flex-1 pl-4">
-            {/* Layout-mode picker — absolute top-right, lifted just
-                enough above the banner top to leave a ~6px visible gap
-                (not glued, not pushed away). z-30 stays above banner
-                chrome. */}
-            <div className="absolute -top-[10px] right-0 z-30 flex items-center gap-1">
-            {([
-              { mode: "default" as const, label: "Default", icon: <LayoutGrid size={13} />,        desc: "Balanced 3-pane layout" },
-              { mode: "scholar" as const, label: "Scholar", icon: <BookOpen size={13} />,         desc: "Charts + brief focus" },
-              { mode: "student" as const, label: "Student", icon: <FlaskConical size={13} />,     desc: "Right panel expanded" },
-              { mode: "writing" as const, label: "Writing", icon: <PenLine size={13} />,          desc: "Writing focus" },
-            ]).map(({ mode, label, icon, desc }) => {
-                const active = layoutMode === mode;
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => applyLayoutMode(mode)}
-                    title={desc}
-                    aria-label={`${label} layout`}
-                    aria-pressed={active}
-                    {...helpProps(desc)}
-                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md border transition-all hover:brightness-110"
-                    style={{
-                      borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
-                      backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
-                      color:           active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
-                    }}
-                  >
-                    {icon}
-                  </button>
-                );
-              })}
-            </div>
-            {/* Announcement banner. Visibility is opacity-toggled so its
-                height stays reserved even when hidden. The picker above
-                this is absolute so it doesn't add to the row height. */}
+          {/* Megaphone + Day/Night toggles — own column, vertically
+              stretches to span exactly from wordmark TOP to slogan
+              BOTTOM via `self-stretch` + each button taking flex-1.
+              Bigger than before (was h/w 26px, now stretches with the
+              wordmark height ≈ 32-34px each) so the icons are visible
+              at a glance and the column reads as a chrome control
+              strip rather than two stray pills. */}
+          <div className="shrink-0 self-stretch flex flex-col gap-1.5 py-1">
+            <button
+              onClick={() => setAnnouncementsVisible(v => !v)}
+              title={announcementsVisible ? "Hide announcements" : "Show announcements"}
+              aria-label={announcementsVisible ? "Hide announcements" : "Show announcements"}
+              aria-pressed={announcementsVisible}
+              {...helpProps(announcementsVisible ? "hide public ticker" : "show public ticker")}
+              className={`flex flex-1 items-center justify-center w-9 rounded-full border transition-all duration-200 hover:brightness-110 ${announcementsVisible ? "megaphone-breath" : ""}`}
+              style={{
+                borderColor:     announcementsVisible ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                backgroundColor: announcementsVisible ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                color:           announcementsVisible ? "var(--ats-fg-accent)"     : "var(--ats-fg-muted)",
+              }}
+            >
+              <Megaphone size={16} />
+            </button>
+            <button
+              onClick={() => setThemeMode(m => m === "night" ? "day" : "night")}
+              title={themeMode === "night" ? "Switch to Day theme" : "Switch to Night theme"}
+              aria-label={themeMode === "night" ? "Switch to day theme" : "Switch to night theme"}
+              {...helpProps(themeMode === "night" ? "switch to Day mode" : "switch to Night mode")}
+              className="flex flex-1 items-center justify-center w-9 rounded-full border transition-all duration-200 hover:brightness-110"
+              style={{
+                borderColor:     "var(--ats-border-subtle)",
+                backgroundColor: "var(--ats-bg-accent-soft)",
+                color:           "var(--ats-fg-accent)",
+              }}
+            >
+              {themeMode === "night" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          </div>
+          {/* Announcement banner — fills the middle section. The
+              right edge no longer extends to the page boundary; the
+              layout-mode picker sits in its own column to the right
+              so the banner stops where the picker begins. Visibility
+              is opacity-toggled so the row height stays reserved even
+              when the banner is hidden. */}
+          <div className="relative min-w-0 flex-1 self-center">
             <div
               aria-hidden={!announcementsVisible}
               style={{
@@ -4837,6 +4787,38 @@ ${html}
                 onToggleTheme={() => setThemeMode(m => m === "night" ? "day" : "night")}
               />
             </div>
+          </div>
+          {/* Layout-mode picker — own column at the page's right edge
+              (aligned with the px-5 outer padding via the parent's
+              gap-4). Vertically centred against the banner so the
+              icons sit on the same baseline as the rotator text. */}
+          <div className="shrink-0 self-center flex items-center gap-1.5">
+            {([
+              { mode: "default" as const, label: "Default", icon: <LayoutGrid size={15} />,        desc: "Balanced 3-pane layout" },
+              { mode: "scholar" as const, label: "Scholar", icon: <BookOpen size={15} />,         desc: "Charts + brief focus" },
+              { mode: "student" as const, label: "Student", icon: <FlaskConical size={15} />,     desc: "Right panel expanded" },
+              { mode: "writing" as const, label: "Writing", icon: <PenLine size={15} />,          desc: "Writing focus" },
+            ]).map(({ mode, label, icon, desc }) => {
+                const active = layoutMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => applyLayoutMode(mode)}
+                    title={desc}
+                    aria-label={`${label} layout`}
+                    aria-pressed={active}
+                    {...helpProps(desc)}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg border transition-all hover:brightness-110"
+                    style={{
+                      borderColor:     active ? "var(--ats-border-accent)" : "var(--ats-border-subtle)",
+                      backgroundColor: active ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+                      color:           active ? "var(--ats-fg-accent)" : "var(--ats-fg-muted)",
+                    }}
+                  >
+                    {icon}
+                  </button>
+                );
+              })}
           </div>
         </div>
 
