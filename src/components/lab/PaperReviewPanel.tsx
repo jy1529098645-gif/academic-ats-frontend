@@ -16,12 +16,12 @@
 // Shares its daily allowance with Synthesis Lab (both are heavy LLM flows).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   Upload, FolderOpen, FileText, Sparkles, Square, Bot,
   ChevronDown, ChevronRight, ClipboardList, Check, X as XIcon, Play,
-  Award, Gauge, AlertTriangle, Clock,
+  Award, Gauge, AlertTriangle, Clock, ArrowLeft,
   ThumbsUp, Target, Globe, Lightbulb,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
@@ -213,7 +213,27 @@ const INPUT_STYLE: React.CSSProperties = {
   color:           "var(--ats-fg-primary)",
 };
 
-export function PaperReviewPanel() {
+/**
+ * Props that bridge Paper Review with the sibling Writing Lab tab. Both
+ * are optional so the panel still renders standalone.
+ *
+ * - `seedDraft` carries text the parent wants pre-loaded into the
+ *   draft textarea — used by the Writing Lab's "Send to Paper Review"
+ *   button. The `seedKey` rev token forces the textarea to re-seed
+ *   even when `seedDraft` happens to repeat (re-sending the same
+ *   draft a second time should still work).
+ * - `onPushFeedbackToLab` is called with a packaged feedback string
+ *   when the operator hits the "Send feedback to Writing Lab"
+ *   button below the review output. The parent then pipes that into
+ *   Writing Lab's revise instructions + switches tabs.
+ */
+type PaperReviewPanelProps = {
+  seedDraft?:           string | null;
+  seedKey?:             number;
+  onPushFeedbackToLab?: (feedback: string) => void;
+};
+
+export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab }: PaperReviewPanelProps = {}) {
   const [paperText,    setPaperText]    = useState("");
   const [contextHint,  setContextHint]  = useState("");
   const [draftType,    setDraftType]    = useState("auto");
@@ -236,6 +256,21 @@ export function PaperReviewPanel() {
   const [agentLogOpen, setAgentLogOpen] = useState(true);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  // Seed-draft hand-off from the sibling Writing Lab tab. When the
+  // parent passes a non-null `seedDraft`, drop it into the textarea
+  // and clear any prior file-name marker (the operator just sent a
+  // freshly-generated lab output, NOT a file). `seedKey` is the rev
+  // token — re-sending the same draft string twice still triggers
+  // because the key bumps each time.
+  useEffect(() => {
+    if (seedDraft != null && seedDraft.length > 0) {
+      setPaperText(seedDraft);
+      setFileName("");
+      setExtractError("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedKey]);
 
   // ── File extraction ────────────────────────────────────────────────────────
   const handleFile = useCallback(async (file: File) => {
@@ -771,6 +806,45 @@ export function PaperReviewPanel() {
         <div>
           <div className="flex flex-nowrap items-center gap-2 mb-2 overflow-hidden">
             <span className="shrink min-w-0 truncate text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>Review letter</span>
+            {/* Closed-loop hand-off — only rendered when the parent provided
+                a callback (the desktop right-panel host does; standalone
+                mounts hide it cleanly). Packages the structured top-issues
+                + the markdown letter into a single instructions string and
+                hands it back to Writing Lab via the parent callback so
+                the user can hit Deep Revise without copy/pasting. */}
+            {onPushFeedbackToLab && (
+              <button
+                onClick={() => {
+                  // Prefer the structured top-issues list (compact, actionable)
+                  // and append a small "for full context, see review letter
+                  // below" pointer so the user knows the source of truth.
+                  // Falls back to the raw markdown letter when there's no
+                  // bundle (e.g. an old SSE response without the final
+                  // structured frame).
+                  const issues = bundle?.crosscheck?.top_issues ?? [];
+                  let packaged = "";
+                  if (issues.length > 0) {
+                    packaged = "Apply these revisions, ordered by priority:\n\n"
+                      + issues.map((it, i) => `${i + 1}. ${it.title}: ${it.suggestion || it.problem}`).join("\n\n")
+                      + "\n\nFull review letter for context:\n\n"
+                      + result;
+                  } else {
+                    packaged = "Apply the revisions below (from a Paper Review pass):\n\n" + result;
+                  }
+                  onPushFeedbackToLab(packaged);
+                }}
+                title="Drop this review's top issues into Writing Lab's Deep Revise box, switch back to Writing Lab"
+                className="ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border-2 px-2 py-1 text-xs font-bold transition-colors hover:brightness-110"
+                style={{
+                  borderColor:     "var(--ats-border-accent)",
+                  backgroundColor: "var(--ats-bg-accent-soft)",
+                  color:           "var(--ats-fg-accent)",
+                }}
+              >
+                <ArrowLeft size={12} strokeWidth={2.5} className="shrink-0" />
+                <span className="truncate">Send feedback to Writing Lab</span>
+              </button>
+            )}
             <button
               onClick={async () => {
                 try {
@@ -779,7 +853,7 @@ export function PaperReviewPanel() {
                   window.setTimeout(() => setCopied(false), 1500);
                 } catch { /* blocked */ }
               }}
-              className="ml-auto shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors"
+              className={`${onPushFeedbackToLab ? "" : "ml-auto"} shrink min-w-0 inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors`}
               style={{
                 borderColor: copied ? "rgba(16,185,129,0.5)" : "var(--ats-border-subtle)",
                 color:       copied ? "#10b981" : "var(--ats-fg-muted)",

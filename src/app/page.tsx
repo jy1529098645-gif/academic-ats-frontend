@@ -1693,6 +1693,31 @@ function DesktopWorkspace() {
   // peer-review one.
   const [labModule, setLabModule] = useState<"synthesis" | "review">("synthesis");
 
+  // ── Closed loop: Writing Lab ↔ Paper Review ─────────────────────────────
+  // Three new affordances bridge the two right-panel tabs without
+  // copy/paste:
+  //   1. Writing Lab "Send to Paper Review" — pushes the generated text
+  //      into the Paper Review draft input via the seedDraft prop +
+  //      flips labModule to "review".
+  //   2. Paper Review "Send feedback to Writing Lab" — packages the
+  //      review's top issues + letter into a revision-instruction
+  //      string, drops it in `labReviseInstructions`, flips labModule
+  //      back to "synthesis".
+  //   3. Writing Lab "Deep revise" — single-LLM-pass that takes the
+  //      current displayed text + labReviseInstructions and streams a
+  //      revised version through /api/forge/revise. Replaces
+  //      labResult with the revised version. The revised text is then
+  //      eligible for #1 again, closing the loop.
+  // seedKey is a rev token that bumps each time we push a draft into
+  // Paper Review so PaperReviewPanel's seeding effect re-fires even
+  // when the same string is sent twice.
+  const [reviewSeedDraft,   setReviewSeedDraft]   = useState<string | null>(null);
+  const [reviewSeedKey,     setReviewSeedKey]     = useState(0);
+  const [labReviseInstructions, setLabReviseInstructions] = useState("");
+  const [labReviseRunning,  setLabReviseRunning]  = useState(false);
+  const [labReviseError,    setLabReviseError]    = useState("");
+  const labReviseAbortRef = useRef<AbortController | null>(null);
+
   // ── Lab multi-generation: tabbed result history ──────────────────────────
   // Each completed Generate run is archived in `labRuns` (newest first
   // order maintained on append at the END so "Run 1" = first-ever).
@@ -3884,6 +3909,106 @@ ${html}
   // wrapper occasionally tree-shakes/re-orders top-of-component
   // function-declaration hoisting in dev — using a `const` fixes the
   // declaration order so the JSX renderer always sees the binding.
+  // ── Closed-loop bridge handlers (Writing Lab ↔ Paper Review) ─────────────
+
+  /** Push the currently-displayed Writing Lab output into Paper Review's
+   *  draft textarea + switch tabs. Caller is responsible for ensuring
+   *  there's something to send (`displayedLabResult` non-empty); we
+   *  guard here too so a stray click on a stale button does nothing. */
+  const handleSendLabResultToReview = useCallback((text: string) => {
+    const t = (text || "").trim();
+    if (!t) return;
+    setReviewSeedDraft(t);
+    setReviewSeedKey(k => k + 1);   // forces PaperReviewPanel's seed effect to re-run even on identical text
+    setLabModule("review");
+  }, []);
+
+  /** Receive packaged feedback from Paper Review and pipe it into Writing
+   *  Lab's Deep Revise instructions field, then flip back to synthesis
+   *  tab so the user sees the populated input + the Apply button. */
+  const handleFeedbackToWritingLab = useCallback((feedback: string) => {
+    setLabReviseInstructions(feedback || "");
+    setLabReviseError("");
+    setLabModule("synthesis");
+  }, []);
+
+  /** Single-pass deep revise. Streams /api/forge/revise SSE: token frames
+   *  go to labResult; status frames to a small status state; errors to
+   *  labReviseError. Aborts any in-flight revise so a fast double-click
+   *  doesn't pile up two streams. */
+  const handleDeepRevise = useCallback(async () => {
+    const text = (labResult || "").trim();
+    if (!text) return;
+    if (labReviseRunning) return;
+
+    // Abort any prior in-flight revise.
+    labReviseAbortRef.current?.abort();
+    const ac = new AbortController();
+    labReviseAbortRef.current = ac;
+
+    setLabReviseRunning(true);
+    setLabReviseError("");
+    let buffered = "";
+
+    try {
+      const token = authTokenRef.current;
+      const res = await fetch(buildApiUrl("/api/forge/revise"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          text,
+          instructions: labReviseInstructions,
+          language: "English",
+        }),
+        signal: ac.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.body) throw new Error("no SSE body");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let leftover = "";
+      // Streamed SSE parsing — same shape as synthesize / review-paper.
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = leftover + decoder.decode(value, { stream: true });
+        const lines = text.split("\n");
+        leftover = lines.pop() ?? "";
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const obj = JSON.parse(payload);
+            if (typeof obj.chunk === "string") {
+              buffered += obj.chunk;
+              setLabResult(buffered);
+            } else if (typeof obj.error === "string") {
+              throw new Error(obj.error);
+            }
+            // status frames are no-op for now (could surface later)
+          } catch (e) {
+            // Skip unparseable frames silently — the SSE wire occasionally
+            // delivers partial JSON when chunked at an unlucky boundary.
+            if (e instanceof Error && /HTTP|no SSE body|^Revise/.test(e.message)) throw e;
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as { name?: string })?.name !== "AbortError") {
+        setLabReviseError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setLabReviseRunning(false);
+      labReviseAbortRef.current = null;
+    }
+  }, [labResult, labReviseInstructions, labReviseRunning]);
+
   const handleStartOver = () => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -6636,7 +6761,11 @@ ${html}
                     Synthesis Lab below). Mirrors the existing boundaries
                     around Brief / Workspace / Synthesis Lab. */}
                 <ErrorBoundary label="Paper Review panel">
-                  <PaperReviewPanel />
+                  <PaperReviewPanel
+                    seedDraft={reviewSeedDraft}
+                    seedKey={reviewSeedKey}
+                    onPushFeedbackToLab={handleFeedbackToWritingLab}
+                  />
                 </ErrorBoundary>
               </div>
 
@@ -7285,6 +7414,26 @@ ${html}
                       <div className="flex flex-nowrap items-center gap-2 mb-1 overflow-hidden">
                         <span className="shrink min-w-0 truncate text-sm font-semibold text-slate-200">Generated Text</span>
                         <div className="ml-auto flex flex-nowrap items-center gap-1.5 min-w-0">
+                          {/* Closed-loop hand-off — "Send to Paper Review"
+                              ships the displayed text to the sibling tab.
+                              Accent-tinted so it reads as the next-step
+                              CTA rather than a peer of Copy. Disabled
+                              while a Deep Revise pass is mid-stream so
+                              the user doesn't ship a half-formed draft. */}
+                          <button
+                            onClick={() => handleSendLabResultToReview(displayedLabResult)}
+                            disabled={labReviseRunning || !displayedLabResult}
+                            title="Send the generated text to Paper Review for a multi-agent critique."
+                            className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border-2 px-2 py-1 text-xs font-bold transition-colors hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+                            style={{
+                              borderColor:     "var(--ats-border-accent)",
+                              backgroundColor: "var(--ats-bg-accent-soft)",
+                              color:           "var(--ats-fg-accent)",
+                            }}
+                          >
+                            <ShieldCheck size={11} strokeWidth={2.5} className="shrink-0" />
+                            <span className="truncate">Send to Paper Review</span>
+                          </button>
                           {/* Quick copy — stays in the header because it's
                               instantaneous and most users want it close to
                               the title. Download / Translate are consolidated
@@ -7339,6 +7488,99 @@ ${html}
                         </ReactMarkdown>
                         {labGenerating && !labViewingId && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm bg-violet-400 animate-pulse align-text-bottom" />}
                       </div>
+
+                      {/* ── Deep Revise — closes the Lab ↔ Review loop ─────
+                          Single-LLM-pass revision of the displayed text
+                          per the operator-supplied instructions. Two
+                          common entry paths:
+                            (a) operator types their own notes into the
+                                textarea and hits Apply
+                            (b) Paper Review's "Send feedback to Writing
+                                Lab" button just dropped a packaged review
+                                into labReviseInstructions; the textarea
+                                renders pre-filled.
+                          On success the revised output replaces labResult
+                          via the SSE chunk handler in handleDeepRevise,
+                          so the existing Generated Text block above
+                          renders the new version with the same Send
+                          to Paper Review / Copy chrome — the user can
+                          immediately fire another review cycle. Only
+                          mounted after a labResult exists, so the
+                          empty-state of Writing Lab isn't crowded with
+                          a no-op input. Hidden during a fresh-generation
+                          stream because the `displayedLabResult` is
+                          mid-build and revising-in-flight makes no
+                          sense. */}
+                      {!labGenerating && !labViewingId && labResult && (
+                        <div className="mt-3 rounded-xl border px-3 py-2.5"
+                             style={{ borderColor: "var(--ats-border-subtle)", backgroundColor: "rgba(139, 92, 246, 0.04)" }}>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <Sparkles size={13} className="shrink-0" style={{ color: "var(--ats-fg-accent)" }} />
+                            <span className="text-xs font-bold" style={{ color: "var(--ats-fg-primary)" }}>Deep revise</span>
+                            <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>edit the draft above with focused instructions</span>
+                          </div>
+                          <textarea
+                            value={labReviseInstructions}
+                            onChange={(e) => setLabReviseInstructions(e.target.value)}
+                            disabled={labReviseRunning}
+                            rows={3}
+                            placeholder="What to change… e.g. tighten the second paragraph; add a counter-argument; make the conclusion stronger"
+                            className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none disabled:opacity-60 transition-colors"
+                            style={{
+                              borderColor:     "var(--ats-border-subtle)",
+                              backgroundColor: "var(--ats-bg-input)",
+                              color:           "var(--ats-fg-primary)",
+                            }}
+                          />
+                          <div className="mt-2 flex items-center gap-2 flex-wrap">
+                            <button
+                              onClick={handleDeepRevise}
+                              disabled={labReviseRunning || !labReviseInstructions.trim() || !labResult}
+                              title="Run a single-pass LLM revision and replace the draft above with the revised version."
+                              className="inline-flex items-center gap-1 rounded-lg border-2 px-3 py-1 text-xs font-bold transition-colors hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+                              style={{
+                                borderColor:     "var(--ats-border-accent)",
+                                backgroundColor: "var(--ats-bg-accent-soft)",
+                                color:           "var(--ats-fg-accent)",
+                              }}
+                            >
+                              {labReviseRunning
+                                ? <><span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full" style={{ backgroundColor: "var(--ats-fg-accent)" }} /> Revising…</>
+                                : <><Sparkles size={11} strokeWidth={2.5} /> Apply revision</>}
+                            </button>
+                            {labReviseRunning && (
+                              <button
+                                onClick={() => labReviseAbortRef.current?.abort()}
+                                className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors"
+                                style={{
+                                  borderColor: "var(--ats-border-subtle)",
+                                  color:       "var(--ats-fg-muted)",
+                                }}
+                              >
+                                <Square size={10} strokeWidth={2.5} /> Stop
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setLabReviseInstructions("")}
+                              disabled={labReviseRunning || !labReviseInstructions}
+                              className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              style={{
+                                borderColor: "var(--ats-border-subtle)",
+                                color:       "var(--ats-fg-muted)",
+                              }}
+                            >Clear</button>
+                            <span className="ml-auto text-[10px] italic" style={{ color: "var(--ats-fg-muted)" }}>
+                              Iterate: revise → Send to Paper Review → review → Send feedback to Writing Lab
+                            </span>
+                          </div>
+                          {labReviseError && (
+                            <p className="mt-1.5 text-[11px] rounded-md px-2 py-1 border"
+                               style={{ borderColor: "rgba(239,68,68,0.4)", backgroundColor: "rgba(239,68,68,0.08)", color: "#ef4444" }}>
+                              {labReviseError}
+                            </p>
+                          )}
+                        </div>
+                      )}
 
                       {/* Resume → Personal Statement chain. Shown only after a
                           finished Resume run. Clicking re-routes the Lab into
