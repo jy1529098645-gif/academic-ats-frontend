@@ -5211,7 +5211,11 @@ ${html}
                 drift left of centre. */}
             <div className="mb-4 grid grid-cols-3 items-center text-xl font-bold">
               <span aria-hidden="true" />
-              <div className="flex items-center justify-center gap-2">
+              <div className="flex items-center justify-center gap-2 px-4 py-1.5 rounded-lg justify-self-center"
+                   style={{
+                     backgroundColor: "var(--ats-bg-accent-soft)",
+                     color:           "var(--ats-fg-primary)",
+                   }}>
                 <LayoutGrid size={18} /><span>Search Space</span>
               </div>
               <div className="flex justify-end">
