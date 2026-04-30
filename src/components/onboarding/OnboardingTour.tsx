@@ -535,7 +535,19 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
           pointer-events:auto re-enabled (wrapper is none) so the
           Back / Next / Skip buttons remain clickable.
           cardRef feeds the post-render height measurement back into
-          cardPosition's bottom-clamp — see useLayoutEffect below. */}
+          cardPosition's bottom-clamp — see useLayoutEffect below.
+
+          Conditionally rendered: when this is a TARGETED step but the
+          rect hasn't been measured yet (RAF hasn't committed, or we're
+          inside a holdMs window where it's intentionally null), we
+          DON'T render a card-at-centre placeholder. That extra
+          centred-then-jump frame was the "二步定位" the user pushed
+          back on — by skipping the placeholder entirely, the card
+          appears exactly once at its final position, in lock-step
+          with the spotlight ring, when the new rect lands. Centred
+          steps (welcome / done) still always render because they
+          have no target rect to wait for. */}
+      {(!step.target || !!rect) && (
       <div
         // Same reasoning as the ring above — key only on the resolved
         // position so a held step doesn't blink the card off/on while
@@ -608,6 +620,7 @@ export default function OnboardingTour({ open, steps, onClose, onFinish }: Props
           >{isLast ? "Got it" : "Next →"}</button>
         </div>
       </div>
+      )}
     </div>,
     document.body,
   );
