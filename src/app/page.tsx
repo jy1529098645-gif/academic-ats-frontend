@@ -2886,12 +2886,26 @@ function DesktopWorkspace() {
       setLeftTab("analytics");
     } else if (mode === "writing") {
       // Writing = focus on output → left collapsed, right big AND
-      // default the right tab to Synthesis Lab (the actual writing
+      // default the right tab to Writing Lab (the actual writing
       // surface) instead of Paper Review.
       setLeftVisible(false); setAnalyticsVisible(true);
       setLeftPct(0); setCenterPct(48);    // → right ≈ 52
       setLabModule("synthesis");
     }
+    window.setTimeout(() => setGridTransitioning(false), 950);
+  }, []);
+
+  /** Column-geometry-only sibling of applyLayoutMode("writing"). Same
+   *  collapsed-left / expanded-right shape but DOES NOT touch
+   *  labModule — used by Paper Review's onBeforeRun so clicking Run
+   *  in the review tab doesn't accidentally flip the panel back to
+   *  Writing Lab mid-flow. (applyLayoutMode("writing") is still used
+   *  for the layout-switcher button, where forcing Writing Lab IS
+   *  the intent.) */
+  const snapToWritingFocusKeepingTab = useCallback(() => {
+    setGridTransitioning(true);
+    setLeftVisible(false); setAnalyticsVisible(true);
+    setLeftPct(0); setCenterPct(48);
     window.setTimeout(() => setGridTransitioning(false), 950);
   }, []);
 
@@ -6773,7 +6787,7 @@ ${html}
                     seedDraft={reviewSeedDraft}
                     seedKey={reviewSeedKey}
                     onPushFeedbackToLab={handleFeedbackToWritingLab}
-                    onBeforeRun={() => applyLayoutMode("writing")}
+                    onBeforeRun={snapToWritingFocusKeepingTab}
                   />
                 </ErrorBoundary>
               </div>
