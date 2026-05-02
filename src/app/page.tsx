@@ -4209,17 +4209,19 @@ ${html}
             // back-off until we see a cloud entry matching our title, then swap
             // the pending row out. If nothing matches after a few seconds we
             // keep the pending entry so the user still sees their search.
+            //
+            // Uses _fetchHistoryFromCloud (fetchWithApiFallback under the hood)
+            // so a misconfigured Vercel deploy missing NEXT_PUBLIC_API_BASE_URL
+            // doesn't silently hit http://localhost:8000 and leave the timeline
+            // wedged on a "pending-…" row forever — which is what the previous
+            // raw fetch did.
             (async () => {
-              const token = await getAuthToken();
-              if (!token) return;
-              const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
               const delays = [500, 1200, 2500, 4000];
               for (const d of delays) {
                 await new Promise(r => setTimeout(r, d));
                 try {
-                  const r = await fetch(`${API}/api/history?limit=50`, { headers: { Authorization: `Bearer ${token}` } });
-                  if (!r.ok) continue;
-                  const cloudItems: HistoryEntry[] = await r.json();
+                  const cloudItems = await _fetchHistoryFromCloud();
+                  if (!cloudItems) return;       // no auth token; nothing to swap
                   const matched = cloudItems.some(ci => {
                     const t = (ci.title ?? "").trim();
                     const u = new Date(ci.updated_at).getTime();
@@ -4233,7 +4235,7 @@ ${html}
                     if (cur?.id) setActiveHistoryId(cur.id);
                     return;
                   }
-                } catch { /* keep retrying */ }
+                } catch { /* keep retrying — fetchWithApiFallback already retried 3x internally */ }
               }
             })();
           } else if (sseEvent === "error") {
