@@ -2701,43 +2701,44 @@ function DesktopWorkspace() {
   }, []);
 
   const clearAllHistory = useCallback(async () => {
-    // Optimistic local clear for instant UI feedback.
+    // Snapshot for rollback if the server delete fails.
+    const snapshot = historyList;
+    const prevActiveId = activeHistoryId;
     setHistoryList([]);
     setActiveHistoryId(null);
-    // Drop legacy per-account localStorage cache so a refresh can't resurrect rows.
-    if (authUser?.email) {
-      try { localStorage.removeItem(_hKey(authUser.email)); } catch { /* ignore */ }
-    }
-    // Cloud is source-of-truth — issue the authoritative delete + cache wipe.
     try {
       const token = await getAuthToken();
       const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-      await fetchWithApiFallback("/api/history", { method: "DELETE", headers });
+      const res = await fetchWithApiFallback("/api/history", { method: "DELETE", headers });
+      if (!res.ok) throw new Error(`clear ${res.status}`);
     } catch (e) {
-      console.warn("[history] cloud clear failed:", e);
+      console.warn("[history] cloud clear failed — rolling back:", e);
+      setHistoryList(snapshot);
+      setActiveHistoryId(prevActiveId);
+      setUiError("Couldn't clear history — please try again.");
+      return;
     }
     try { await fetchWithApiFallback("/api/cache/clear", { method: "POST" }); } catch { /* best-effort */ }
-  }, [authUser?.email]);
+  }, [historyList, activeHistoryId]);
 
   const deleteHistoryEntry = useCallback((id: string) => {
-    // Optimistic local removal; the authoritative delete happens on the server.
+    // Optimistic removal with snapshot — restored on server failure so the
+    // user can retry instead of losing the entry from view.
+    const snapshot = historyList;
     setHistoryList(prev => prev.filter(e => e.id !== id));
-    if (authUser?.email) {
-      try {
-        const raw = localStorage.getItem(_hKey(authUser.email));
-        if (raw) localStorage.removeItem(_hKey(authUser.email));  // cloud-only now
-      } catch { /* ignore */ }
-    }
     (async () => {
       try {
         const token = await getAuthToken();
         const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-        await fetchWithApiFallback(`/api/history/${encodeURIComponent(id)}`, { method: "DELETE", headers });
+        const res = await fetchWithApiFallback(`/api/history/${encodeURIComponent(id)}`, { method: "DELETE", headers });
+        if (!res.ok) throw new Error(`delete ${res.status}`);
       } catch (e) {
-        console.warn("[history] cloud delete failed:", e);
+        console.warn("[history] cloud delete failed — rolling back:", e);
+        setHistoryList(snapshot);
+        setUiError("Couldn't delete that entry — please try again.");
       }
     })();
-  }, [authUser?.email]);
+  }, [historyList]);
 
   const restoreHistory = useCallback((item: HistoryEntry) => {
     // Cancel any in-flight search FIRST. Without this, a user who clicks
@@ -2924,70 +2925,133 @@ function DesktopWorkspace() {
   }, [authUser?.email]);
 
   // ── Per-user localStorage key helpers ────────────────────────────────────
-  const _hKey = (email: string) => `ats-search-history::${email}`;
-  const _fKey = (email: string) => `ats-history-favorites::${email}`;
+  const _hKey  = (email: string) => `ats-search-history::${email}`;
+  const _hMeta = (email: string) => `ats-search-history-meta::${email}`;
+  const _fKey  = (email: string) => `ats-history-favorites::${email}`;
+
+  // Cache freshness window: if the local mirror is younger than this we skip
+  // the background cloud refresh on panel-open (still hydrate locally). New
+  // login / account-switch always refreshes regardless of cachedAt.
+  const HISTORY_STALE_AFTER_MS = 60_000;
+  // Pending optimistic rows older than this are dropped during merge — by
+  // then either the cloud row exists with a real UUID (replacing it) or the
+  // server write failed and the row would otherwise be a permanent ghost.
+  const PENDING_TTL_MS = 60_000;
+
+  const _readLocalHistory = useCallback((email: string): { items: HistoryEntry[]; cachedAt: number } | null => {
+    try {
+      const raw = localStorage.getItem(_hKey(email));
+      if (!raw) return null;
+      const items = JSON.parse(raw);
+      if (!Array.isArray(items)) return null;
+      const metaRaw = localStorage.getItem(_hMeta(email));
+      const meta = metaRaw ? JSON.parse(metaRaw) : null;
+      const cachedAt = typeof meta?.cachedAt === "number" ? meta.cachedAt : 0;
+      return { items: items as HistoryEntry[], cachedAt };
+    } catch { return null; }
+  }, []);
+
+  const _writeLocalHistory = useCallback((email: string, items: HistoryEntry[]) => {
+    try {
+      localStorage.setItem(_hKey(email), JSON.stringify(items.slice(0, 50)));
+      localStorage.setItem(_hMeta(email), JSON.stringify({ cachedAt: Date.now() }));
+    } catch { /* quota — ignore */ }
+  }, []);
+
+  // Merge a fresh cloud snapshot with any still-fresh local pending rows.
+  // Cloud wins on id match. Stale pending rows (>PENDING_TTL_MS) are dropped
+  // so a failed write can't haunt the timeline forever.
+  const _mergeCloudWithPending = useCallback((cloudItems: HistoryEntry[], email: string): HistoryEntry[] => {
+    let localItems: HistoryEntry[] = [];
+    try { localItems = JSON.parse(localStorage.getItem(_hKey(email)) || "[]"); } catch {}
+    const cloudIds = new Set(cloudItems.map(c => c.id));
+    const now = Date.now();
+    const pending = localItems.filter(l => {
+      if (cloudIds.has(l.id)) return false;
+      if (!String(l.id).startsWith("pending-")) return false;
+      const ts = new Date(l.updated_at).getTime();
+      return Number.isFinite(ts) && (now - ts) < PENDING_TTL_MS;
+    });
+    return [...cloudItems, ...pending]
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      .slice(0, 50);
+  }, []);
+
+  // Single source of truth for "go ask the cloud for this user's history".
+  // Returns the parsed list, throws on network/HTTP error, returns null if
+  // no auth token is available (caller should keep whatever local snapshot it has).
+  const _fetchHistoryFromCloud = useCallback(async (signal?: AbortSignal): Promise<HistoryEntry[] | null> => {
+    const token = await getAuthToken();
+    if (!token) return null;
+    const r = await fetchWithApiFallback("/api/history?limit=50", {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+    if (!r.ok) throw new Error(`history fetch returned ${r.status}`);
+    const items = await r.json();
+    if (!Array.isArray(items)) throw new Error("history fetch returned non-array");
+    return items as HistoryEntry[];
+  }, []);
 
   // Mirror historyList into localStorage so a reload shows the timeline instantly
-  // and optimistic entries survive until the cloud catches up. Delete / clear
-  // actions already overwrite this mirror explicitly.
+  // and optimistic entries survive until the cloud catches up. Debounced 300ms
+  // because every SSE token / pending-replace bumps historyList and the synchronous
+  // JSON.stringify of 50 paper-bearing entries on the main thread adds up.
+  // Delete/clear callbacks rely on this effect to mirror their state changes —
+  // they no longer write localStorage directly.
   useEffect(() => {
     const email = authUser?.email;
     if (!email) return;
-    try { localStorage.setItem(_hKey(email), JSON.stringify(historyList.slice(0, 50))); } catch { /* quota — ignore */ }
-  }, [historyList, authUser?.email]);
+    const id = window.setTimeout(() => {
+      _writeLocalHistory(email, historyList);
+    }, 300);
+    return () => window.clearTimeout(id);
+  }, [historyList, authUser?.email, _writeLocalHistory]);
 
   // Load / reload history whenever the logged-in user changes.
-  // Cloud is the authoritative source but we KEEP a small local-storage mirror so
-  // new entries are visible even if the backend hasn't finished writing, and so
-  // the timeline survives a refresh while the cloud fetch is still in flight.
-  // Delete/clear paths explicitly wipe both.
+  // Strategy: hydrate from local mirror IMMEDIATELY (so the panel is never
+  // blank), then refresh from the cloud in the background. If the cloud
+  // request fails we KEEP the local snapshot — that's the whole point of
+  // having a mirror. The previous implementation cleared the list on failure,
+  // which defeated the cache and made transient backend hiccups visible to
+  // users as "your history is gone".
   useEffect(() => {
     const email = authUser?.email;
-    if (!email) { setHistoryList([]); setFavoritedIds(new Set()); return; }
+    if (!email) { setHistoryList([]); setFavoritedIds(new Set()); setHistoryLoading(false); return; }
 
-    // Hydrate immediately from local mirror so the panel isn't blank for a second.
-    try {
-      const raw = localStorage.getItem(_hKey(email));
-      if (raw) {
-        const cached: HistoryEntry[] = JSON.parse(raw);
-        if (Array.isArray(cached)) {
-          setHistoryList(cached.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()));
-        }
-      }
-    } catch { /* ignore */ }
+    // 1. Hydrate from local mirror.
+    const cached = _readLocalHistory(email);
+    if (cached) {
+      setHistoryList(
+        cached.items.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      );
+    }
 
     // Favorites stay local — they are a UI preference, not content.
-    try { setFavoritedIds(new Set(JSON.parse(localStorage.getItem(_fKey(email)) || "[]"))); } catch { setFavoritedIds(new Set()); }
+    try { setFavoritedIds(new Set(JSON.parse(localStorage.getItem(_fKey(email)) || "[]"))); }
+    catch { setFavoritedIds(new Set()); }
 
-    const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-    getAuthToken().then(token => {
-      if (!token) return;        // keep whatever we hydrated from local cache
-      fetch(`${API}/api/history?limit=50`, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : Promise.reject(r.status))
-        .then((cloudItems: HistoryEntry[]) => {
-          // Merge cloud + any pending local rows (cloud takes precedence on id match).
-          let localItems: HistoryEntry[] = [];
-          try { localItems = JSON.parse(localStorage.getItem(_hKey(email)) || "[]"); } catch {}
-          const cloudIds = new Set(cloudItems.map(c => c.id));
-          const pending = localItems.filter(l => !cloudIds.has(l.id) && String(l.id).startsWith("pending-"));
-          const sorted = [...cloudItems, ...pending].sort(
-            (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-          );
-          // Perf: cap the in-memory + on-disk history at 50 entries.
-          // Optimistic-insert path already slices to 50 (line ~3567);
-          // here we mirror that on cloud fetch so a heavy backend
-          // response can't balloon the in-memory list (every change
-          // re-renders the history panel, every storage write
-          // re-stringifies the array). Older entries stay on the
-          // server — they're just not pinned in this client's view.
-          const capped = sorted.slice(0, 50);
-          setHistoryList(capped);
-          // Refresh the local mirror with the merged list so the next load is fast AND correct.
-          try { localStorage.setItem(_hKey(email), JSON.stringify(capped)); } catch {}
-        })
-        .catch((err) => { console.warn("[history] cloud fetch failed:", err); setHistoryList([]); });
-    });
-  }, [authUser?.email]);
+    // 2. Refresh from cloud. Always do this on account change — even if we
+    // just hydrated a fresh-looking local mirror, the other device may have
+    // deleted entries we still have cached.
+    const controller = new AbortController();
+    setHistoryLoading(true);
+    _fetchHistoryFromCloud(controller.signal)
+      .then((cloudItems) => {
+        if (!cloudItems) return;          // no token; keep local snapshot
+        const merged = _mergeCloudWithPending(cloudItems, email);
+        setHistoryList(merged);
+        _writeLocalHistory(email, merged);
+      })
+      .catch((err) => {
+        if ((err as { name?: string })?.name === "AbortError") return;
+        console.warn("[history] cloud fetch failed — keeping local snapshot:", err);
+        // Intentionally do NOT clear historyList here — local cache is the fallback.
+      })
+      .finally(() => setHistoryLoading(false));
+
+    return () => controller.abort();
+  }, [authUser?.email, _readLocalHistory, _writeLocalHistory, _mergeCloudWithPending, _fetchHistoryFromCloud]);
 
   // Legacy per-tab danmu storage — the announcement feed is now server-
   // backed (see useAnnouncements), so the old localStorage key is stale
@@ -9065,15 +9129,38 @@ ${html}
                   onClick={() => {
                     const next = !historyPanelOpen;
                     setHistoryPanelOpen(next);
-                    if (next) {
-                      // Load from localStorage immediately (works for all users)
-                      try {
-                        const _k = authUser?.email ? _hKey(authUser.email) : null;
-                        const local: typeof historyList = JSON.parse((_k && localStorage.getItem(_k)) || "[]");
-                        setHistoryList(local);
-                      } catch { setHistoryList([]); }
-                      setHistoryLoading(false);
+                    if (!next) return;
+                    const email = authUser?.email;
+                    if (!email) return;
+
+                    // 1. Hydrate from local mirror immediately so the panel
+                    //    never opens to a blank state.
+                    const cached = _readLocalHistory(email);
+                    if (cached) {
+                      setHistoryList(
+                        cached.items.sort(
+                          (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+                        )
+                      );
                     }
+
+                    // 2. If the cache is stale (or absent) refresh from the
+                    //    cloud in the background. Failure keeps the local
+                    //    snapshot — never wipes it.
+                    const fresh = cached && (Date.now() - cached.cachedAt) < HISTORY_STALE_AFTER_MS;
+                    if (fresh) return;
+                    setHistoryLoading(true);
+                    _fetchHistoryFromCloud()
+                      .then((cloudItems) => {
+                        if (!cloudItems) return;
+                        const merged = _mergeCloudWithPending(cloudItems, email);
+                        setHistoryList(merged);
+                        _writeLocalHistory(email, merged);
+                      })
+                      .catch((err) => {
+                        console.warn("[history] cloud fetch failed — keeping local snapshot:", err);
+                      })
+                      .finally(() => setHistoryLoading(false));
                   }}
                   className={`rounded-full border px-3 py-1 text-xs shadow-lg backdrop-blur-sm transition-all ${
                     historyPanelOpen
@@ -9178,6 +9265,9 @@ ${html}
           >
             {/* Inner column: nodes row + clear-all row (both scroll together; clear-all is sticky-left) */}
             <div className="flex flex-col min-w-max px-4 pt-2 pb-1">
+              {historyLoading && historyList.length === 0 && (
+                <p className="text-xs text-slate-500 py-2">Loading history…</p>
+              )}
               {!historyLoading && historyList.length === 0 && (
                 <p className="text-xs text-slate-500 py-2">No searches yet. Run one to get started.</p>
               )}
