@@ -54,6 +54,31 @@ export type LabFieldSpec = {
 
 const defaultPointsPlaceholder = (i: number) => `Point ${i + 1}…`;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Universal catch-all field — appended to every output type's `extras`
+// array via the loop at the end of this file. Lives as a constant so the
+// copy stays identical across all types (users learn it once).
+//
+// Scope is intentionally broad: NOT just "mention X / avoid Y". Anything
+// that didn't fit the structured fields lands here — extra content the
+// user wants reflected, draft paragraphs the user wrote themselves, tone
+// preferences, formatting / length requirements, target audience nuance,
+// must-include points, things to avoid, voice constraints, citations the
+// user wants prioritised, even raw notes from a discussion. The backend
+// pipelines (academic + resume) inject this verbatim into the planner /
+// writer / editor prompts and tell the model to (a) incorporate any
+// content in it and (b) honour any instructions in it — see
+// synthesis_service.py for the exact injection sites.
+// ─────────────────────────────────────────────────────────────────────────────
+const ADDITIONAL_NOTES_FIELD: LabExtraField = {
+  key:         "additional_notes",
+  label:       "Anything else (content, requirements, drafts…)",
+  description: "Catch-all. Anything you want the writer to use or follow that didn't fit the fields above — extra content to incorporate, your own draft snippets, tone or length requirements, must-include points, things to avoid, audience nuance, etc.",
+  placeholder: "e.g.\n• Include a paragraph about the 2024 Chen et al. work on debiasing.\n• Tone: more conversational than typical academic prose.\n• Here's the conclusion I drafted — preserve it verbatim: \"…\"\n• Use British English spelling throughout.\n• Avoid the term \"novel\" anywhere in the text.",
+  required:    false,
+  rows:        4,
+};
+
 export const LAB_FIELD_SPECS: Record<string, LabFieldSpec> = {
   literature_review: {
     id: "literature_review",
@@ -255,6 +280,17 @@ export const LAB_FIELD_SPECS: Record<string, LabFieldSpec> = {
     ],
   },
 };
+
+// Append the universal "anything else to include" field to every spec's
+// extras array. Doing this in one place keeps the field's copy and shape
+// identical across all output types — users learn the field once, see it
+// last in every form, and the backend pipelines have a single key
+// (`additional_notes`) to read regardless of output type. Mutating the
+// already-declared specs (rather than spreading the field into each
+// declaration above) keeps the per-type spec blocks readable.
+for (const spec of Object.values(LAB_FIELD_SPECS)) {
+  spec.extras = [...(spec.extras ?? []), ADDITIONAL_NOTES_FIELD];
+}
 
 export function labFieldSpec(outputType: string): LabFieldSpec {
   return LAB_FIELD_SPECS[outputType] ?? LAB_FIELD_SPECS.literature_review;

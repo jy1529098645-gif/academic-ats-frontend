@@ -4680,7 +4680,12 @@ ${html}
   }
 
   async function handleSynthesize() {
-    if (labRefs.length === 0) return;
+    // Resume / CV runs an entirely separate backend pipeline that takes
+    // its facts from the user's filled fields, not from attached papers.
+    // Requiring at least one paper for resume mode would block the
+    // common "no papers, just my CV info" use case — academic types
+    // still need ≥1 paper because their writers cite into them.
+    if (labOutputType !== "resume" && labRefs.length === 0) return;
     if (!ensureQuota("synthesis")) return;
     // Auto-switch to the Writing layout (right panel expanded, others
     // collapsed) the moment the user kicks off a generation. Reading
@@ -7796,7 +7801,7 @@ ${html}
                   <div className="flex gap-2">
                     <button
                       onClick={() => void handleSynthesize()}
-                      disabled={labRefs.length === 0 || labGenerating}
+                      disabled={(labOutputType !== "resume" && labRefs.length === 0) || labGenerating}
                       className={`relative flex-1 rounded-xl px-4 py-3 text-sm font-bold transition-all disabled:cursor-not-allowed overflow-hidden ${
                         labGenerating
                           ? "border border-violet-500/40 bg-violet-500/10 text-violet-300"
