@@ -2110,6 +2110,25 @@ function DesktopWorkspace() {
     };
   } | null>(null);
   const [labNotesOpen,      setLabNotesOpen]      = useState(true);
+  // Citation curation — the planner's kept/rejected verdict over the
+  // user-attached papers.  Streamed in via the
+  // STATUS:[CitationCuration] SSE frame the synthesis backend emits
+  // right after planning. Rendered as a "Citations selected /
+  // skipped" block under the article so the user sees why specific
+  // attached papers didn't end up cited.
+  type CitationCurationEntry = {
+    ref:    number;
+    title:  string;
+    year?:  string | number;
+    source?: string;
+    doi?:   string;
+    url?:   string;
+    reason: string;
+  };
+  const [labCitationCuration, setLabCitationCuration] = useState<{
+    kept:     CitationCurationEntry[];
+    rejected: CitationCurationEntry[];
+  } | null>(null);
   const [labUserFiles,      setLabUserFiles]      = useState<File[]>([]);
   // Stored as the real backend model id so the payload always carries a
   // whitelisted value; the UI maps these ids to user-facing descriptive
@@ -4822,6 +4841,7 @@ ${html}
     setLabError("");
     setLabAgentLog([]);
     setLabReviewerNotes(null);
+    setLabCitationCuration(null);
     // Re-revise diff state from a previous cycle no longer makes sense:
     // a fresh Compose isn't a revision OF anything, so clear the diff
     // banner / origin snapshot so the next Re-revise pass starts from
@@ -4897,6 +4917,14 @@ ${html}
                 if (agentName === "FinalReview") {
                   try {
                     setLabReviewerNotes(JSON.parse(agentMsg));
+                  } catch { /* ignore */ }
+                } else if (agentName === "CitationCuration") {
+                  // Planner's kept-vs-rejected verdict streams in
+                  // before the editor starts emitting prose, so the
+                  // citation block renders alongside the streaming
+                  // article rather than appearing after it finishes.
+                  try {
+                    setLabCitationCuration(JSON.parse(agentMsg));
                   } catch { /* ignore */ }
                 } else {
                   const isDone     = agentMsg.startsWith("✓");
@@ -8634,6 +8662,7 @@ ${html}
                               setLabResult("");
                               setLabAgentLog([]);
                               setLabReviewerNotes(null);
+                              setLabCitationCuration(null);
                               setLabViewingId(null);
                             }}
                             className="shrink-0 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors hover:brightness-110"
@@ -8788,6 +8817,83 @@ ${html}
                     </div>
                     );
                   })()}
+
+                  {/* Citation curation — the planner's verdict on which
+                      attached papers actually fit this thesis vs. which
+                      it skipped, with one-line reasons for each.
+                      Surfaces transparency on why some user-attached
+                      papers don't appear in the bibliography (previously
+                      they were silently used or ignored at random). */}
+                  {labCitationCuration &&
+                    ((labCitationCuration.kept?.length ?? 0) + (labCitationCuration.rejected?.length ?? 0) > 0) && (
+                    <div className="rounded-xl border border-violet-500/25 bg-violet-500/5">
+                      <div className="px-3 py-2.5 flex items-center gap-2 text-xs font-bold text-violet-300">
+                        <Quote size={12} />
+                        <span>Citation curation</span>
+                        <span className="text-slate-500 font-normal text-[10px]">
+                          {labCitationCuration.kept.length} cited · {labCitationCuration.rejected.length} skipped
+                        </span>
+                      </div>
+                      <div className="px-3 pb-3 space-y-3">
+                        {labCitationCuration.kept.length > 0 && (
+                          <div>
+                            <div className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: "#10b981" }}>
+                              <Check size={10} strokeWidth={3} />Selected for citation
+                            </div>
+                            <ul className="space-y-1.5">
+                              {labCitationCuration.kept.map((c, i) => (
+                                <li key={`kept-${i}`} className="rounded-lg border border-slate-700/60 bg-slate-900/40 px-2.5 py-1.5">
+                                  <div className="flex items-baseline gap-1.5">
+                                    <span className="shrink-0 text-[10px] font-bold text-violet-400 tabular-nums">[{c.ref}]</span>
+                                    {(c.url || c.doi) ? (
+                                      <a
+                                        href={c.url || `https://doi.org/${c.doi}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs font-semibold text-slate-200 hover:text-violet-300 transition-colors flex-1 min-w-0"
+                                      >{c.title || "(untitled)"}</a>
+                                    ) : (
+                                      <span className="text-xs font-semibold text-slate-200 flex-1 min-w-0">{c.title || "(untitled)"}</span>
+                                    )}
+                                    {c.year && <span className="shrink-0 text-[10px] text-slate-500">{c.year}</span>}
+                                  </div>
+                                  {c.reason && <p className="mt-1 text-xs text-slate-400 leading-relaxed">{c.reason}</p>}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {labCitationCuration.rejected.length > 0 && (
+                          <div>
+                            <div className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1.5" style={{ color: "#94a3b8" }}>
+                              <X size={10} strokeWidth={3} />Skipped — not a fit
+                            </div>
+                            <ul className="space-y-1.5">
+                              {labCitationCuration.rejected.map((c, i) => (
+                                <li key={`rej-${i}`} className="rounded-lg border border-slate-700/40 bg-slate-900/20 px-2.5 py-1.5 opacity-80">
+                                  <div className="flex items-baseline gap-1.5">
+                                    <span className="shrink-0 text-[10px] font-bold text-slate-500 tabular-nums">[{c.ref}]</span>
+                                    {(c.url || c.doi) ? (
+                                      <a
+                                        href={c.url || `https://doi.org/${c.doi}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs font-medium text-slate-300 hover:text-violet-300 transition-colors flex-1 min-w-0"
+                                      >{c.title || "(untitled)"}</a>
+                                    ) : (
+                                      <span className="text-xs font-medium text-slate-300 flex-1 min-w-0">{c.title || "(untitled)"}</span>
+                                    )}
+                                    {c.year && <span className="shrink-0 text-[10px] text-slate-500">{c.year}</span>}
+                                  </div>
+                                  {c.reason && <p className="mt-1 text-xs text-slate-400 leading-relaxed italic">{c.reason}</p>}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Reviewer Notes — collapsible improvement feedback.
                       Reads from displayedLabReviewerNotes via a local alias

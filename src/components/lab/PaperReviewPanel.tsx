@@ -321,6 +321,15 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
 
   const abortRef = useRef<AbortController | null>(null);
 
+  // Sticky "this draft came from Writing Lab" marker. Flips true when
+  // seedDraft fires; cleared the moment the user uploads a file (which
+  // is unambiguously a different draft) so a stale lab-origin signal
+  // can't ride along with an arbitrary user-pasted text after a tab
+  // switch. The user editing the textarea after seed-draft DOES keep
+  // the flag true — they're iterating on the Lab output, which is
+  // exactly the scenario the backend boost is calibrated for.
+  const [cameFromLab, setCameFromLab] = useState(false);
+
   // Seed-draft hand-off from the sibling Writing Lab tab. When the
   // parent passes a non-null `seedDraft`, drop it into the textarea
   // and clear any prior file-name marker (the operator just sent a
@@ -332,6 +341,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
       setPaperText(seedDraft);
       setFileName("");
       setExtractError("");
+      setCameFromLab(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedKey]);
@@ -358,6 +368,9 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
       const data = await res.json() as { text: string; filename: string; char_count: number };
       setPaperText(data.text);
       setFileName(data.filename);
+      // A new file upload unambiguously means "different draft" — drop
+      // the lab-origin flag so the scorecard boost can't ride along.
+      setCameFromLab(false);
     } catch (e) {
       setExtractError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -413,7 +426,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal:  ac.signal,
-        body:    JSON.stringify({ paper_text: text, context_hint: effectiveContext, language, draft_level: draftLevel }),
+        body:    JSON.stringify({ paper_text: text, context_hint: effectiveContext, language, draft_level: draftLevel, from_lab: cameFromLab }),
       });
       if (res.status === 429) {
         // Quota exhausted — parse the server's friendly explanation
@@ -1090,47 +1103,12 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
             </div>
           )}
 
-          {/* Top consolidated issues */}
-          {(ck?.top_issues?.length ?? 0) > 0 && (
-            <div>
-              <div className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-accent)" }}>
-                <AlertTriangle size={10} />Top issues to address
-              </div>
-              <ul className="space-y-1.5">
-                {(ck?.top_issues ?? []).map((it, i) => {
-                  const sev = SEVERITY_STYLES[it.priority] ?? SEVERITY_STYLES.medium;
-                  return (
-                    <li
-                      key={i}
-                      className="rounded-lg border px-2.5 py-1.5"
-                      style={{
-                        borderColor:     "var(--ats-border-subtle)",
-                        backgroundColor: "var(--ats-bg-input)",
-                      }}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className="shrink-0 inline-flex items-center rounded border px-1 text-[9px] font-bold uppercase tracking-wider"
-                          style={{ borderColor: sev.border, backgroundColor: sev.bg, color: sev.fg }}
-                        >{sev.label}</span>
-                        <span className="text-xs font-semibold flex-1 min-w-0" style={{ color: "var(--ats-fg-primary)" }}>{it.title || "(untitled issue)"}</span>
-                        {it.lenses.length > 0 && (
-                          <span className="shrink-0 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>via {it.lenses.join(", ")}</span>
-                        )}
-                      </div>
-                      {it.problem && <p className="mt-1 text-xs" style={{ color: "var(--ats-fg-secondary)" }}>{it.problem}</p>}
-                      {it.suggestion && (
-                        <p className="mt-1 text-xs">
-                          <span className="font-semibold" style={{ color: "#10b981" }}>Fix: </span>
-                          <span style={{ color: "var(--ats-fg-secondary)" }}>{it.suggestion}</span>
-                        </p>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
+          {/* "Top issues to address" was removed: the per-specialist
+              breakdown below already lists every issue with its
+              priority + suggested fix, and the editor letter above
+              now opens with a concise strengths-first summary.
+              Surfacing the consolidated issue list a THIRD time
+              between them was pure noise — users scanned past it. */}
 
           {/* Consensus strengths */}
           {(ck?.consensus_strengths?.length ?? 0) > 0 && (
