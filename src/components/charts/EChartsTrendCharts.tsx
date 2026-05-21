@@ -337,55 +337,127 @@ function evidenceStrengthScore(s?: string): number | null {
   return null;
 }
 
-function rigorScore(p: ChartPaper): number {
-  // Robust fallback chain — pick the first signal that's actually
-  // present rather than collapsing to 50 immediately.
-  const fit = typeof p.research_fit_score === "number" ? p.research_fit_score : null;
-  if (fit != null) return Math.max(0, Math.min(100, fit));
-  const ev = typeof p.evidence_score === "number"
-    ? p.evidence_score
-    : Number(p.evidence_score || NaN);
-  if (Number.isFinite(ev) && ev > 0) {
-    // evidence_score is sometimes 0..1, sometimes 0..100 — heuristic
-    // expand if it looks fractional.
-    return Math.max(0, Math.min(100, ev <= 1 ? ev * 100 : ev));
-  }
-  const evStr = evidenceStrengthScore(p.evidence_strength);
-  if (evStr != null) return evStr;
+/** Each candidate is a (label, extractor) pair. Extractor returns the
+ *  raw value or null when the field is missing on this paper. The chart
+ *  picks the FIRST candidate whose extracted values have meaningful
+ *  spread across the paper set (max-min ≥ MIN_SPREAD) — see
+ *  `pickAxisSignal` below. This solves the Quick-mode bug where
+ *  `research_fit_score` is technically present on every paper but
+ *  always equals the placeholder 55, collapsing the chart to a single
+ *  vertical line. */
+type AxisCandidate = {
+  label:   string;
+  extract: (p: ChartPaper, indexInRankList: number) => number | null;
+};
+
+/** Minimum max-min spread (in 0..100 axis units) below which we treat
+ *  a signal as "all the same" and try the next candidate. Tuned so a
+ *  spread of 4 — typical of evidence_score after the LLM compression
+ *  blend — still passes, while a uniform 55 across 30+ papers fails. */
+const MIN_SPREAD = 5;
+
+function evidenceFromStrength(p: ChartPaper): number | null {
+  return evidenceStrengthScore(p.evidence_strength);
+}
+
+function rigorFromPaperType(p: ChartPaper): number | null {
   const ty = (p.paper_type_label || "").toLowerCase();
+  if (!ty) return null;
   if (ty.includes("review") || ty.includes("meta")) return 70;
   if (ty.includes("survey")) return 65;
   if (ty.includes("empirical") || ty.includes("experimental")) return 60;
   if (ty.includes("theoretical")) return 55;
-  return 50;
+  return null;
 }
 
-function impactRaw(p: ChartPaper): number {
-  // Prefer real citation counts, fall back to derived scores so the
-  // chart still has a meaningful y for un-cited preprints. The
-  // relevance_score field exists on the canonical Paper but isn't
-  // declared in the trimmed ChartPaper subset — read defensively.
-  const cc = typeof p.citation_count === "number"
-    ? p.citation_count
-    : Number(p.citation_count || NaN);
-  if (Number.isFinite(cc) && cc >= 0) return cc;
+function readScoreField(p: ChartPaper, key: "score" | "relevance_score"): number | null {
   const px = p as unknown as Record<string, unknown>;
-  const rs = typeof px.relevance_score === "number"
-    ? px.relevance_score
-    : Number((px.relevance_score as string | number | undefined) ?? NaN);
-  if (Number.isFinite(rs)) return Math.max(0, rs);
-  const sc = typeof p.score === "number" ? p.score : Number(p.score || NaN);
-  if (Number.isFinite(sc)) return Math.max(0, sc);
-  return 0;
+  const v  = px[key];
+  if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, v);
+  if (typeof v === "string") {
+    const parsed = Number(v);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return null;
 }
 
-/** Log-scale citation count to a 0..100 visual. log1p flattens the
- *  long tail (a 5000-citation paper doesn't dominate the chart) while
- *  preserving the rank order. Capped at 1000 cites for the visual
- *  ceiling — beyond that the dot sits at the top edge. */
+function readEvidenceScore(p: ChartPaper): number | null {
+  const ev = typeof p.evidence_score === "number" ? p.evidence_score : Number(p.evidence_score ?? NaN);
+  if (!Number.isFinite(ev) || ev <= 0) return null;
+  // evidence_score is sometimes 0..1, sometimes 0..100 — heuristic
+  // expand if it looks fractional.
+  return Math.max(0, Math.min(100, ev <= 1 ? ev * 100 : ev));
+}
+
+function readResearchFit(p: ChartPaper): number | null {
+  if (typeof p.research_fit_score !== "number") return null;
+  return Math.max(0, Math.min(100, p.research_fit_score));
+}
+
+function readCitationCount(p: ChartPaper): number | null {
+  const cc = typeof p.citation_count === "number" ? p.citation_count : Number(p.citation_count ?? NaN);
+  if (!Number.isFinite(cc) || cc < 0) return null;
+  return cc;
+}
+
+function readYear(p: ChartPaper): number | null {
+  const m = String(p.year ?? "").match(/\d{4}/);
+  return m ? Number(m[0]) : null;
+}
+
+/** Log-scale a heavy-tailed value (citation count) to a 0..100 visual.
+ *  log1p flattens the long tail; capped at 1000 so beyond that the dot
+ *  sits at the top edge. */
 function impactVisual(raw: number): number {
   const capped = Math.min(1000, Math.max(0, raw));
   return (Math.log1p(capped) / Math.log1p(1000)) * 100;
+}
+
+/** Walk candidates in order, return the first whose extracted values
+ *  show meaningful spread across the paper set. Returns the picked
+ *  label + a per-paper coords array (with index-rank as last-resort
+ *  fallback so the chart NEVER collapses to a line). The values
+ *  returned are already in 0..100 axis units. */
+function pickAxisSignal(
+  papers: ChartPaper[],
+  candidates: AxisCandidate[],
+  normaliseToAxis: (raw: number, allRaw: number[]) => number,
+  rankAxisLabel: string,
+): { label: string; values: number[] } {
+  for (const cand of candidates) {
+    const raws: (number | null)[] = papers.map((p, i) => cand.extract(p, i));
+    // Skip the candidate if any paper has a null reading — we want
+    // a complete column, not interpolated holes.
+    if (raws.some((v) => v == null)) continue;
+    const numeric = raws as number[];
+    const min = Math.min(...numeric);
+    const max = Math.max(...numeric);
+    // First do the raw-spread test in the candidate's native units;
+    // it's cheaper than normalising N values just to throw them away.
+    if (max - min < MIN_SPREAD) continue;
+    const values = numeric.map((v) => normaliseToAxis(v, numeric));
+    // Re-check spread after normalisation — defensive, since some
+    // normalisers (log) can compress a borderline-passing raw spread
+    // into a flat visual.
+    const vMin = Math.min(...values);
+    const vMax = Math.max(...values);
+    if (vMax - vMin < MIN_SPREAD) continue;
+    return { label: cand.label, values };
+  }
+  // Last resort — rank within the displayed list. Highest-ranked paper
+  // (index 0) gets the highest value so the eye associates "top-right"
+  // with "best of corpus". Spread is guaranteed: N papers → 0..100
+  // evenly. The label changes too so the user knows the axis is now
+  // "position in result list" rather than the failed primary signal.
+  const n = Math.max(1, papers.length);
+  return {
+    label:  rankAxisLabel,
+    values: papers.map((_, i) => (n === 1 ? 50 : 100 - (i / (n - 1)) * 100)),
+  };
+}
+
+function clamp0to100(v: number): number {
+  return Math.max(0, Math.min(100, v));
 }
 
 function recencySize(p: ChartPaper, oldestYear: number, newestYear: number): number {
@@ -404,25 +476,86 @@ interface BullseyeDatum {
   symbolSize: number;
 }
 
+// X-axis candidates — tried in order, first one with meaningful spread
+// wins.  research_fit_score is first because when it's MEANT to vary
+// (Curated mode, where the LLM actually rated each paper) it carries
+// the most information, but Quick mode pins it at the placeholder 55
+// so the spread test naturally falls through to score / evidence_score
+// — which DO vary because the backend ranking pipeline writes them per
+// paper.
+const RIGOR_CANDIDATES: AxisCandidate[] = [
+  { label: "Research fit",   extract: (p) => readResearchFit(p) },
+  { label: "Relevance score", extract: (p) => readScoreField(p, "relevance_score") },
+  { label: "Match score",    extract: (p) => readScoreField(p, "score") },
+  { label: "Evidence score", extract: (p) => readEvidenceScore(p) },
+  { label: "Evidence strength", extract: (p) => evidenceFromStrength(p) },
+  { label: "Paper type",     extract: (p) => rigorFromPaperType(p) },
+];
+
+// Y-axis candidates — citation_count first because external validation
+// is the strongest "impact" signal when available; fall through to
+// year (recency) and score (rank-quality) so the chart always shows a
+// meaningful Y even on un-cited preprints.
+const IMPACT_CANDIDATES: AxisCandidate[] = [
+  { label: "Citations",      extract: (p) => readCitationCount(p) },
+  { label: "Relevance score", extract: (p) => readScoreField(p, "relevance_score") },
+  { label: "Match score",    extract: (p) => readScoreField(p, "score") },
+  { label: "Publication year", extract: (p) => readYear(p) },
+];
+
 export function BullseyeChartEC({ papers }: { papers: ChartPaper[] }) {
   const t = useT();
 
-  const points: BullseyeDatum[] = useMemo(() => {
-    if (papers.length === 0) return [];
+  const { points, xAxisLabel, yAxisLabel } = useMemo(() => {
+    if (papers.length === 0) {
+      return { points: [] as BullseyeDatum[], xAxisLabel: "Rigor", yAxisLabel: "Impact" };
+    }
     const years = papers
       .map((p) => Number(String(p.year ?? "").match(/\d{4}/)?.[0] ?? NaN))
       .filter((n) => Number.isFinite(n));
     const oldestY = years.length ? Math.min(...years) : 2000;
     const newestY = years.length ? Math.max(...years) : 2025;
-    return papers.map((p) => {
-      const rigor   = rigorScore(p);
-      const cites   = impactRaw(p);
-      const impact  = impactVisual(cites);
+
+    // Pick the best X-axis signal. Scores already live in 0..100, so
+    // the identity normaliser is correct for every candidate except
+    // the year-fallback (handled below).
+    const xPick = pickAxisSignal(
+      papers,
+      RIGOR_CANDIDATES,
+      (raw) => clamp0to100(raw),
+      "Rank position",
+    );
+
+    // Y-axis pick is a bit more nuanced because the candidates live in
+    // very different units (citations: 0..thousands; year: 1900..2100;
+    // scores: 0..100). The normaliser projects each into 0..100 using
+    // the candidate's own min/max so the chart fills the canvas.
+    const yPick = pickAxisSignal(
+      papers,
+      IMPACT_CANDIDATES,
+      (raw, all) => {
+        const min = Math.min(...all);
+        const max = Math.max(...all);
+        if (max <= min) return 50;
+        // Citations are heavy-tailed → log scale.  Detect by range: a
+        // span over 200 with values reaching >=50 is almost certainly
+        // citation counts and benefits from log compression.
+        if (max - min > 200 && max >= 50) return impactVisual(raw);
+        return clamp0to100(((raw - min) / (max - min)) * 100);
+      },
+      "Rank position",
+    );
+
+    const datums: BullseyeDatum[] = papers.map((p, i) => {
+      const src     = (p.source || "Unknown").trim() || "Unknown";
       const m       = String(p.year ?? "").match(/\d{4}/);
       const yr      = m ? Number(m[0]) : 0;
-      const src     = (p.source || "Unknown").trim() || "Unknown";
+      // Tooltip needs the raw citation count for display when that's
+      // what Y was derived from. When Y came from a different signal,
+      // we fall back to the citation_count field (or 0).
+      const rawCites = readCitationCount(p) ?? 0;
       return {
-        value:      [rigor, impact, cites, yr],
+        value:      [xPick.values[i], yPick.values[i], rawCites, yr],
         name:       src,
         itemStyle:  {
           color:   SOURCE_PALETTE[hashString(src) % SOURCE_PALETTE.length],
@@ -431,6 +564,8 @@ export function BullseyeChartEC({ papers }: { papers: ChartPaper[] }) {
         symbolSize: recencySize(p, oldestY, newestY),
       };
     });
+
+    return { points: datums, xAxisLabel: xPick.label, yAxisLabel: yPick.label };
   }, [papers]);
 
   const option = useMemo(() => ({
@@ -438,14 +573,24 @@ export function BullseyeChartEC({ papers }: { papers: ChartPaper[] }) {
       trigger: "item",
       confine: true,
       formatter: (p: { value: [number, number, number, number]; name?: string }) => {
-        const [rigor, _vis, cites, yr] = p.value;
-        void _vis;
+        const [xVal, yVal, cites, yr] = p.value;
+        // Show the axis label so the user understands which signal the
+        // chart fell back to (when research_fit_score was degenerate
+        // and we picked relevance_score / rank instead, the tooltip
+        // tells them rather than mislabelling). Citations is shown
+        // separately when the value > 0 because it's the most
+        // information-dense field a paper can carry and almost
+        // always interesting even when not the Y axis itself.
+        const citesLine = cites > 0
+          ? `<div style="font-size:10px;color:var(--ats-fg-muted);margin-top:2px;">Citations <span style="color:var(--ats-fg-primary);font-weight:600;">${cites.toFixed(0)}</span></div>`
+          : "";
         return [
           `<div style="font-size:11px;font-weight:600;margin-bottom:4px;">${p.name || "Unknown"}${yr ? ` · ${yr}` : ""}</div>`,
           `<div style="font-size:10px;color:var(--ats-fg-muted);">`,
-          `Rigor <span style="color:var(--ats-fg-primary);font-weight:600;">${rigor.toFixed(0)}</span> ·`,
-          ` Citations <span style="color:var(--ats-fg-primary);font-weight:600;">${cites.toFixed(0)}</span>`,
+          `${xAxisLabel} <span style="color:var(--ats-fg-primary);font-weight:600;">${xVal.toFixed(0)}</span> ·`,
+          ` ${yAxisLabel} <span style="color:var(--ats-fg-primary);font-weight:600;">${yVal.toFixed(0)}</span>`,
           `</div>`,
+          citesLine,
         ].join("");
       },
       extraCssText: SHARED_TOOLTIP_CSS,
@@ -455,7 +600,11 @@ export function BullseyeChartEC({ papers }: { papers: ChartPaper[] }) {
       type: "value",
       min:  0,
       max:  100,
-      name: t("chart.bullseye.rigor") || "Rigor",
+      // Axis label reflects the picked signal — "Research fit" when
+      // research_fit_score had spread, otherwise "Relevance score" /
+      // "Match score" / etc. so a Quick-mode user doesn't see "Rigor"
+      // for an axis that's actually scoring something else.
+      name: xAxisLabel,
       nameLocation: "middle",
       nameGap:      24,
       nameTextStyle: { color: "#64748b", fontSize: 10, fontWeight: 600 },
@@ -468,7 +617,7 @@ export function BullseyeChartEC({ papers }: { papers: ChartPaper[] }) {
       type: "value",
       min:  0,
       max:  100,
-      name: t("chart.bullseye.impact") || "Impact",
+      name: yAxisLabel,
       nameLocation: "middle",
       nameGap:      32,
       nameTextStyle: { color: "#64748b", fontSize: 10, fontWeight: 600 },
@@ -494,7 +643,7 @@ export function BullseyeChartEC({ papers }: { papers: ChartPaper[] }) {
       animationDuration: 600,
       animationEasing: "cubicOut",
     }],
-  }), [points, t]);
+  }), [points, xAxisLabel, yAxisLabel]);
 
   const chartRef = useRef<EChartsHostHandle | null>(null);
   if (papers.length === 0) {
