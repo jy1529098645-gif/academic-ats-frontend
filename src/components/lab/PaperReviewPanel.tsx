@@ -21,7 +21,7 @@ import ReactMarkdown from "react-markdown";
 import {
   Upload, FolderOpen, FileText, Sparkles, Square, Bot,
   ChevronDown, ChevronRight, ClipboardList, Check, X as XIcon, Play,
-  Award, Gauge, AlertTriangle, Clock, ArrowRight,
+  Award, Gauge, AlertTriangle, Clock,
   ThumbsUp, Target, Globe, Lightbulb,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
@@ -222,23 +222,18 @@ const INPUT_STYLE: React.CSSProperties = {
  *   button. The `seedKey` rev token forces the textarea to re-seed
  *   even when `seedDraft` happens to repeat (re-sending the same
  *   draft a second time should still work).
- * - `onPushFeedbackToLab` is called with a packaged feedback string
- *   when the operator hits the "Send feedback to Writing Lab"
- *   button below the review output. The parent then pipes that into
- *   Writing Lab's revise instructions + switches tabs.
  * - `onBeforeRun` fires the moment the operator clicks Run, BEFORE
  *   the SSE stream opens. Lets the host page flip the column layout
  *   (collapse left / expand right) so the streaming review letter
  *   has the most reading space. No-op when omitted.
  */
 type PaperReviewPanelProps = {
-  seedDraft?:           string | null;
-  seedKey?:             number;
-  onPushFeedbackToLab?: (feedback: string) => void;
-  onBeforeRun?:         () => void;
+  seedDraft?:   string | null;
+  seedKey?:     number;
+  onBeforeRun?: () => void;
 };
 
-export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBeforeRun }: PaperReviewPanelProps = {}) {
+export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperReviewPanelProps = {}) {
   const [paperText,    setPaperText]    = useState("");
   const [contextHint,  setContextHint]  = useState("");
   const [draftType,    setDraftType]    = useState("auto");
@@ -817,11 +812,6 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBe
         <div>
           <div className="flex flex-nowrap items-center gap-2 mb-2 overflow-hidden">
             <span className="shrink min-w-0 truncate text-sm font-semibold" style={{ color: "var(--ats-fg-primary)" }}>Review letter</span>
-            {/* "Send feedback to Writing Lab" lives as a big CTA bar
-                directly below the review letter (see further down) —
-                that's the primary discovery surface, on visual par
-                with the Lab's "Send to Paper Review" button. The
-                header keeps just Copy for the quick instant action. */}
             <button
               onClick={async () => {
                 try {
@@ -872,40 +862,6 @@ export function PaperReviewPanel({ seedDraft, seedKey, onPushFeedbackToLab, onBe
             <ReactMarkdown>{result}</ReactMarkdown>
             {generating && <span className="inline-block ml-0.5 h-4 w-0.5 rounded-sm animate-pulse align-text-bottom" style={{ backgroundColor: "var(--ats-fg-accent)" }} />}
           </div>
-
-          {/* ── Send feedback to Writing Lab — primary closed-loop CTA ─
-              Same visual weight as the Writing Lab's "Send to Paper
-              Review for critique" button (full-width, rounded-xl
-              px-4 py-3, font-bold, accent fill) so the bidirectional
-              loop reads symmetrically. Only rendered when the parent
-              passed onPushFeedbackToLab — standalone mounts of the
-              panel still work without it. Hidden during the
-              streaming pass since shipping a half-formed review's
-              feedback would be misleading. */}
-          {onPushFeedbackToLab && !generating && result && (
-            <button
-              onClick={() => {
-                const issues = bundle?.crosscheck?.top_issues ?? [];
-                let packaged = "";
-                if (issues.length > 0) {
-                  packaged = "Apply these revisions, ordered by priority:\n\n"
-                    + issues.map((it, i) => `${i + 1}. ${it.title}: ${it.suggestion || it.problem}`).join("\n\n")
-                    + "\n\nFull review letter for context:\n\n"
-                    + result;
-                } else {
-                  packaged = "Apply the revisions below (from a Paper Review pass):\n\n" + result;
-                }
-                onPushFeedbackToLab(packaged);
-              }}
-              title="Drop this review's top issues into Writing Lab's Deep Revise box, switch back to Writing Lab"
-              className="mt-3 relative w-full rounded-xl px-4 py-3 text-sm font-bold transition-all overflow-hidden bg-violet-600 text-white hover:bg-violet-500"
-            >
-              <span className="flex items-center justify-center gap-2">
-                Send feedback to Writing Lab
-                <ArrowRight size={16} strokeWidth={2.5} />
-              </span>
-            </button>
-          )}
         </div>
       )}
 

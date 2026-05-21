@@ -1904,21 +1904,16 @@ function DesktopWorkspace() {
   // peer-review one.
   const [labModule, setLabModule] = useState<"synthesis" | "review">("synthesis");
 
-  // ── Closed loop: Writing Lab ↔ Paper Review ─────────────────────────────
-  // Three new affordances bridge the two right-panel tabs without
-  // copy/paste:
+  // ── Writing Lab → Paper Review hand-off ─────────────────────────────────
+  // Two affordances bridge the two right-panel tabs without copy/paste:
   //   1. Writing Lab "Send to Paper Review" — pushes the generated text
   //      into the Paper Review draft input via the seedDraft prop +
   //      flips labModule to "review".
-  //   2. Paper Review "Send feedback to Writing Lab" — packages the
-  //      review's top issues + letter into a revision-instruction
-  //      string, drops it in `labReviseInstructions`, flips labModule
-  //      back to "synthesis".
-  //   3. Writing Lab "Deep revise" — single-LLM-pass that takes the
-  //      current displayed text + labReviseInstructions and streams a
-  //      revised version through /api/forge/revise. Replaces
-  //      labResult with the revised version. The revised text is then
-  //      eligible for #1 again, closing the loop.
+  //   2. Writing Lab "Deep revise" — single-LLM-pass that takes the
+  //      current displayed text + labReviseInstructions (operator-typed)
+  //      and streams a revised version through /api/forge/revise.
+  //      Replaces labResult with the revised version, which is then
+  //      eligible for #1 again.
   // seedKey is a rev token that bumps each time we push a draft into
   // Paper Review so PaperReviewPanel's seeding effect re-fires even
   // when the same string is sent twice.
@@ -1957,12 +1952,6 @@ function DesktopWorkspace() {
   const [labReviseDiff,     setLabReviseDiff]     = useState<DiffSegment[] | null>(null);
   const [labReviseShowDiff, setLabReviseShowDiff] = useState<boolean>(true);
   const labReviseAbortRef = useRef<AbortController | null>(null);
-  // Ref on the Deep Revise textarea so the Paper Review → Writing Lab
-  // hand-off can scroll the operator straight to the instructions box
-  // (otherwise they land on the Writing Lab tab and the box is below
-  // the article body, easy to miss). focus() also fires so the cursor
-  // is parked ready for edits.
-  const labReviseTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Ref on the article body container so post-Re-revise we can scroll
   // the diff banner + revised draft into view. Without this, after a
   // long Re-revise pass the user is still scrolled near the textarea
@@ -4338,40 +4327,6 @@ ${html}
     // this reason: same column geometry, no module override.
     snapToWritingFocusKeepingTab();
   }, [snapToWritingFocusKeepingTab]);
-
-  /** Receive packaged feedback from Paper Review and pipe it into Writing
-   *  Lab's Deep Revise instructions field, then flip back to synthesis
-   *  tab AND scroll/focus the textarea so the operator lands directly
-   *  on the input — without this the user arrives in Writing Lab but
-   *  the Deep Revise box is below a long generated article and gets
-   *  missed. Scroll-into-view runs after a paint tick so the panel's
-   *  visibility flip has actually committed before we measure. */
-  const handleFeedbackToWritingLab = useCallback((feedback: string) => {
-    setLabReviseInstructions(feedback || "");
-    setLabReviseError("");
-    setLabModule("synthesis");
-    // Defensive: ensure the right panel is open before the scroll
-    // attempt. The Paper Review panel was just visible (since the
-    // user is clicking from inside it), but a parallel layout-mode
-    // toggle could have collapsed analyticsVisible since then —
-    // setting it true again is idempotent and guarantees the
-    // textarea is mounted and reachable.
-    setAnalyticsVisible(true);
-    // Two animation frames: first lets React commit the labModule swap
-    // (Writing Lab tab becomes visible); the second lets the layout
-    // settle so getBoundingClientRect inside scrollIntoView is correct.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const el = labReviseTextareaRef.current;
-        if (!el) return;
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        // Slight delay before focus so the smooth scroll isn't fighting
-        // the browser's auto-scroll-to-focused-element. 350 ms covers
-        // the scroll animation comfortably.
-        window.setTimeout(() => { try { el.focus({ preventScroll: true }); } catch { /* old browsers */ } }, 350);
-      });
-    });
-  }, []);
 
   /** Single-pass deep revise. Streams /api/forge/revise SSE: token frames
    *  go to labResult; status frames to a small status state; errors to
@@ -7399,7 +7354,6 @@ ${html}
                   <PaperReviewPanel
                     seedDraft={reviewSeedDraft}
                     seedKey={reviewSeedKey}
-                    onPushFeedbackToLab={handleFeedbackToWritingLab}
                     onBeforeRun={snapToWritingFocusKeepingTab}
                   />
                 </ErrorBoundary>
@@ -8223,21 +8177,13 @@ ${html}
                         </button>
                       )}
 
-                      {/* ── Deep Revise — closes the Lab ↔ Review loop ─────
-                          Single-LLM-pass revision of the displayed text
-                          per the operator-supplied instructions. Two
-                          common entry paths:
-                            (a) operator types their own notes into the
-                                textarea and hits Apply
-                            (b) Paper Review's "Send feedback to Writing
-                                Lab" button just dropped a packaged review
-                                into labReviseInstructions; the textarea
-                                renders pre-filled.
-                          On success the revised output replaces labResult
-                          via the SSE chunk handler in handleDeepRevise,
-                          so the existing Generated Text block above
-                          renders the new version with the same Send
-                          to Paper Review / Copy chrome — the user can
+                      {/* ── Deep Revise — single-LLM-pass revision of the
+                          displayed text per the operator-supplied
+                          instructions. On success the revised output
+                          replaces labResult via the SSE chunk handler in
+                          handleDeepRevise, so the existing Generated Text
+                          block above renders the new version with the same
+                          Send to Paper Review / Copy chrome — the user can
                           immediately fire another review cycle. Only
                           mounted after a labResult exists, so the
                           empty-state of Writing Lab isn't crowded with
@@ -8254,7 +8200,6 @@ ${html}
                             <span className="text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>edit the draft above with focused instructions</span>
                           </div>
                           <textarea
-                            ref={labReviseTextareaRef}
                             value={labReviseInstructions}
                             onChange={(e) => setLabReviseInstructions(e.target.value)}
                             disabled={labReviseRunning}
@@ -8268,11 +8213,10 @@ ${html}
                             }}
                           />
                           {/* Primary CTA — same visual rank as
-                              "Send to Paper Review" / "Send feedback to
-                              Writing Lab". Violet to mirror the Generate
-                              button: this IS the regenerate action,
-                              steered by the operator's (or Paper
-                              Review's) feedback notes. */}
+                              "Send to Paper Review". Violet to mirror the
+                              Generate button: this IS the regenerate
+                              action, steered by the operator's feedback
+                              notes. */}
                           <button
                             onClick={handleDeepRevise}
                             disabled={labReviseRunning || !labReviseInstructions.trim() || !labResult}
@@ -8308,7 +8252,7 @@ ${html}
                               }}
                             >Clear</button>
                             <span className="ml-auto text-[10px] italic" style={{ color: "var(--ats-fg-muted)" }}>
-                              Iterate: revise → Send to Paper Review → review → Send feedback to Writing Lab
+                              Iterate: revise → Send to Paper Review → review
                             </span>
                           </div>
                           {labReviseError && (
