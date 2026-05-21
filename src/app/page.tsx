@@ -3996,26 +3996,17 @@ ${html}
     if (isGuest) {
       const remaining = isFast ? guestQuickRemaining : guestCuratedRemaining;
       if (remaining <= 0) {
-        // Auto-pop cooldown: a guest who hits the cap and then keeps
-        // clicking Search would otherwise see the same upsell modal on
-        // EVERY click. We auto-show it on the first hit, record the
-        // timestamp, and suppress for SIGN_IN_NUDGE_COOLDOWN_MS after.
-        // Within the cooldown the search still short-circuits (return)
-        // — quota is still 0 — but the user isn't repeatedly nagged.
-        // The avatar pill stays a one-click manual opener for users
-        // who DO want to sign in. Cooldown resets on successful sign-in
-        // (the modal's localStorage key is scoped to the guest device).
-        const SIGN_IN_NUDGE_COOLDOWN_MS = 4 * 60 * 60 * 1000;  // 4 hours
-        let lastShownAt = 0;
-        try {
-          const raw = localStorage.getItem("ats-guest-exhausted-shown-at");
-          if (raw) lastShownAt = Number(raw) || 0;
-        } catch { /* ignore */ }
-        const elapsed = Date.now() - lastShownAt;
-        if (elapsed >= SIGN_IN_NUDGE_COOLDOWN_MS) {
-          setGuestExhaustedOpen(true);
-          try { localStorage.setItem("ats-guest-exhausted-shown-at", String(Date.now())); } catch { /* ignore */ }
-        }
+        // Out of guest credits — always pop the modal on a user-
+        // initiated click. The previous version had a 4-hour silent
+        // cooldown to avoid spamming the upsell, but combined with
+        // auto-guest-signin that made the Quick button "do nothing" for
+        // any visitor whose device had hit the cap in a prior session
+        // (the silent return path swallowed the click without any
+        // visual feedback). Daily UTC reset in guest-quota-store.ts
+        // covers the "back next day" case; this just makes sure that
+        // until reset crosses, the user sees WHY their click didn't
+        // run a search.
+        setGuestExhaustedOpen(true);
         return;
       }
     }

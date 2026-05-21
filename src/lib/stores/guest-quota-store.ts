@@ -28,16 +28,14 @@
 import { create } from "zustand";
 import { fetchWithApiFallback } from "@/lib/api";
 
-/** Compile-time default — used until the server-sourced value arrives,
- *  and as the fallback for SSR / offline / fetch-failure paths.
- *  Mirrors backend TIER_LIMITS["anonymous"] in quota.py: bumped from
- *  3 → 8 on 2026-04-30 so unsigned visitors can take a proper test
- *  drive before the sign-in gate fires. */
-export const GUEST_QUICK_MAX   = 8;
-/** Compile-time default — mirrors backend TIER_LIMITS["anonymous"]
- *  deep_search: bumped from 1 → 3 on 2026-04-30 so guests can compare
- *  Quick vs Deep on a couple of topics before being asked to sign in. */
-export const GUEST_CURATED_MAX = 3;
+/** Compile-time default — used until the server-sourced value
+ *  arrives, and as the fallback for SSR / offline / fetch-failure
+ *  paths. Mirrors backend TIER_LIMITS["anonymous"]["quick_search"] in
+ *  quota.py; KEEP IN SYNC when bumping either side. */
+export const GUEST_QUICK_MAX   = 12;
+/** Compile-time default — mirrors backend
+ *  TIER_LIMITS["anonymous"]["deep_search"] in quota.py. */
+export const GUEST_CURATED_MAX = 4;
 
 const STORAGE_KEY = "ats-guest-quota-v1";
 
@@ -75,12 +73,21 @@ type GuestQuotaState = {
   reset: () => void;
 };
 
+/** Today's date in UTC, formatted YYYY-MM-DD. The backend's quota
+ *  buckets reset at 00:00 UTC, so we mirror that exact boundary on the
+ *  client — a guest who has burned their counter yesterday should get a
+ *  fresh allowance the moment UTC midnight crosses, NOT the next
+ *  device-local midnight. */
+function _utcDateKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function _persist(quickUsed: number, curatedUsed: number): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ quickUsed, curatedUsed }),
+      JSON.stringify({ quickUsed, curatedUsed, day: _utcDateKey() }),
     );
   } catch { /* quota / privacy mode — ignore */ }
 }
@@ -102,6 +109,25 @@ export const useGuestQuotaStore = create<GuestQuotaState>((set, get) => ({
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
+        // Daily UTC reset — if the persisted counters are from a
+        // previous UTC day, drop them. The backend quota buckets reset
+        // at 00:00 UTC and previously the client store had no matching
+        // reset path, so a device that exhausted its allowance on Day N
+        // stayed at "0 remaining" indefinitely — Day N+1 visitors
+        // (or returning ones) couldn't search at all. Silent-cap bug:
+        // the search button "did nothing" because the exhaust-modal had
+        // its own cooldown (see page.tsx). We now reset counters every
+        // UTC day so the local store stays in sync with the server.
+        const today = _utcDateKey();
+        const persistedDay = typeof parsed?.day === "string" ? parsed.day : "";
+        if (persistedDay && persistedDay !== today) {
+          // Stale — wipe counters but preserve hydrated state. Persist
+          // the fresh zeroed value so a subsequent crash / hydrate
+          // doesn't re-trigger the same reset (idempotent).
+          _persist(0, 0);
+          set({ quickUsed: 0, curatedUsed: 0, hydrated: true });
+          return;
+        }
         set({
           quickUsed:   Number.isFinite(parsed?.quickUsed)   ? Math.max(0, parsed.quickUsed)   : 0,
           curatedUsed: Number.isFinite(parsed?.curatedUsed) ? Math.max(0, parsed.curatedUsed) : 0,
