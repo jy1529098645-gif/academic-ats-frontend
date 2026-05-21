@@ -1142,11 +1142,23 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
             </div>
           )}
 
-          {/* Per-specialist breakdown */}
+          {/* Per-specialist breakdown.  Each row is a native <details>
+              element; the default disclosure triangle is stripped
+              (list-none) so we draw our own — a rotating ChevronRight
+              that flips to ChevronDown via the group-open variant when
+              the row expands.  The header line also picks up a "tap to
+              expand" hint plus a hover tint on each row so it reads as
+              interactive at a glance; without those cues users were
+              missing the disclosure entirely and never seeing the
+              detailed lens-by-lens feedback. */}
           {Object.keys(reviews).length > 0 && (
             <div className="pt-1 border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
-              <div className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-accent)" }}>
-                <Bot size={10} />One review per angle
+              <div className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-accent)" }}>
+                <Bot size={10} />
+                <span>One review per angle</span>
+                <span className="font-normal normal-case tracking-normal text-[10px] ml-1" style={{ color: "var(--ats-fg-muted)" }}>
+                  — tap any row to expand
+                </span>
               </div>
               <div className="space-y-1.5">
                 {Object.entries(reviews).map(([key, r]) => {
@@ -1154,13 +1166,25 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
                   return (
                     <details
                       key={key}
-                      className="rounded-lg border px-2.5 py-1.5 group"
+                      className="rounded-lg border px-2.5 py-1.5 group transition-colors hover:border-[var(--ats-border-accent)]"
                       style={{
                         borderColor:     "var(--ats-border-subtle)",
                         backgroundColor: "var(--ats-bg-input)",
                       }}
                     >
-                      <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
+                      <summary
+                        className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold select-none"
+                        style={{ color: "var(--ats-fg-primary)" }}
+                      >
+                        {/* Custom disclosure caret.  Rotates 90° on
+                            open via group-open variant; the parent
+                            <details> already carries the `group`
+                            class so the variant resolves. */}
+                        <ChevronRight
+                          size={12}
+                          className="shrink-0 transition-transform group-open:rotate-90"
+                          style={{ color: "var(--ats-fg-muted)" }}
+                        />
                         <span className="capitalize flex-1">{key}</span>
                         <span
                           className="shrink-0 inline-flex items-center rounded border px-1 text-[9px] font-bold uppercase tracking-wider"
