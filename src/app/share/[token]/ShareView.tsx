@@ -37,8 +37,17 @@ export type SharedBrief = {
 
 export default function ShareView({ data }: { data: SharedBrief }) {
   const created = data.created_at ? new Date(data.created_at) : null;
+  // The root layout (app/layout.tsx) sets `body { overflow: hidden; flex
+  // flex-col; h-full }` to give the desktop workspace a fixed-viewport
+  // SPA shell with its own internal scroll panes. That's wrong for
+  // the share page, which is a long-form static article that needs
+  // normal document scroll. The fix: take the parent's full height as
+  // a flex child (h-full inside the flex-col body) and own our own
+  // overflow-y so the article scrolls inside this element instead of
+  // requiring the body to scroll. We DON'T mutate document.body style
+  // — that would leak into a back-navigation to the workspace.
   return (
-    <main className="min-h-screen bg-slate-50 text-slate-900">
+    <main className="h-full overflow-y-auto bg-slate-50 text-slate-900">
       {/* Header ribbon — minimal brand pill + "Shared brief" badge so
           the recipient knows this is a curated artefact, not the
           interactive app.  The Try-the-app link sits in the corner so
