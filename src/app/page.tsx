@@ -6,7 +6,17 @@ import {
   useMemo, useRef, useState,
 } from "react";
 import { useRouter } from "next/navigation";
-import { PaperCharts } from "./charts";
+import dynamic from "next/dynamic";
+// Heavy panels — code-split via next/dynamic so the desktop bundle
+// doesn't ship the mobile / Review / Charts / EvidenceChain trees up-
+// front. Each chunk loads only when the panel actually renders. Without
+// this every cold visitor downloads ~22k lines of TSX (mobile tree +
+// PaperReviewPanel + react-markdown + lucide barrel) on first paint —
+// catastrophic for first-impression LCP, which is the metric引流 traffic
+// is most sensitive to. ssr:false on MobileApp because the mobile/desktop
+// split is decided by a client-only matchMedia hook (useIsMobile); an
+// SSR pass of MobileApp would just be a wasted placeholder.
+const PaperCharts        = dynamic(() => import("./charts").then(m => m.PaperCharts), { ssr: true });
 import { supabase } from "@/lib/supabase/client";
 import { WORKSPACE_PLACEHOLDERS } from "@/lib/workspace-placeholders";
 import { Sprite, type SpriteHandle } from "@/components/sprite/Sprite";
@@ -33,7 +43,7 @@ import {
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import OnboardingTour, { type TourStep } from "@/components/onboarding/OnboardingTour";
-import PaperEvidenceChain from "@/components/evidence-chain/PaperEvidenceChain";
+const PaperEvidenceChain = dynamic(() => import("@/components/evidence-chain/PaperEvidenceChain"), { ssr: true });
 import UserNotificationPopup from "@/components/UserNotificationPopup";
 import { useUserNotifications } from "@/lib/hooks/use-user-notifications";
 import {
@@ -55,10 +65,10 @@ import {
 } from "@/components/header/AnnouncementBanner";
 import { useAnnouncements } from "@/lib/hooks/use-announcements";
 import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
-import { PaperReviewPanel } from "@/components/lab/PaperReviewPanel";
+const PaperReviewPanel   = dynamic(() => import("@/components/lab/PaperReviewPanel").then(m => m.PaperReviewPanel), { ssr: true });
 import { TOS_SECTIONS, TOS_VERSION, APP_VERSION } from "@/lib/tos-content";
 import { useIsMobile } from "@/lib/hooks/use-is-mobile";
-import MobileApp from "@/components/mobile/MobileApp";
+const MobileApp          = dynamic(() => import("@/components/mobile/MobileApp"), { ssr: false });
 import type { Paper, WorkflowItem } from "@/lib/types";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
@@ -2020,6 +2030,14 @@ function DesktopWorkspace() {
   const [labAgentLog,   setLabAgentLog]   = useState<{name: string; msg: string; done: boolean; error: boolean; revision: boolean}[]>([]);
   const [labDownloadFormat, setLabDownloadFormat] = useState<"pdf"|"html"|"txt"|"md">("pdf");
   const [briefDownloadFmt, setBriefDownloadFmt]   = useState<"pdf"|"html"|"txt"|"md">("pdf");
+  // Share button — mints a public token via POST /api/history/{id}/share
+  // and copies the resulting /share/<token> URL to clipboard. shareBusy
+  // suppresses double-clicks while the round-trip is in flight;
+  // shareCopied flashes a "Link copied" state for 1.8 s so the user
+  // gets visual confirmation without a separate toast system.
+  const [shareBusy,   setShareBusy]   = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [shareError,  setShareError]  = useState("");
 
   // (Brief translation feature removed 2026-04-28. The in-app LLM
   // translate button + 11-language picker were dropped before public
@@ -2080,7 +2098,13 @@ function DesktopWorkspace() {
   // ticker feed (REST seed + Supabase Realtime INSERT subscription) and
   // the daily recommended-term chips both fire only after auth resolves.
   const announcementsFeed = useAnnouncements(!!authUser);
-  const { terms: recommendedTerms, source: recommendedTermsSource, sourceUrl: recommendedTermsSourceUrl } = useRecommendedTerms(!!authUser);
+  // Recommended chips: endpoint is public, so fire the fetch unconditionally
+  // instead of gating on auth. The fallback pool already renders pre-fetch
+  // via the hook's lazy initializer, so cold visitors see SOME chips even
+  // during the brief window before /api/workspace/recommended-terms returns
+  // the curated daily picks — but firing the request immediately gets us
+  // to the curated set ~500ms sooner.
+  const { terms: recommendedTerms, source: recommendedTermsSource, sourceUrl: recommendedTermsSourceUrl } = useRecommendedTerms(true);
   // ── Anonymous-guest mode ────────────────────────────────────────────────
   // Anonymous (Supabase `is_anonymous`) sessions get a strictly bounded
   // trial: GUEST_QUICK_MAX Quick + GUEST_CURATED_MAX Curated runs per
@@ -2110,6 +2134,29 @@ function DesktopWorkspace() {
   })();
   // Sign-in popup that takes over once a guest exhausts their cap.
   const [guestExhaustedOpen,  setGuestExhaustedOpen]  = useState(false);
+  // Auto-guest-signin state. Cold visitors used to land on a hard sign-in
+  // wall before they saw the product — biggest funnel drop measured. The
+  // page now silently calls signInAnonymously() on first paint so the
+  // visitor walks straight into a working workspace; the sign-in modal
+  // only renders as a FALLBACK if that anonymous call failed (e.g. the
+  // Supabase project has the anonymous provider disabled).
+  const [guestAutoSignInAttempted, setGuestAutoSignInAttempted] = useState(false);
+  // Non-blocking corner nudge that replaces the old full-screen modal
+  // for guests already in a session. Dismissal is sessionStorage-backed
+  // so it doesn't keep reappearing within a single visit but DOES come
+  // back on the next session (the nudge is the conversion hook; we
+  // don't want a one-time click to silence it permanently).
+  const SIGNIN_NUDGE_KEY = "ats:signin-nudge-dismissed";
+  const [signInNudgeDismissed, setSignInNudgeDismissed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try { return window.sessionStorage.getItem(SIGNIN_NUDGE_KEY) === "1"; }
+    catch { return false; }
+  });
+  const dismissSignInNudge = useCallback(() => {
+    setSignInNudgeDismissed(true);
+    try { window.sessionStorage.setItem(SIGNIN_NUDGE_KEY, "1"); }
+    catch { /* private mode / quota — best-effort */ }
+  }, []);
   // First-run welcome modal. Shows once per browser (localStorage flag).
   // Re-openable from the Help panel (look for `setWelcomeOpen(true)`
   // wired into the "Show welcome guide" link further down). Default
@@ -2367,6 +2414,33 @@ function DesktopWorkspace() {
       setGuestSignInBusy(false);
     }
   };
+
+  // Auto-guest-signin: as soon as auth resolves and there's no signed-in
+  // user, fire signInAnonymously() so the visitor walks straight into a
+  // working workspace. Without this, every cold visitor sees a
+  // full-screen sign-in wall before they see the product — biggest
+  // measured funnel drop. `guestAutoSignInAttempted` flips to true
+  // regardless of outcome so the fallback modal can decide whether to
+  // render (it only shows after we tried and failed).
+  //
+  // The dependency list deliberately excludes handleGuestSignIn / setters
+  // (handleGuestSignIn is recreated each render; including it would
+  // re-fire the effect every render which then re-triggers the auth
+  // state change and so on). The auth flags fully describe when we
+  // should act.
+  useEffect(() => {
+    if (authLoading || authUser || guestAutoSignInAttempted) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await handleGuestSignIn();
+      } finally {
+        if (!cancelled) setGuestAutoSignInAttempted(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, authUser, guestAutoSignInAttempted]);
 
   // ── Multi-session session-cache ─────────────────────────────────────────
   // Supabase only keeps ONE active session at a time — signing into
@@ -3467,6 +3541,49 @@ function DesktopWorkspace() {
   }
 
   const isStreamingBrief = isSubmitting && briefStreamText.length > 0;
+
+  // Share button handler — mints a public token for the currently
+  // displayed brief and copies the /share/<token> URL. Bails when
+  // activeHistoryId is a synthetic `pending-…` placeholder (the cloud
+  // row hasn't resolved yet — see the SSE result handler that promotes
+  // pending IDs to real UUIDs once the server-side history write
+  // succeeds). Anonymous users can't share because the backend mint
+  // endpoint requires auth on the history row, which doesn't exist
+  // until the row is persisted to their (anonymous) user_id; we still
+  // let them try and surface the backend's error if so.
+  const handleShareBrief = useCallback(async () => {
+    if (shareBusy) return;
+    if (!activeHistoryId || activeHistoryId.startsWith("pending-")) {
+      setShareError("Brief is still saving — try again in a moment.");
+      window.setTimeout(() => setShareError(""), 2500);
+      return;
+    }
+    setShareBusy(true);
+    setShareError("");
+    try {
+      const res = await fetchWithAuth(
+        buildApiUrl(`/api/history/${activeHistoryId}/share`),
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = await res.json() as { share_token?: string };
+      const token = data?.share_token;
+      if (!token) throw new Error("missing token");
+      const url = `${window.location.origin}/share/${token}`;
+      try { await navigator.clipboard.writeText(url); }
+      catch { /* clipboard blocked — the URL is still in the response, but we can't recover gracefully without a prompt UI; skip */ }
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 1800);
+    } catch (e) {
+      setShareError(e instanceof Error ? e.message : "Failed to share");
+      window.setTimeout(() => setShareError(""), 3000);
+    } finally {
+      setShareBusy(false);
+    }
+  }, [shareBusy, activeHistoryId]);
+
   // Once SSE brief chunks arrive (version > 0), trust only the streamed text.
   // result?.brief is only a valid fallback for history restores (briefVersionRef stays 0).
   const researchBriefMarkdown = formatBriefAsMarkdown(
@@ -4928,7 +5045,12 @@ ${html}
           the only interactive element is the "Continue with Google"
           button in the card. Disappears immediately when authUser
           becomes non-null (via onAuthStateChange). */}
-      {!authLoading && !authUser && (
+      {/* Fallback gate — only renders when the auto-guest-signin above
+          failed (anonymous provider disabled in Supabase, network error,
+          etc.). In the happy path the visitor never sees this modal;
+          they land directly in a guest session with the corner nudge
+          (below) reminding them sign-in unlocks more. */}
+      {!authLoading && !authUser && guestAutoSignInAttempted && (
         <div
           className="fixed inset-0 z-[9400] flex items-center justify-center p-6 backdrop-blur-sm"
           style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
@@ -5106,6 +5228,63 @@ ${html}
               <button onClick={() => setUserPanel("legal")} className="underline hover:opacity-80">Terms & Notices</button>.
             </p>
           </div>
+        </div>
+      )}
+
+      {/* ── Sign-in nudge (non-blocking corner card) ──────────────────────
+          Replaces the old full-screen modal for guests who are already
+          in an anonymous session. Floats in the bottom-right, doesn't
+          block any interaction, dismissible via the close button
+          (sessionStorage — comes back next visit). The Google sign-in
+          button is the only CTA; we don't want this competing with the
+          product itself for attention, just a persistent affordance.
+          Hidden once the user signs in for real OR if they explicitly
+          dismissed it this session. */}
+      {!authLoading && isGuest && !signInNudgeDismissed && (
+        <div
+          className="fixed bottom-4 right-4 z-[90] w-[280px] rounded-xl border shadow-lg p-3"
+          style={{
+            borderColor:     "var(--ats-border-subtle)",
+            backgroundColor: "var(--ats-bg-panel)",
+          }}
+          role="region"
+          aria-label="Sign-in suggestion"
+        >
+          <button
+            type="button"
+            onClick={dismissSignInNudge}
+            aria-label="Dismiss"
+            className="absolute top-2 right-2 inline-flex items-center justify-center rounded-md p-1 transition-colors hover:bg-[var(--ats-bg-base)]"
+            style={{ color: "var(--ats-fg-muted)" }}
+          >
+            <X size={12} strokeWidth={2.5} />
+          </button>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Zap size={12} strokeWidth={2.5} style={{ color: "var(--ats-fg-accent)" }} />
+            <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-accent)" }}>
+              Sign in for more
+            </span>
+          </div>
+          <p className="text-[11px] leading-snug mb-2" style={{ color: "var(--ats-fg-secondary)" }}>
+            Save your history, keep work synced across devices, and unlock more daily quota.
+          </p>
+          <button
+            onClick={handleGoogleLogin}
+            className="w-full flex items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold hover:brightness-105 transition-all"
+            style={{
+              borderColor:     "var(--ats-border-subtle)",
+              backgroundColor: "var(--ats-bg-base)",
+              color:           "var(--ats-fg-primary)",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 48 48" fill="none">
+              <path d="M43.6 20.5H42V20H24v8h11.3C33.7 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20c11 0 20-9 20-20 0-1.2-.1-2.4-.4-3.5z" fill="#FFC107"/>
+              <path d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 7.9 3l5.7-5.7C34.5 6.5 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" fill="#FF3D00"/>
+              <path d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.9 26.9 36 24 36c-5.3 0-9.7-3.4-11.3-8H6.1C9.4 35.6 16.2 44 24 44z" fill="#4CAF50"/>
+              <path d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.5 5.5C41.7 36.2 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z" fill="#1976D2"/>
+            </svg>
+            Continue with Google
+          </button>
         </div>
       )}
 
@@ -5802,6 +5981,33 @@ ${html}
                           ><ClipboardList size={13} className="shrink-0" /><span className="truncate">
                             Copy Brief
                           </span></button>
+                          {/* Share — mints a public token + copies the
+                              /share/<token> URL.  Cheapest acquisition
+                              channel a research tool has is "look what
+                              this gave me" pasted into a group chat;
+                              this is the button that powers it.  Hidden
+                              when the cloud history row hasn't resolved
+                              yet (pending- prefix) so we don't surface
+                              a button that immediately errors. */}
+                          {activeHistoryId && !activeHistoryId.startsWith("pending-") && (
+                            <button
+                              onClick={() => void handleShareBrief()}
+                              disabled={shareBusy}
+                              title={shareError || "Get a public link to this brief"}
+                              className={`shrink min-w-0 inline-flex items-center gap-1 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors disabled:cursor-wait ${
+                                shareCopied
+                                  ? "border-emerald-500/60 text-emerald-300"
+                                  : shareError
+                                    ? "border-rose-500/60 text-rose-300"
+                                    : "border-slate-600 text-slate-400 hover:text-violet-300 hover:border-violet-500/50"
+                              }`}
+                            >
+                              <LinkIcon size={13} className="shrink-0" />
+                              <span className="truncate">
+                                {shareBusy ? "Linking…" : shareCopied ? "Link copied" : shareError ? "Try again" : "Share"}
+                              </span>
+                            </button>
+                          )}
                           <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
                             <select
                               value={briefDownloadFmt}
