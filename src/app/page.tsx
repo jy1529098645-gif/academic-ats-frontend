@@ -68,7 +68,10 @@ import { useRecommendedTerms } from "@/lib/hooks/use-recommended-terms";
 const PaperReviewPanel   = dynamic(() => import("@/components/lab/PaperReviewPanel").then(m => m.PaperReviewPanel), { ssr: true });
 import { TOS_SECTIONS, TOS_VERSION, APP_VERSION } from "@/lib/tos-content";
 import { useIsMobile } from "@/lib/hooks/use-is-mobile";
-const MobileApp          = dynamic(() => import("@/components/mobile/MobileApp"), { ssr: false });
+// MobileApp removed: narrow viewports now get the lightweight
+// <MobileNotSupported /> landing instead.  Deleting the import drops
+// the entire mobile chunk from the build graph rather than leaving it
+// in a no-op dynamic ref.
 import type { Paper, WorkflowItem } from "@/lib/types";
 import {
   FileText, BarChart2, LayoutGrid, Brain, Compass, Search, Rocket,
@@ -1179,15 +1182,61 @@ export default function HomePage() {
   // have finer-grained boundaries around Brief, Workspace, Synthesis
   // Lab, and Paper Review; this one is the safety net for everything
   // else (header, nav, modals).
-  if (isMobile) return (
-    <ErrorBoundary label="Mobile workspace">
-      <MobileApp />
-    </ErrorBoundary>
-  );
+  // Mobile is intentionally NOT supported in the public-beta version
+  // (the surface area was too large to ship a quality mobile experience
+  // on the same timeline as desktop).  Phone / narrow-tablet visitors
+  // see a brief "open on a laptop" landing card instead of a broken
+  // mobile tree.  When the advanced version arrives with proper mobile
+  // support, this branch flips back to render a real component.
+  if (isMobile) return <MobileNotSupported />;
   return (
     <ErrorBoundary label="Desktop workspace">
       <DesktopWorkspace />
     </ErrorBoundary>
+  );
+}
+
+/** Lightweight landing for narrow viewports — clean brand mark, a
+ *  one-line explanation, and a "copy this link" affordance so the
+ *  visitor can fire it from their laptop instead. No dependency on
+ *  any of the heavy desktop chunks. */
+function MobileNotSupported() {
+  const [copied, setCopied] = useState(false);
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch { /* clipboard may be blocked — degrade silently */ }
+  };
+  return (
+    <main className="min-h-[100svh] flex flex-col items-center justify-center px-6 py-12"
+          style={{ backgroundColor: "var(--ats-bg-base)", color: "var(--ats-fg-primary)" }}>
+      <div className="w-full max-w-sm text-center">
+        <div className="mx-auto mb-5 inline-block h-14 w-14 rounded-full"
+             style={{ background: "linear-gradient(135deg, #a78bfa, #60a5fa)" }} />
+        <h1 className="text-2xl font-bold tracking-tight mb-2">AcademiCats</h1>
+        <p className="text-sm leading-relaxed mb-6" style={{ color: "var(--ats-fg-secondary)" }}>
+          AcademiCats is built for a desktop or laptop browser — the
+          search workspace, paper canvas, and writing lab need a wide
+          screen.  Please open this link on a computer.
+        </p>
+        <button
+          onClick={copyLink}
+          className="w-full rounded-xl border px-4 py-3 text-sm font-semibold transition-colors"
+          style={{
+            borderColor:     "var(--ats-border-accent)",
+            backgroundColor: copied ? "var(--ats-bg-accent-soft)" : "var(--ats-bg-panel)",
+            color:           "var(--ats-fg-accent)",
+          }}
+        >
+          {copied ? "Link copied — open on your laptop" : "Copy link"}
+        </button>
+        <p className="text-[11px] mt-6" style={{ color: "var(--ats-fg-muted)" }}>
+          Mobile support is on the roadmap.
+        </p>
+      </div>
+    </main>
   );
 }
 
@@ -5973,32 +6022,52 @@ ${html}
                             Copy Brief
                           </span></button>
                           {/* Share — mints a public token + copies the
-                              /share/<token> URL.  Cheapest acquisition
-                              channel a research tool has is "look what
-                              this gave me" pasted into a group chat;
-                              this is the button that powers it.  Hidden
-                              when the cloud history row hasn't resolved
-                              yet (pending- prefix) so we don't surface
-                              a button that immediately errors. */}
-                          {activeHistoryId && !activeHistoryId.startsWith("pending-") && (
-                            <button
-                              onClick={() => void handleShareBrief()}
-                              disabled={shareBusy}
-                              title={shareError || "Get a public link to this brief"}
-                              className={`shrink min-w-0 inline-flex items-center gap-1 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors disabled:cursor-wait ${
-                                shareCopied
-                                  ? "border-emerald-500/60 text-emerald-300"
-                                  : shareError
-                                    ? "border-rose-500/60 text-rose-300"
-                                    : "border-slate-600 text-slate-400 hover:text-violet-300 hover:border-violet-500/50"
-                              }`}
-                            >
-                              <LinkIcon size={13} className="shrink-0" />
-                              <span className="truncate">
-                                {shareBusy ? "Linking…" : shareCopied ? "Link copied" : shareError ? "Try again" : "Share"}
-                              </span>
-                            </button>
-                          )}
+                              /share/<token> URL.  ALWAYS shown next to
+                              Copy Brief once a brief is on screen, so
+                              the user has a stable place to look for
+                              it.  Previously hidden until the cloud
+                              history row resolved; that meant fresh
+                              searches showed Copy + Download but no
+                              Share until ~2-3 s later, which read as
+                              "the button doesn't exist".  Now we
+                              render the button always and switch to a
+                              disabled "Saving brief…" state while the
+                              row is still in its `pending-` placeholder
+                              phase; clicks during that window surface
+                              a friendly tooltip instead of a 500. */}
+                          {(() => {
+                            const briefSaving = !activeHistoryId || activeHistoryId.startsWith("pending-");
+                            const disabled = shareBusy || briefSaving;
+                            const titleText = briefSaving
+                              ? "Saving your brief — sharing will be available in a moment."
+                              : shareError || "Get a public link to this brief";
+                            const label = shareBusy
+                              ? "Linking…"
+                              : shareCopied
+                                ? "Link copied"
+                                : shareError
+                                  ? "Try again"
+                                  : briefSaving
+                                    ? "Saving…"
+                                    : "Share";
+                            return (
+                              <button
+                                onClick={() => void handleShareBrief()}
+                                disabled={disabled}
+                                title={titleText}
+                                className={`shrink min-w-0 inline-flex items-center gap-1 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                                  shareCopied
+                                    ? "border-emerald-500/60 text-emerald-300"
+                                    : shareError
+                                      ? "border-rose-500/60 text-rose-300"
+                                      : "border-violet-500/40 text-violet-300 hover:text-violet-200 hover:border-violet-400/70"
+                                }`}
+                              >
+                                <LinkIcon size={13} className="shrink-0" />
+                                <span className="truncate">{label}</span>
+                              </button>
+                            );
+                          })()}
                           <div className="flex flex-nowrap items-center gap-1.5 min-w-0">
                             <select
                               value={briefDownloadFmt}
