@@ -32,10 +32,10 @@ import { fetchWithApiFallback } from "@/lib/api";
  *  arrives, and as the fallback for SSR / offline / fetch-failure
  *  paths. Mirrors backend TIER_LIMITS["anonymous"]["quick_search"] in
  *  quota.py; KEEP IN SYNC when bumping either side. */
-export const GUEST_QUICK_MAX   = 12;
+export const GUEST_QUICK_MAX   = 20;
 /** Compile-time default — mirrors backend
  *  TIER_LIMITS["anonymous"]["deep_search"] in quota.py. */
-export const GUEST_CURATED_MAX = 4;
+export const GUEST_CURATED_MAX = 6;
 
 const STORAGE_KEY = "ats-guest-quota-v1";
 
