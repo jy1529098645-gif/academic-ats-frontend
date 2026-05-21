@@ -20,7 +20,13 @@ export function getSupabase() {
 export const supabase = {
   get auth()                                           { return getSupabase().auth },
   channel(name: string, opts?: Parameters<ReturnType<typeof createClient>["channel"]>[1]) {
-    return getSupabase().channel(name, opts as any)
+    // The proxy preserves the lazy-init invariant; passing opts through as-is
+    // would type-check but trips inference because Parameters<…> resolves to a
+    // tuple-typed value rather than the function's actual second parameter.
+    // The explicit cast back to that exact parameter type keeps the call
+    // shape honest without leaking `any` into the public surface.
+    type ChannelOpts = Parameters<ReturnType<typeof createClient>["channel"]>[1];
+    return getSupabase().channel(name, opts as ChannelOpts)
   },
   removeChannel(ch: Parameters<ReturnType<typeof createClient>["removeChannel"]>[0]) {
     return getSupabase().removeChannel(ch)

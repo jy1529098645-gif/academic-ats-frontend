@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import type { User } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
 export default function AppPage() {
-  const [user, setUser] = useState<any>(null)
+  const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const router = useRouter()
 
@@ -23,9 +24,9 @@ export default function AppPage() {
     }
 
     loadUser()
-  }, [])
+  }, [router])
 
-  if (loading) return <div>Loading...</div>
+  if (loading || !user) return <div>Loading...</div>
 
   return (
     <div style={{ padding: 24 }}>

@@ -22,9 +22,10 @@ import {
   Upload, FolderOpen, FileText, Sparkles, Square, Bot,
   ChevronDown, ChevronRight, ClipboardList, Check, X as XIcon, Play,
   Award, Gauge, AlertTriangle, Clock,
-  ThumbsUp, Target, Globe, Lightbulb,
+  ThumbsUp, Target, Globe, Lightbulb, Download,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
+import { downloadBlobAs } from "@/lib/file-download";
 import { track } from "@/lib/analytics";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,7 +137,9 @@ const LANGUAGE_OPTIONS = [
 //   final    — full publication-grade scrutiny.
 //   sketch   — ~2 grades more lenient. An early outline that's on the
 //              right track gets Minor Revision instead of Reject.
-const DRAFT_LEVELS: Array<{ id: "working" | "final" | "sketch"; label: string; blurb: string }> = [
+type DraftLevel = "working" | "final" | "sketch";
+
+const DRAFT_LEVELS: Array<{ id: DraftLevel; label: string; blurb: string }> = [
   { id: "working", label: "Working draft",     blurb: "Default — for in-progress writing." },
   { id: "final",   label: "Final / submitting", blurb: "Strict — publication-grade review." },
   { id: "sketch",  label: "Outline / sketch",  blurb: "Lenient — focus on structure, skip polish." },
@@ -233,27 +236,88 @@ type PaperReviewPanelProps = {
   onBeforeRun?: () => void;
 };
 
+// localStorage cache key — survives panel re-mount across mode switches.
+// Costly outputs (result / bundle / agentLog) AND the user's own input
+// (paperText, contextHint, settings) all persist together so a navigate-
+// away-and-back doesn't wipe a 5 KB pasted draft or evict an LLM result
+// the user paid quota for.
+const PR_CACHE_KEY = "ats:paper-review:v1";
+
+type PRPersisted = {
+  paperText:    string;
+  contextHint:  string;
+  draftType:    string;
+  draftLevel:   DraftLevel;
+  language:     string;
+  fileName:     string;
+  result:       string;
+  bundle:       ReviewBundle | null;
+  agentLog:     AgentLogEntry[];
+};
+
+function _readPRCache(): PRPersisted | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(PR_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as PRPersisted;
+  } catch {
+    return null;
+  }
+}
+
+function _writePRCache(payload: PRPersisted): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PR_CACHE_KEY, JSON.stringify(payload));
+  } catch { /* private mode / quota — drop silently */ }
+}
+
 export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperReviewPanelProps = {}) {
-  const [paperText,    setPaperText]    = useState("");
-  const [contextHint,  setContextHint]  = useState("");
-  const [draftType,    setDraftType]    = useState("auto");
-  const [draftLevel,   setDraftLevel]   = useState<"working" | "final" | "sketch">("working");
-  const [language,     setLanguage]     = useState("English");
-  const [fileName,     setFileName]     = useState("");
+  // Hydrate every persisted field from localStorage once per mount.
+  // The lazy initializer runs synchronously before the first paint so
+  // the user sees their previous review state immediately on a
+  // re-mount. Defaults match the previous fresh-mount values when no
+  // cache exists.
+  const _cached = (typeof window !== "undefined") ? _readPRCache() : null;
+  const [paperText,    setPaperText]    = useState(_cached?.paperText   ?? "");
+  const [contextHint,  setContextHint]  = useState(_cached?.contextHint ?? "");
+  const [draftType,    setDraftType]    = useState(_cached?.draftType   ?? "auto");
+  const [draftLevel,   setDraftLevel]   = useState<DraftLevel>(_cached?.draftLevel ?? "working");
+  const [language,     setLanguage]     = useState(_cached?.language    ?? "English");
+  const [fileName,     setFileName]     = useState(_cached?.fileName    ?? "");
   const [extractBusy,  setExtractBusy]  = useState(false);
   const [extractError, setExtractError] = useState("");
 
   const [generating, setGenerating] = useState(false);
   const [status,     setStatus]     = useState("");
-  const [result,     setResult]     = useState("");
-  const [bundle,     setBundle]     = useState<ReviewBundle | null>(null);
+  const [result,     setResult]     = useState(_cached?.result ?? "");
+  const [bundle,     setBundle]     = useState<ReviewBundle | null>(_cached?.bundle ?? null);
   const [error,      setError]      = useState("");
   // 429 is special: shown as a friendlier callout with a "Sign in" nudge
   // when anonymous. Distinct from `error` so the shape/copy can diverge.
   const [quotaBlocked, setQuotaBlocked] = useState<{ message: string } | null>(null);
-  const [agentLog,   setAgentLog]   = useState<AgentLogEntry[]>([]);
+  const [agentLog,   setAgentLog]   = useState<AgentLogEntry[]>(_cached?.agentLog ?? []);
   const [copied,     setCopied]     = useState(false);
   const [agentLogOpen, setAgentLogOpen] = useState(true);
+
+  // Persist the costly + non-trivial state to localStorage on every
+  // change so a re-mount restores it. Skip the very first render
+  // (the lazy initializers above already loaded the cache; writing it
+  // back on the same tick would be wasteful).
+  const _hasMountedRef = useRef(false);
+  useEffect(() => {
+    if (!_hasMountedRef.current) {
+      _hasMountedRef.current = true;
+      return;
+    }
+    _writePRCache({
+      paperText, contextHint, draftType, draftLevel, language, fileName,
+      result, bundle, agentLog,
+    });
+  }, [paperText, contextHint, draftType, draftLevel, language, fileName, result, bundle, agentLog]);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -436,7 +500,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
       setGenerating(false);
       setStatus("");
     }
-  }, [paperText, contextHint, draftType, language, generating, onBeforeRun]);
+  }, [paperText, contextHint, draftType, draftLevel, language, generating, onBeforeRun]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -543,7 +607,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
         </p>
         <select
           value={draftLevel}
-          onChange={e => setDraftLevel(e.target.value as "working" | "final" | "sketch")}
+          onChange={e => setDraftLevel(e.target.value as DraftLevel)}
           disabled={generating}
           className={`${INPUT_CLS} mt-2`}
           style={INPUT_STYLE}
@@ -805,7 +869,15 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
       )}
 
       {/* ── Scorecard ────────────────────────────────────────────────────── */}
-      {bundle?.scorecard && <ScorecardBlock scorecard={bundle.scorecard} />}
+      {bundle?.scorecard && (
+        <ScorecardBlock
+          scorecard={bundle.scorecard}
+          bundle={bundle}
+          paperText={paperText}
+          draftType={draftType}
+          draftLevel={draftLevel}
+        />
+      )}
 
       {/* ── Review letter ───────────────────────────────────────────────── */}
       {result && (
@@ -872,7 +944,19 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
 }
 
 // ── Scorecard visual block ────────────────────────────────────────────────────
-function ScorecardBlock({ scorecard }: { scorecard: Scorecard }) {
+function ScorecardBlock({
+  scorecard,
+  bundle,
+  paperText,
+  draftType,
+  draftLevel,
+}: {
+  scorecard: Scorecard;
+  bundle?:    ReviewBundle;
+  paperText?: string;
+  draftType?: string;
+  draftLevel?: string;
+}) {
   // Verdict tint is derived from the OVERALL SCORE (see scoreStyle above),
   // not from the verdict string — so a "Major Revision" at 5.8 reads
   // orange while a "Major Revision" at 4.2 reads red. The verdict label
@@ -895,6 +979,24 @@ function ScorecardBlock({ scorecard }: { scorecard: Scorecard }) {
           <span className="font-bold" style={{ color: vs.fg }}>{scorecard.overall_score.toFixed(1)}</span>
           <span>/10</span>
         </span>
+        {/* Download Scorecard report. Builds a print-friendly HTML report
+            of the entire review (verdict + dims + intake + cross-check +
+            per-specialist reviews) so the user can save / print it as a
+            PDF via the browser. Zero backend cost. */}
+        <button
+          type="button"
+          onClick={() => downloadScorecardReport({ scorecard, bundle, paperText, draftType, draftLevel })}
+          title="Download scorecard report (HTML — print to PDF)"
+          className="shrink-0 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] transition-colors"
+          style={{
+            borderColor: "var(--ats-border-subtle)",
+            color:       "var(--ats-fg-muted)",
+            backgroundColor: "var(--ats-bg-panel)",
+          }}
+        >
+          <Download size={10} />
+          <span>Report</span>
+        </button>
       </div>
       {scorecard.one_line_summary && (
         <p className="text-xs mb-2.5 italic leading-relaxed" style={{ color: "var(--ats-fg-secondary)" }}>{scorecard.one_line_summary}</p>
@@ -1133,4 +1235,164 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
       )}
     </div>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// downloadScorecardReport — client-side HTML report builder.
+//
+// Produces a self-contained HTML file with print-friendly CSS so the
+// user can either save it as-is or use the browser's "Print → Save as
+// PDF" to get a polished PDF. We deliberately don't call a server-side
+// PDF builder because:
+//   · The data is already on the client; round-tripping it back through
+//     the backend (and burning a quota slot) for layout work is wasteful.
+//   · Browser print-to-PDF respects the user's locale, font set, and
+//     theme preferences out of the box.
+//   · No new dependency footprint (would otherwise need a heavy PDF
+//     library on the client or a new endpoint on the server).
+// ─────────────────────────────────────────────────────────────────────────────
+function downloadScorecardReport(args: {
+  scorecard:  Scorecard;
+  bundle?:    ReviewBundle;
+  paperText?: string;
+  draftType?: string;
+  draftLevel?: string;
+}): void {
+  const { scorecard, bundle, paperText, draftType, draftLevel } = args;
+  const escape = (s: string) =>
+    String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const dims  = Object.entries(scorecard.dimensions || {});
+  const intake = bundle?.intake;
+  const ck    = bundle?.crosscheck;
+  const reviews = bundle?.reviews ?? {};
+
+  const dimRows = dims.map(([k, d]) => `
+    <tr>
+      <td>${escape(d.name || k)}</td>
+      <td class="num">${d.score?.toFixed?.(1) ?? d.score}</td>
+      <td class="sev sev-${escape(d.severity || "low")}">${escape(d.severity || "")}</td>
+    </tr>
+  `).join("");
+
+  const intakeBlock = intake ? `
+    <h2>Intake summary</h2>
+    <ul class="meta">
+      ${intake.paper_type ? `<li><strong>Type:</strong> ${escape(intake.paper_type)}</li>` : ""}
+      ${intake.field      ? `<li><strong>Field:</strong> ${escape(intake.field)}</li>` : ""}
+      ${intake.audience   ? `<li><strong>Audience:</strong> ${escape(intake.audience)}</li>` : ""}
+      ${intake.thesis     ? `<li><strong>Thesis:</strong> ${escape(intake.thesis)}</li>` : ""}
+    </ul>
+    ${(intake.section_map && intake.section_map.length) ? `<p><strong>Sections:</strong> ${intake.section_map.map(escape).join(" · ")}</p>` : ""}
+  ` : "";
+
+  const issuesBlock = (ck?.top_issues && ck.top_issues.length) ? `
+    <h2>Top issues</h2>
+    <ol class="issues">
+      ${ck.top_issues.map((it) => `
+        <li>
+          <div class="issue-head"><strong>${escape(it.title || "(untitled issue)")}</strong>
+            ${it.priority ? `<span class="sev sev-${escape(it.priority)}">${escape(it.priority)}</span>` : ""}
+          </div>
+          ${it.problem     ? `<p>${escape(it.problem)}</p>` : ""}
+          ${it.suggestion  ? `<p class="fix"><strong>Fix:</strong> ${escape(it.suggestion)}</p>` : ""}
+        </li>
+      `).join("")}
+    </ol>
+  ` : "";
+
+  const strengthsBlock = (ck?.consensus_strengths && ck.consensus_strengths.length) ? `
+    <h2>What's working</h2>
+    <ul>${ck.consensus_strengths.map((s) => `<li>${escape(s)}</li>`).join("")}</ul>
+  ` : "";
+
+  const reviewsBlock = Object.keys(reviews).length > 0 ? `
+    <h2>Specialist reviews</h2>
+    ${Object.entries(reviews).map(([key, r]) => `
+      <div class="spec">
+        <h3>${escape(key)} <span class="sev sev-${escape(r.severity || "low")}">${escape(r.severity || "")}</span></h3>
+        ${r.summary ? `<p class="summary">${escape(r.summary)}</p>` : ""}
+        ${(r.strengths && r.strengths.length) ? `<p><strong>Strengths:</strong></p><ul>${r.strengths.map((s) => `<li>${escape(s)}</li>`).join("")}</ul>` : ""}
+        ${(r.issues && r.issues.length) ? `<p><strong>Issues:</strong></p><ul>${r.issues.map((i) => `<li>${escape(i.problem || "(no detail)")}${i.suggestion ? " — <em>fix:</em> " + escape(i.suggestion) : ""}${i.priority ? ` <span class="sev sev-${escape(i.priority)}">${escape(i.priority)}</span>` : ""}</li>`).join("")}</ul>` : ""}
+      </div>
+    `).join("")}
+  ` : "";
+
+  const meta = [
+    draftType  ? `Type: ${draftType}`   : "",
+    draftLevel ? `Level: ${draftLevel}` : "",
+    new Date().toLocaleString(),
+  ].filter(Boolean).join(" · ");
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Paper Review Scorecard</title>
+<style>
+  body{font-family:Georgia,"Times New Roman",serif;max-width:820px;margin:32px auto;padding:0 40px;line-height:1.55;color:#111;font-size:11.5pt}
+  h1{font-size:20pt;margin:0 0 .25em;border-bottom:2px solid #111;padding-bottom:.25em}
+  h2{font-size:14pt;margin:1.4em 0 .4em;color:#0f172a}
+  h3{font-size:12pt;margin:1em 0 .3em;color:#1e293b}
+  .meta-line{color:#475569;font-size:10pt;margin:0 0 1em}
+  table{width:100%;border-collapse:collapse;margin:.5em 0 1em;font-size:10.5pt}
+  th,td{padding:.45em .6em;border-bottom:1px solid #e2e8f0;text-align:left}
+  th{background:#f1f5f9;font-weight:bold}
+  td.num{text-align:right;font-weight:bold;font-variant-numeric:tabular-nums}
+  .verdict{display:inline-block;padding:.2em .6em;border-radius:6px;font-weight:bold;background:#fef3c7;color:#92400e;font-size:11pt}
+  .verdict-good{background:#dcfce7;color:#166534}
+  .verdict-bad{background:#fee2e2;color:#991b1b}
+  .overall{display:inline-block;margin-left:.6em;font-size:14pt;font-weight:bold}
+  ul.meta{padding-left:1.2em}
+  ul.meta li{margin:.15em 0}
+  .sev{display:inline-block;padding:.05em .35em;border-radius:4px;font-size:9pt;margin-left:.4em;text-transform:uppercase;letter-spacing:.05em}
+  .sev-high{background:#fee2e2;color:#991b1b}
+  .sev-medium{background:#fef3c7;color:#92400e}
+  .sev-low{background:#e0e7ff;color:#3730a3}
+  ol.issues li{margin:.5em 0 .8em;padding-left:.2em}
+  .issue-head{margin-bottom:.2em}
+  .fix{color:#15803d;margin:.3em 0 0}
+  .spec{border-left:3px solid #cbd5e1;padding:.2em 0 .2em .8em;margin:.6em 0 1em}
+  .summary{font-style:italic;color:#475569}
+  .footer{margin-top:2em;padding-top:.6em;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:9.5pt}
+  @media print {
+    body{margin:0;padding:1cm 1.4cm}
+    .no-print{display:none}
+  }
+</style>
+</head>
+<body>
+<h1>Paper Review Scorecard</h1>
+<p class="meta-line">${escape(meta)}</p>
+
+<p>
+  <span class="verdict ${scorecard.overall_score >= 7 ? "verdict-good" : scorecard.overall_score < 5 ? "verdict-bad" : ""}">${escape(scorecard.verdict)}</span>
+  <span class="overall">${scorecard.overall_score.toFixed(1)} / 10</span>
+</p>
+
+${scorecard.one_line_summary ? `<p><em>${escape(scorecard.one_line_summary)}</em></p>` : ""}
+
+<h2>Dimensions</h2>
+<table>
+  <thead><tr><th>Dimension</th><th class="num">Score</th><th>Severity</th></tr></thead>
+  <tbody>${dimRows}</tbody>
+</table>
+
+${intakeBlock}
+${issuesBlock}
+${strengthsBlock}
+${reviewsBlock}
+
+${paperText ? `<h2>Reviewed text (excerpt)</h2><pre style="white-space:pre-wrap;font-family:Georgia,serif;font-size:10pt;color:#475569;border-left:3px solid #cbd5e1;padding-left:.8em">${escape(paperText.slice(0, 1500))}${paperText.length > 1500 ? "…" : ""}</pre>` : ""}
+
+<p class="footer">Generated by AcademiCats Paper Review. AI-generated reviews can be inaccurate — verify before acting on any single recommendation.</p>
+</body>
+</html>`;
+
+  // Slugify a sensible filename from the verdict for the user.
+  const slug = (scorecard.verdict || "scorecard")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60) || "scorecard";
+  downloadBlobAs(new Blob([html], { type: "text/html;charset=utf-8" }), `scorecard_${slug}.html`);
 }

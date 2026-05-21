@@ -162,16 +162,18 @@ function CountdownPill({ etaAt }: { etaAt: string }) {
     return Number.isFinite(t) ? t : 0;
   }, [etaAt]);
 
-  // Tick state — just a monotonic counter that forces re-render each second.
-  const [, setTick] = useState(0);
+  // Track wall-clock as state so render stays pure (no Date.now() during
+  // render). The interval re-samples once per second; the local
+  // remainingMs is then a plain subtraction the React Compiler can see.
+  const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    const id = window.setInterval(() => setTick(x => x + 1), 1000);
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
-  if (etaMs <= 0) return null;
+  const remainingMs = etaMs - nowMs;
 
-  const remainingMs = etaMs - Date.now();
+  if (etaMs <= 0) return null;
   if (remainingMs <= 0) {
     // ETA has passed — the admin may be finishing a slow step. Avoid
     // showing "-00:00:47" (confusing). Swap to a neutral "finishing up…"

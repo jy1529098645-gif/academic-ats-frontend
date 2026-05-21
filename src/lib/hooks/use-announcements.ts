@@ -19,7 +19,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
-import { buildApiUrl, fetchWithApiFallback, fetchWithAuth } from "@/lib/api";
+import { buildApiUrl, fetchWithAuth } from "@/lib/api";
 
 export type Announcement = {
   id:             string;
@@ -66,35 +66,91 @@ export function useAnnouncements(enabled: boolean = true) {
     // Live subscription — INSERT prepends, DELETE drops. Dedup on id in
     // both directions so REST refresh + Realtime echo of the same row
     // stay consistent.
-    const channel = supabase
-      .channel("announcements-live")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "announcements" },
-        (payload: { new: Announcement }) => {
-          const row = payload.new;
-          if (!row || !row.id) return;
-          setItems(prev => {
-            if (prev.some(p => p.id === row.id)) return prev;
-            return [row, ...prev].slice(0, FEED_LIMIT);
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        { event: "DELETE", schema: "public", table: "announcements" },
-        (payload: { old: { id?: string } }) => {
-          const oldId = payload.old?.id;
-          if (!oldId) return;
-          setItems(prev => prev.filter(p => p.id !== oldId));
-        },
-      )
-      .subscribe();
+    //
+    // Auto-reconnect: supabase-js `channel.subscribe(cb)` reports
+    // SUBSCRIBED / CHANNEL_ERROR / TIMED_OUT / CLOSED. On the failure
+    // states we tear down and re-subscribe with exponential backoff
+    // (capped at 30s) and ALSO re-pull via REST so the feed catches
+    // up on anything missed while disconnected. The user sees nothing
+    // — title bar / favicon stay clean — but the data stays current.
+    //
+    // visibilitychange: when the tab regains focus after being
+    // backgrounded, force a REST refresh as a belt-and-braces safety
+    // net (some browsers throttle realtime channels in inactive
+    // tabs).
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    let backoff = 1000;
+    let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const wire = () => {
+      if (cancelled) return;
+      channel = supabase
+        .channel("announcements-live")
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "announcements" },
+          (payload: { new: Announcement }) => {
+            const row = payload.new;
+            if (!row || !row.id) return;
+            setItems(prev => {
+              if (prev.some(p => p.id === row.id)) return prev;
+              return [row, ...prev].slice(0, FEED_LIMIT);
+            });
+          },
+        )
+        .on(
+          "postgres_changes",
+          { event: "DELETE", schema: "public", table: "announcements" },
+          (payload: { old: { id?: string } }) => {
+            const oldId = payload.old?.id;
+            if (!oldId) return;
+            setItems(prev => prev.filter(p => p.id !== oldId));
+          },
+        )
+        .subscribe((status) => {
+          if (cancelled) return;
+          if (status === "SUBSCRIBED") {
+            backoff = 1000;
+            return;
+          }
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            // Tear down and retry with backoff. Cap at 30s so a long
+            // outage doesn't end up with a multi-minute wait.
+            const ch = channel;
+            channel = null;
+            if (ch) { try { void supabase.removeChannel(ch); } catch { /* noop */ } }
+            const wait = Math.min(backoff, 30_000);
+            backoff = Math.min(backoff * 2, 30_000);
+            reconnectTimer = setTimeout(() => {
+              void refresh();   // catch up missed rows
+              wire();           // re-subscribe
+            }, wait);
+          }
+        });
+    };
+
+    wire();
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        // Backgrounded tab may have missed realtime events; force a
+        // REST sync. Cheap and idempotent — items dedup on id.
+        void refresh();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
-      void supabase.removeChannel(channel);
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (channel) {
+        try { void supabase.removeChannel(channel); } catch { /* noop */ }
+        channel = null;
+      }
     };
-  }, [enabled]);
+  }, [enabled, refresh]);
 
   /** Fire-and-forget post; relies on Realtime to echo the new row back.
    *  `anonymous: true` asks the server to record the row with an empty
