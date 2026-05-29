@@ -266,41 +266,60 @@ export const EChartsHost = forwardRef<EChartsHostHandle, EChartsHostProps>(funct
     instRef.current = inst;
 
     // ── CSS-zoom hit-test compensation ────────────────────────────────
-    // The workspace scales itself via `html { zoom: X }` (see
-    // globals.css media-query block). Under that rule both
-    // `getBoundingClientRect()` AND `event.clientX/Y` come back in
-    // ZOOMED coords (verified empirically: an element declared at
-    // `left: 200px` reports `rect.left = 200 * zoom`). zrender
-    // computes `e.zrX = event.clientX - rect.left`, so `zrX` is in
-    // ZOOMED units — but the chart's internal coord system is sized
-    // by `inst.resize(...)` which we feed LOGICAL px. The mismatch
-    // factor is exactly `zoom`, which is why hit-tests land
-    // ~(1 - zoom) of the chart width to the LEFT of the cursor.
+    // The workspace scales itself via `html { zoom: X }` (see globals.css
+    // media-query block). Under that rule the chart's INTERNAL coord
+    // system (sized via `inst.resize(offsetWidth, offsetHeight)` — always
+    // LOGICAL px) and the event's zrX/zrY (computed by zrender from
+    // `e.offsetX/Y`, which Chromium reports in the ZOOMED rendered px
+    // space on the legacy code path) end up in different units. The
+    // mismatch makes hit-tests land ~(1 - zoom) of the chart width to
+    // the LEFT of the cursor — symptom: "I have to click slightly to
+    // the right of a point to select it".
     //
-    // Fix: wrap `handler.dispatch` so every normalised event has
-    // its zrX/zrY rescaled by `1/zoom` before the chart's core runs
-    // hit-test. The zoom factor is re-read on every event so a
-    // mid-session window resize that hits a different breakpoint
-    // (e.g. drag-resize across 1920 → 1680) self-corrects without
-    // re-mounting the chart.
+    // Why the previous fix (patching `handler.dispatch`) didn't work:
+    // zrender's mouse events flow `proxy.trigger(name, event)` →
+    // Eventful → Handler.mousedown / click / mousemove DIRECTLY. They
+    // NEVER go through `Handler.dispatch` (which only exists for
+    // programmatic dispatches). So wrapping dispatch was a no-op.
+    //
+    // The correct interception point is the proxy's `trigger` — every
+    // local AND global DOM event passes through it on its way to the
+    // Handler, and zrX/zrY are already populated by `normalizeEvent`
+    // when trigger fires.
+    //
+    // Correction factor: rather than reading `getComputedStyle(html).zoom`
+    // and hardcoding `zrX /= zoom` (which over-corrects on Chrome 128+
+    // where offsetX is already in logical px), we DERIVE the factor
+    // from the host's own dimensions:
+    //
+    //   factor = host.offsetWidth / host.getBoundingClientRect().width
+    //
+    // On Chrome 128+ both values are logical → factor ≈ 1 → no-op.
+    // On Chrome <128 rect.width is post-zoom → factor = 1/zoom → fixes
+    // the mismatch. Same expression covers both eras automatically.
     {
-      const handler = (inst.getZr() as unknown as { handler?: { dispatch?: (...args: unknown[]) => unknown } }).handler;
-      const origDispatch = handler?.dispatch?.bind(handler);
-      if (handler && origDispatch) {
-        handler.dispatch = function(...args: unknown[]): unknown {
-          const ev = args[1] as { zrX?: number; zrY?: number } | undefined;
-          if (ev && typeof ev.zrX === "number" && typeof ev.zrY === "number") {
-            const z = parseFloat(
-              (typeof document !== "undefined"
-                ? getComputedStyle(document.documentElement).zoom
-                : "1") || "1"
-            );
-            if (Number.isFinite(z) && z > 0 && z !== 1) {
-              ev.zrX = ev.zrX / z;
-              ev.zrY = ev.zrY / z;
+      const zr = inst.getZr() as unknown as {
+        handler?: { proxy?: { trigger?: (name: string, ev: unknown) => unknown } };
+      };
+      const proxy = zr.handler?.proxy;
+      const origTrigger = proxy?.trigger?.bind(proxy);
+      if (proxy && origTrigger) {
+        proxy.trigger = function (name: string, ev: unknown): unknown {
+          const e = ev as { zrX?: number; zrY?: number } | undefined;
+          if (e && typeof e.zrX === "number" && typeof e.zrY === "number") {
+            const rect = host.getBoundingClientRect();
+            const rw = rect.width  || 0;
+            const rh = rect.height || 0;
+            const ow = host.offsetWidth  || 0;
+            const oh = host.offsetHeight || 0;
+            if (rw > 0 && rh > 0 && ow > 0 && oh > 0) {
+              const fx = ow / rw;
+              const fy = oh / rh;
+              if (Math.abs(fx - 1) > 0.001) e.zrX = e.zrX * fx;
+              if (Math.abs(fy - 1) > 0.001) e.zrY = e.zrY * fy;
             }
           }
-          return origDispatch(...args);
+          return origTrigger(name, ev);
         };
       }
     }
