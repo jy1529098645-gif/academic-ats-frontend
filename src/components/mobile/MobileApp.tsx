@@ -364,7 +364,7 @@ export default function MobileApp() {
   // add a context hint (venue / journal / professor preferences), pick a
   // language for the agent voice, and a draft stage that calibrates
   // strictness.
-  type DraftLevel = "final" | "working" | "sketch";
+  type DraftLevel = "final" | "working" | "sketch" | "student";
   const [reviewText, setReviewText] = useState<string>("");
   const [reviewContextHint, setReviewContextHint] = useState<string>("");
   const [reviewLanguage, setReviewLanguage] = useState<string>("English");
@@ -2268,10 +2268,11 @@ function LabExtraFieldRow({
 // + structured issue cards; on mobile we render the streamed Markdown inline.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DRAFT_LEVELS: Array<{ id: "final" | "working" | "sketch"; label: string; blurb: string }> = [
+const DRAFT_LEVELS: Array<{ id: "final" | "working" | "sketch" | "student"; label: string; blurb: string }> = [
   { id: "final",   label: "Final",   blurb: "Polished — strict review" },
   { id: "working", label: "Working", blurb: "Mid-stage — balanced"      },
   { id: "sketch",  label: "Sketch",  blurb: "Early draft — gentle"       },
+  { id: "student", label: "Student", blurb: "Coursework — tutor voice"   },
 ];
 
 function ReviewScreen({
@@ -2289,8 +2290,8 @@ function ReviewScreen({
   setContextHint: (s: string) => void;
   language: string;
   setLanguage: (s: string) => void;
-  draftLevel: "final" | "working" | "sketch";
-  setDraftLevel: (s: "final" | "working" | "sketch") => void;
+  draftLevel: "final" | "working" | "sketch" | "student";
+  setDraftLevel: (s: "final" | "working" | "sketch" | "student") => void;
   uploadBusy: boolean;
   uploadError: string;
   onUpload: (file: File) => void;

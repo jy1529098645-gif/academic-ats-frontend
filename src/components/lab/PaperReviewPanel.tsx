@@ -23,6 +23,10 @@ import {
   ChevronDown, ChevronRight, ClipboardList, Check, X as XIcon, Play,
   Award, Gauge, AlertTriangle, Clock,
   ThumbsUp, Target, Globe, Lightbulb, Download,
+  // D1 — per-stage avatars in the review timeline. Each specialist
+  // gets a distinct icon so the user reads the pipeline as a row of
+  // characters, not a row of identical "running" indicators.
+  LayoutGrid, MessagesSquare, ScanText, Languages, ArrowLeftRight, Crown,
 } from "lucide-react";
 import { fetchWithApiFallback } from "@/lib/api";
 import { downloadBlobAs } from "@/lib/file-download";
@@ -137,12 +141,13 @@ const LANGUAGE_OPTIONS = [
 //   final    — full publication-grade scrutiny.
 //   sketch   — ~2 grades more lenient. An early outline that's on the
 //              right track gets Minor Revision instead of Reject.
-type DraftLevel = "working" | "final" | "sketch";
+type DraftLevel = "working" | "final" | "sketch" | "student";
 
 const DRAFT_LEVELS: Array<{ id: DraftLevel; label: string; blurb: string }> = [
   { id: "working", label: "Working draft",     blurb: "Default — for in-progress writing." },
   { id: "final",   label: "Final / submitting", blurb: "Strict — publication-grade review." },
   { id: "sketch",  label: "Outline / sketch",  blurb: "Lenient — focus on structure, skip polish." },
+  { id: "student", label: "Student coursework", blurb: "Tutor voice — encouraging, formative, calibrated to student level." },
 ];
 
 const DRAFT_TYPES: Array<{ id: string; label: string; hint: string }> = [
@@ -217,30 +222,32 @@ const INPUT_STYLE: React.CSSProperties = {
 };
 
 /**
- * Props that bridge Paper Review with the sibling Writing Lab tab. Both
- * are optional so the panel still renders standalone.
+ * Optional seeding hooks. All are optional so the panel still renders
+ * standalone.
  *
  * - `seedDraft` carries text the parent wants pre-loaded into the
- *   draft textarea — used by the Writing Lab's "Send to Paper Review"
- *   button. The `seedKey` rev token forces the textarea to re-seed
+ *   draft textarea — used when Search Space pushes a paper here for
+ *   review. The `seedKey` rev token forces the textarea to re-seed
  *   even when `seedDraft` happens to repeat (re-sending the same
- *   draft a second time should still work).
+ *   paper a second time should still work).
  * - `onBeforeRun` fires the moment the operator clicks Run, BEFORE
  *   the SSE stream opens. Lets the host page flip the column layout
  *   (collapse left / expand right) so the streaming review letter
  *   has the most reading space. No-op when omitted.
  */
 type PaperReviewPanelProps = {
-  seedDraft?:   string | null;
-  seedKey?:     number;
-  onBeforeRun?: () => void;
+  seedDraft?:           string | null;
+  seedKey?:             number;
+  onBeforeRun?:         () => void;
 };
 
-// localStorage cache key — survives panel re-mount across mode switches.
-// Costly outputs (result / bundle / agentLog) AND the user's own input
-// (paperText, contextHint, settings) all persist together so a navigate-
-// away-and-back doesn't wipe a 5 KB pasted draft or evict an LLM result
-// the user paid quota for.
+// localStorage cache key — survives mod re-mount across mode switches.
+// Same persistence pattern Deep Read / Evidence Chain / Compare Papers
+// use: state hydrates lazily on first mount, writes back on every
+// change. Costly outputs (result / bundle / agentLog) AND the user's
+// own input (paperText, contextHint, settings) all persist together
+// so a Research → Writing → Research round-trip doesn't wipe a 5 KB
+// pasted draft or evict an LLM result the user paid quota for.
 const PR_CACHE_KEY = "ats:paper-review:v1";
 
 type PRPersisted = {
@@ -278,9 +285,9 @@ function _writePRCache(payload: PRPersisted): void {
 export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperReviewPanelProps = {}) {
   // Hydrate every persisted field from localStorage once per mount.
   // The lazy initializer runs synchronously before the first paint so
-  // the user sees their previous review state immediately on a
-  // re-mount. Defaults match the previous fresh-mount values when no
-  // cache exists.
+  // the user sees their previous review state immediately on a mode
+  // round-trip. Defaults match the previous fresh-mount values when
+  // no cache exists.
   const _cached = (typeof window !== "undefined") ? _readPRCache() : null;
   const [paperText,    setPaperText]    = useState(_cached?.paperText   ?? "");
   const [contextHint,  setContextHint]  = useState(_cached?.contextHint ?? "");
@@ -306,7 +313,8 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
   // Persist the costly + non-trivial state to localStorage on every
   // change so a re-mount restores it. Skip the very first render
   // (the lazy initializers above already loaded the cache; writing it
-  // back on the same tick would be wasteful).
+  // back on the same tick would be wasteful and could mask SSR/CSR
+  // hydration mismatches).
   const _hasMountedRef = useRef(false);
   useEffect(() => {
     if (!_hasMountedRef.current) {
@@ -321,27 +329,17 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
 
   const abortRef = useRef<AbortController | null>(null);
 
-  // Sticky "this draft came from Writing Lab" marker. Flips true when
-  // seedDraft fires; cleared the moment the user uploads a file (which
-  // is unambiguously a different draft) so a stale lab-origin signal
-  // can't ride along with an arbitrary user-pasted text after a tab
-  // switch. The user editing the textarea after seed-draft DOES keep
-  // the flag true — they're iterating on the Lab output, which is
-  // exactly the scenario the backend boost is calibrated for.
-  const [cameFromLab, setCameFromLab] = useState(false);
-
-  // Seed-draft hand-off from the sibling Writing Lab tab. When the
-  // parent passes a non-null `seedDraft`, drop it into the textarea
-  // and clear any prior file-name marker (the operator just sent a
-  // freshly-generated lab output, NOT a file). `seedKey` is the rev
-  // token — re-sending the same draft string twice still triggers
-  // because the key bumps each time.
+  // Seed-draft hand-off from the parent (e.g. a paper pushed in
+  // from Search Space). When the parent passes a non-null
+  // `seedDraft`, drop it into the textarea and clear any prior
+  // file-name marker. `seedKey` is the rev token — re-sending the
+  // same draft string twice still triggers because the key bumps
+  // each time.
   useEffect(() => {
     if (seedDraft != null && seedDraft.length > 0) {
       setPaperText(seedDraft);
       setFileName("");
       setExtractError("");
-      setCameFromLab(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedKey]);
@@ -368,9 +366,6 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
       const data = await res.json() as { text: string; filename: string; char_count: number };
       setPaperText(data.text);
       setFileName(data.filename);
-      // A new file upload unambiguously means "different draft" — drop
-      // the lab-origin flag so the scorecard boost can't ride along.
-      setCameFromLab(false);
     } catch (e) {
       setExtractError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -426,7 +421,7 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal:  ac.signal,
-        body:    JSON.stringify({ paper_text: text, context_hint: effectiveContext, language, draft_level: draftLevel, from_lab: cameFromLab }),
+        body:    JSON.stringify({ paper_text: text, context_hint: effectiveContext, language, draft_level: draftLevel }),
       });
       if (res.status === 429) {
         // Quota exhausted — parse the server's friendly explanation
@@ -734,6 +729,16 @@ export function PaperReviewPanel({ seedDraft, seedKey, onBeforeRun }: PaperRevie
         )}
       </div>
 
+      {/* ── Pipeline timeline (D1) ───────────────────────────────────
+          Horizontal stage strip showing the canonical 6-phase pipeline:
+            Intake → 5 Specialists (parallel) → Rebuttal → ChiefEditor → Scorecard
+          Each node colors itself green/blue/red/grey based on what
+          `agentLog` has reported so far. Stays mounted while a result
+          is on screen so users can see the run shape after-the-fact. */}
+      {(generating || agentLog.length > 0) && (
+        <ReviewTimeline log={agentLog} generating={generating} />
+      )}
+
       {/* ── Progress bar ─────────────────────────────────────────────────────
           Two layers of reassurance while a review is in flight, matching the
           pattern used in the Synthesis Lab so both tabs feel the same:
@@ -992,10 +997,10 @@ function ScorecardBlock({
           <span className="font-bold" style={{ color: vs.fg }}>{scorecard.overall_score.toFixed(1)}</span>
           <span>/10</span>
         </span>
-        {/* Download Scorecard report. Builds a print-friendly HTML report
-            of the entire review (verdict + dims + intake + cross-check +
-            per-specialist reviews) so the user can save / print it as a
-            PDF via the browser. Zero backend cost. */}
+        {/* D2 — Download Scorecard report. Builds a print-friendly HTML
+            report of the entire review (verdict + dims + intake + cross-
+            check + per-specialist reviews) so the user can save / print
+            it as a PDF via the browser. Zero backend cost. */}
         <button
           type="button"
           onClick={() => downloadScorecardReport({ scorecard, bundle, paperText, draftType, draftLevel })}
@@ -1103,12 +1108,47 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
             </div>
           )}
 
-          {/* "Top issues to address" was removed: the per-specialist
-              breakdown below already lists every issue with its
-              priority + suggested fix, and the editor letter above
-              now opens with a concise strengths-first summary.
-              Surfacing the consolidated issue list a THIRD time
-              between them was pure noise — users scanned past it. */}
+          {/* Top consolidated issues */}
+          {(ck?.top_issues?.length ?? 0) > 0 && (
+            <div>
+              <div className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-accent)" }}>
+                <AlertTriangle size={10} />Top issues to address
+              </div>
+              <ul className="space-y-1.5">
+                {(ck?.top_issues ?? []).map((it, i) => {
+                  const sev = SEVERITY_STYLES[it.priority] ?? SEVERITY_STYLES.medium;
+                  return (
+                    <li
+                      key={i}
+                      className="rounded-lg border px-2.5 py-1.5"
+                      style={{
+                        borderColor:     "var(--ats-border-subtle)",
+                        backgroundColor: "var(--ats-bg-input)",
+                      }}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="shrink-0 inline-flex items-center rounded border px-1 text-[9px] font-bold uppercase tracking-wider"
+                          style={{ borderColor: sev.border, backgroundColor: sev.bg, color: sev.fg }}
+                        >{sev.label}</span>
+                        <span className="text-xs font-semibold flex-1 min-w-0" style={{ color: "var(--ats-fg-primary)" }}>{it.title || "(untitled issue)"}</span>
+                        {it.lenses.length > 0 && (
+                          <span className="shrink-0 text-[10px]" style={{ color: "var(--ats-fg-muted)" }}>via {it.lenses.join(", ")}</span>
+                        )}
+                      </div>
+                      {it.problem && <p className="mt-1 text-xs" style={{ color: "var(--ats-fg-secondary)" }}>{it.problem}</p>}
+                      {it.suggestion && (
+                        <p className="mt-1 text-xs">
+                          <span className="font-semibold" style={{ color: "#10b981" }}>Fix: </span>
+                          <span style={{ color: "var(--ats-fg-secondary)" }}>{it.suggestion}</span>
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
 
           {/* Consensus strengths */}
           {(ck?.consensus_strengths?.length ?? 0) > 0 && (
@@ -1142,23 +1182,11 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
             </div>
           )}
 
-          {/* Per-specialist breakdown.  Each row is a native <details>
-              element; the default disclosure triangle is stripped
-              (list-none) so we draw our own — a rotating ChevronRight
-              that flips to ChevronDown via the group-open variant when
-              the row expands.  The header line also picks up a "tap to
-              expand" hint plus a hover tint on each row so it reads as
-              interactive at a glance; without those cues users were
-              missing the disclosure entirely and never seeing the
-              detailed lens-by-lens feedback. */}
+          {/* Per-specialist breakdown */}
           {Object.keys(reviews).length > 0 && (
             <div className="pt-1 border-t" style={{ borderColor: "var(--ats-border-subtle)" }}>
-              <div className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-accent)" }}>
-                <Bot size={10} />
-                <span>One review per angle</span>
-                <span className="font-normal normal-case tracking-normal text-[10px] ml-1" style={{ color: "var(--ats-fg-muted)" }}>
-                  — tap any row to expand
-                </span>
+              <div className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--ats-fg-accent)" }}>
+                <Bot size={10} />One review per angle
               </div>
               <div className="space-y-1.5">
                 {Object.entries(reviews).map(([key, r]) => {
@@ -1166,25 +1194,13 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
                   return (
                     <details
                       key={key}
-                      className="rounded-lg border px-2.5 py-1.5 group transition-colors hover:border-[var(--ats-border-accent)]"
+                      className="rounded-lg border px-2.5 py-1.5 group"
                       style={{
                         borderColor:     "var(--ats-border-subtle)",
                         backgroundColor: "var(--ats-bg-input)",
                       }}
                     >
-                      <summary
-                        className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold select-none"
-                        style={{ color: "var(--ats-fg-primary)" }}
-                      >
-                        {/* Custom disclosure caret.  Rotates 90° on
-                            open via group-open variant; the parent
-                            <details> already carries the `group`
-                            class so the variant resolves. */}
-                        <ChevronRight
-                          size={12}
-                          className="shrink-0 transition-transform group-open:rotate-90"
-                          style={{ color: "var(--ats-fg-muted)" }}
-                        />
+                      <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--ats-fg-primary)" }}>
                         <span className="capitalize flex-1">{key}</span>
                         <span
                           className="shrink-0 inline-flex items-center rounded border px-1 text-[9px] font-bold uppercase tracking-wider"
@@ -1196,7 +1212,7 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
                         {r.summary && <p className="text-xs italic" style={{ color: "var(--ats-fg-secondary)" }}>{r.summary}</p>}
                         {r.strengths.length > 0 && (
                           <div>
-                            <div className="text-[10px] font-semibold uppercase tracking-wider mb-0.5" style={{ color: "#10b981" }}>What's working</div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wider mb-0.5" style={{ color: "#10b981" }}>What&rsquo;s working</div>
                             <ul className="space-y-0.5">
                               {r.strengths.map((s, i) => (
                                 <li key={i} className="text-xs flex gap-1.5" style={{ color: "var(--ats-fg-secondary)" }}>
@@ -1240,7 +1256,122 @@ function DetailsBlock({ bundle }: { bundle: ReviewBundle }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// downloadScorecardReport — client-side HTML report builder.
+// ReviewTimeline (D1) — horizontal stage strip for the 6-phase review pipeline.
+//
+// Maps the live `agentLog` entries (whose `name` is the literal string
+// emitted by the backend, e.g. `"Review·Structure"`) onto a fixed list
+// of canonical stages. Each stage's state is derived from the log:
+//
+//   pending  — no entry with this stage's name yet
+//   running  — entry exists, !done && !error
+//   done     — entry.done === true
+//   error    — entry.error === true (renders amber, not red, since one
+//              specialist failing doesn't fail the run)
+//
+// Layout:  intake ─→ [5 specialists in a horizontal sub-row] ─→ rebuttal ─→ editor ─→ scorecard
+// On narrow widths the sub-row wraps; the connector line is a flex-grow
+// hairline so the visual stays clean across container sizes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type StageKey =
+  | "intake" | "structure" | "argument" | "evidence" | "language"
+  | "originality" | "rebuttal" | "editor" | "scorecard";
+
+type StageState = "pending" | "running" | "done" | "error";
+
+// Per-stage avatar — each specialist gets a distinct Lucide icon so
+// users can read the pipeline as a row of named characters rather
+// than a row of identical state pips. The avatar replaces the generic
+// state icon when the stage is `running` or `done`; `pending` and
+// `error` keep the universal state markers (dot, X) so the user can
+// still tell at a glance "which one is currently working" vs "which
+// one fell over". Pure visual addition — no data-flow change.
+type StageDescriptor = {
+  key:         StageKey;
+  label:       string;
+  matchPrefix: string;
+  Icon:        React.ComponentType<{ size?: number; strokeWidth?: number; className?: string }>;
+};
+const TIMELINE_STAGES: StageDescriptor[] = [
+  { key: "intake",      label: "Intake",       matchPrefix: "Intake",              Icon: ClipboardList  },
+  { key: "structure",   label: "Structure",    matchPrefix: "Review·Structure",    Icon: LayoutGrid     },
+  { key: "argument",    label: "Argument",     matchPrefix: "Review·Argument",     Icon: MessagesSquare },
+  { key: "evidence",    label: "Evidence",     matchPrefix: "Review·Evidence",     Icon: ScanText       },
+  { key: "language",    label: "Language",     matchPrefix: "Review·Language",     Icon: Languages      },
+  { key: "originality", label: "Originality",  matchPrefix: "Review·Originality",  Icon: Sparkles       },
+  { key: "rebuttal",    label: "Rebuttal",     matchPrefix: "Rebuttal",            Icon: ArrowLeftRight },
+  { key: "editor",      label: "Chief Editor", matchPrefix: "ChiefEditor",         Icon: Crown          },
+  { key: "scorecard",   label: "Scorecard",    matchPrefix: "Scorecard",           Icon: Award          },
+];
+
+function _stateFor(stage: { matchPrefix: string }, log: AgentLogEntry[]): StageState {
+  // Find the LAST entry whose name starts with the stage's prefix —
+  // some stages emit multiple lines (e.g. "▶ starting" then "✓ done")
+  // and we want the latest one to win.
+  let last: AgentLogEntry | null = null;
+  for (const e of log) {
+    if (e.name === stage.matchPrefix || e.name.startsWith(stage.matchPrefix)) {
+      last = e;
+    }
+  }
+  if (!last) return "pending";
+  if (last.error) return "error";
+  if (last.done)  return "done";
+  return "running";
+}
+
+function ReviewTimeline({ log, generating }: { log: AgentLogEntry[]; generating: boolean }) {
+  const states = TIMELINE_STAGES.map((s) => ({ ...s, state: _stateFor(s, log) }));
+  // Specialists block — laid out as a 5-up grid so the parallel-fan-out
+  // shape is visually obvious. Sequential stages flank it on either side.
+  const seqLeft = states.slice(0, 1);                     // intake
+  const specs   = states.slice(1, 6);                     // 5 specialists
+  const seqRight = states.slice(6);                       // rebuttal, editor, scorecard
+
+  return (
+    <div
+      className="rounded-xl border px-3 py-2.5"
+      style={{
+        borderColor:     "var(--ats-border-subtle)",
+        backgroundColor: "var(--ats-bg-panel)",
+      }}
+    >
+      <div className="flex items-center gap-1.5 mb-2 text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--ats-fg-muted)" }}>
+        <Bot size={11} />
+        <span>Review pipeline</span>
+        {generating && <span className="ml-auto inline-block h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-1 gap-y-2">
+        {seqLeft.map((s) => <TimelineNode key={s.key} label={s.label} state={s.state} Avatar={s.Icon} />)}
+        <TimelineConnector />
+        {/* Specialist fan-out */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {specs.map((s) => <TimelineNode key={s.key} label={s.label} state={s.state} Avatar={s.Icon} />)}
+        </div>
+        <TimelineConnector />
+        {seqRight.map((s, i) => (
+          <span key={s.key} className="flex items-center gap-1">
+            <TimelineNode label={s.label} state={s.state} Avatar={s.Icon} />
+            {i < seqRight.length - 1 && <TimelineConnector />}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TimelineConnector() {
+  return (
+    <span
+      className="inline-block h-px w-3 shrink-0"
+      style={{ backgroundColor: "var(--ats-border-subtle)" }}
+      aria-hidden
+    />
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// downloadScorecardReport (D2) — client-side HTML report builder.
 //
 // Produces a self-contained HTML file with print-friendly CSS so the
 // user can either save it as-is or use the browser's "Print → Save as
@@ -1397,4 +1528,83 @@ ${paperText ? `<h2>Reviewed text (excerpt)</h2><pre style="white-space:pre-wrap;
     .replace(/^_+|_+$/g, "")
     .slice(0, 60) || "scorecard";
   downloadBlobAs(new Blob([html], { type: "text/html;charset=utf-8" }), `scorecard_${slug}.html`);
+}
+
+function TimelineNode({
+  label,
+  state,
+  Avatar,
+}: {
+  label:   string;
+  state:   StageState;
+  /** Per-stage icon supplied by TIMELINE_STAGES — renders WHEN running
+   *  or done so each specialist has a distinct face in the row. State
+   *  cues (pending dot / error X) override the avatar so the user can
+   *  still scan the row for "which one's stuck / which one's working"
+   *  at a glance. */
+  Avatar?: React.ComponentType<{ size?: number; strokeWidth?: number; className?: string }>;
+}) {
+  // Decide which glyph leads the chip:
+  //   pending — generic dot (the agent hasn't woken up yet)
+  //   running — the agent's own avatar with a slow pulse
+  //   done    — the agent's avatar in steady-state (with a small ✓
+  //             stamped beside it for the scan-the-row "is this one
+  //             finished" cue)
+  //   error   — generic X (the agent fell over; identity isn't useful
+  //             in the failure case, the failed-name shows in the
+  //             tooltip)
+  let leadIcon: React.ReactNode;
+  let trailIcon: React.ReactNode = null;
+  let bg: string;
+  let fg: string;
+  let border: string;
+  switch (state) {
+    case "pending":
+      bg     = "transparent";
+      fg     = "var(--ats-fg-muted)";
+      border = "var(--ats-border-subtle)";
+      leadIcon = (
+        <span
+          className="inline-block h-1.5 w-1.5 rounded-full"
+          style={{ backgroundColor: "var(--ats-fg-muted)", opacity: 0.5 }}
+        />
+      );
+      break;
+    case "running":
+      bg     = "rgba(59, 130, 246, 0.12)";
+      fg     = "rgb(59, 130, 246)";
+      border = "rgba(59, 130, 246, 0.45)";
+      leadIcon = Avatar
+        ? <Avatar size={11} className="animate-pulse" />
+        : <Play size={9} fill="currentColor" className="animate-pulse" />;
+      break;
+    case "done":
+      bg     = "rgba(34, 197, 94, 0.12)";
+      fg     = "rgb(22, 163, 74)";
+      border = "rgba(34, 197, 94, 0.45)";
+      leadIcon = Avatar ? <Avatar size={11} /> : <Check size={10} strokeWidth={3} />;
+      // Subtle ✓ trail when the avatar is the lead — keeps the
+      // "agent finished" semantics readable without the bold
+      // green-check-only treatment.
+      if (Avatar) trailIcon = <Check size={9} strokeWidth={3} className="opacity-80" />;
+      break;
+    case "error":
+    default:
+      bg     = "rgba(245, 158, 11, 0.12)";
+      fg     = "rgb(217, 119, 6)";
+      border = "rgba(245, 158, 11, 0.45)";
+      leadIcon = <XIcon size={10} strokeWidth={3} />;
+      break;
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold"
+      style={{ backgroundColor: bg, color: fg, borderColor: border }}
+      title={`${label} — ${state}`}
+    >
+      {leadIcon}
+      <span>{label}</span>
+      {trailIcon}
+    </span>
+  );
 }

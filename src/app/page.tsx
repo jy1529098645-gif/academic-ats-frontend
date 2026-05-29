@@ -43,7 +43,6 @@ import {
 import TermsOfServiceGate from "@/components/TermsOfServiceGate";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import OnboardingTour, { type TourStep } from "@/components/onboarding/OnboardingTour";
-const PaperEvidenceChain = dynamic(() => import("@/components/evidence-chain/PaperEvidenceChain"), { ssr: true });
 import UserNotificationPopup from "@/components/UserNotificationPopup";
 import { useUserNotifications } from "@/lib/hooks/use-user-notifications";
 import {
@@ -130,6 +129,9 @@ const DEFAULT_SOURCES = [
   "DOAJ",
   "DiGRA",
 ];
+// Chinese academic platforms — visible in the settings picker but OFF by
+// default. The backend accepts them whenever they appear in source_filters.
+const CHINESE_SOURCES = ["ChinaXiv", "NSTL", "NCPSSD", "CNKI Scholar"];
 
 const SORT_MODES = [
   "Relevance score",
@@ -222,19 +224,6 @@ type JobResponse = {
   finished_at?: number | null;
 };
 
-type DeepReadResult = Record<string, any>;
-
-// ── Feature flag: Evidence Chain ─────────────────────────────────────────
-// Disabled again — the deep-read endpoint depends on `core_claim`
-// which only the Curated ranking pipeline populates. Ad-hoc clicks
-// land on papers without it and every card shows "couldn't extract
-// structured claims" until that data flow is restructured. See
-// backend main.py's EVIDENCE_CHAIN_ENABLED comment for the longer
-// reasoning. The button greys out + backend returns 503; flip both
-// flags back to true (frontend AND backend) once the upstream
-// claim-normalisation work is done.
-const EVIDENCE_CHAIN_ENABLED = false;
-const EVIDENCE_CHAIN_DISABLED_NOTE = "Evidence Chain is paused while we improve claim accuracy — back soon.";
 
 type DragTarget = "left" | "center" | null;
 
@@ -2136,9 +2125,6 @@ function DesktopWorkspace() {
   const [labWritingModel,   setLabWritingModel]   = useState("gpt-5.3");
   const [labModelOpen,      setLabModelOpen]      = useState(false);
 
-  const [deepReadResults, setDeepReadResults] = useState<Record<string, DeepReadResult>>({});
-  const [deepReadLoading, setDeepReadLoading] = useState<Record<string, boolean>>({});
-  const [deepReadErrors, setDeepReadErrors] = useState<Record<string, string>>({});
   const [originalLoading, setOriginalLoading] = useState<Record<string, boolean>>({});
   const [originalErrors, setOriginalErrors] = useState<Record<string, string>>({});
   const [translateLoading, setTranslateLoading] = useState<Record<string, boolean>>({});
@@ -4141,8 +4127,6 @@ ${html}
     setStreamAgents({});
     setStartedAgents(new Set());
     setPlannerThinking(null);
-    setDeepReadResults({});
-    setDeepReadErrors({});
     setOriginalErrors({});
     setTranslateErrors({});
     setRetrievalCount(null);
@@ -5050,33 +5034,6 @@ ${html}
   const displayedLabAgentLog      = _viewedLabRun ? _viewedLabRun.agentLog      : labAgentLog;
   const displayedLabReviewerNotes = _viewedLabRun ? _viewedLabRun.reviewerNotes : labReviewerNotes;
 
-  async function runDeepRead(paper: Paper, paperKey: string) {
-    if (!ensureQuota("deep_read")) return;
-    setDeepReadLoading((prev) => ({ ...prev, [paperKey]: true }));
-    setDeepReadErrors((prev) => ({ ...prev, [paperKey]: "" }));
-    try {
-      const res = await fetchWithApiFallback("/api/papers/deep-read", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paper: toBackendPaper(paper), user_query: selectedSearchQuery || query }),
-      });
-      // Backend enforcement backstop — if it returned 429 with the quota
-      // header, the Usage modal has already been opened by the handler.
-      if (handleQuotaResponse(res)) return;
-      if (!res.ok) throw new Error(await readErrorMessage(res, `Deep read failed: ${res.status}`));
-      const data = await res.json();
-      setDeepReadResults((prev) => ({ ...prev, [paperKey]: data || {} }));
-      void usage.refresh();
-      useUsagePromptStore.getState().increment();
-    } catch (error) {
-      setDeepReadErrors((prev) => ({
-        ...prev,
-        [paperKey]: explainFetchError(error),
-      }));
-    } finally {
-      setDeepReadLoading((prev) => ({ ...prev, [paperKey]: false }));
-    }
-  }
 
   // `completeFirstInteraction` / `setFirstInteractionDone` were retired
   // alongside the "click anywhere to begin" overlay — users land directly
@@ -6686,6 +6643,16 @@ ${html}
                       return <label key={source} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs transition ${checked ? "border-blue-500/50 bg-blue-500/10 text-white" : "border-slate-800 text-slate-300"}`}><input type="checkbox" checked={checked} onChange={() => toggleSource(source)} /><span className="min-w-0 truncate">{source}</span></label>;
                     })}
                   </div>
+                  <div className="mt-2 mb-1 flex items-center gap-2 text-xs font-medium text-slate-400">
+                    <span>中文平台</span>
+                    <span className="text-[10px] font-normal text-slate-500">默认关闭，开启后纳入检索</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {CHINESE_SOURCES.map((source) => {
+                      const checked = sourceFilters.includes(source);
+                      return <label key={source} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs transition ${checked ? "border-amber-500/50 bg-amber-500/10 text-white" : "border-dashed border-slate-700 text-slate-400"}`}><input type="checkbox" checked={checked} onChange={() => toggleSource(source)} /><span className="min-w-0 truncate">{source}</span></label>;
+                    })}
+                  </div>
                 </div>
                 {/* Row 5: cache clear */}
                 <div className="flex items-center gap-2 pt-1 border-t border-slate-800/60">
@@ -6972,7 +6939,6 @@ ${html}
                   {displayedPapers.map((paper, index) => {
                     const paperKey = getPaperKey(paper, index);
                     const langs = translationLanguages[paperKey] || ["Chinese (Simplified)"];
-                    const deepRead = deepReadResults[paperKey];
                     return (
                       <article key={`${paper.title}-${index}`} className="rounded-3xl bg-slate-950/40 p-4 fade-in">
                         {/* Title row */}
@@ -7015,13 +6981,11 @@ ${html}
                         {/* Meta row — score chip first, then fields */}
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
                           {(() => {
-                            const deepScore = deepRead?.relevance_score != null ? (deepRead.relevance_score as number) : null;
-                            const rawScore = deepScore ?? (paper.evidence_score as number) ?? (paper.score as number);
+                            const rawScore = (paper.evidence_score as number) ?? (paper.score as number);
                             const sc = scoreChip(rawScore);
                             return (
                               <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold shrink-0 ${sc.cls}`}>
                                 {sc.label} &middot; {rawScore != null ? `${rawScore}/100` : "N/A"}
-                                {deepScore != null && <span className="ml-1 opacity-60 font-normal">(deep)</span>}
                               </span>
                             );
                           })()}
@@ -7091,36 +7055,6 @@ ${html}
                               <ExternalLink size={12} className="shrink-0" /><span className="truncate">Open Paper</span>
                             </a>
                           )}
-                          {/* Evidence Chain — TEMPORARILY DISABLED via the
-                              EVIDENCE_CHAIN_ENABLED flag at the top of this
-                              file. When the flag is off, the button renders
-                              greyed-out with a tooltip explaining why;
-                              runDeepRead is gated by `disabled` so the
-                              click can't fire anyway. When re-enabled, the
-                              button restores to the normal action-button
-                              styling + `isBlocked` is NOT applied (Evidence
-                              Chain is metadata-only; no PDF paywall gate
-                              needed). */}
-                          <button
-                            onClick={() => { if (EVIDENCE_CHAIN_ENABLED) void runDeepRead(paper, paperKey); }}
-                            disabled={!EVIDENCE_CHAIN_ENABLED || deepReadLoading[paperKey]}
-                            title={!EVIDENCE_CHAIN_ENABLED ? EVIDENCE_CHAIN_DISABLED_NOTE : undefined}
-                            className={`relative shrink min-w-0 inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all overflow-hidden ${
-                              !EVIDENCE_CHAIN_ENABLED
-                                ? "border-slate-800 bg-slate-900/30 text-slate-500 cursor-not-allowed opacity-60"
-                                : deepReadLoading[paperKey]
-                                ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
-                                : "border-slate-700 bg-slate-900/50 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                            }`}
-                          >
-                            <ShieldCheck size={12} className={`shrink-0 ${deepReadLoading[paperKey] ? "animate-spin" : ""}`} />
-                            <span className="truncate">
-                              {!EVIDENCE_CHAIN_ENABLED
-                                ? "Evidence Chain · soon"
-                                : deepReadLoading[paperKey] ? "Tracing…" : "Evidence Chain"}
-                            </span>
-                            <ProgressStrip active={!!deepReadLoading[paperKey]} />
-                          </button>
                           {/* Download PDF */}
                           <button
                             onClick={() => void triggerDownload(buildApiUrl("/api/papers/download-original"), { paper: toBackendPaper(paper) }, `${paper.title || "paper"}.pdf`, `${paperKey}-original`)}
@@ -7230,11 +7164,6 @@ ${html}
                             slate palette as the pre-gate "Not publicly accessible"
                             note above so the visual language is consistent: gray
                             always means "the publisher, not us". */}
-                        {deepReadErrors[paperKey] && (
-                          isSoftAccessError(deepReadErrors[paperKey])
-                            ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{renderErrorWithBoldOpenPaper(deepReadErrors[paperKey])}</div>
-                            : <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{renderErrorWithBoldOpenPaper(deepReadErrors[paperKey])}</div>
-                        )}
                         {originalErrors[paperKey] && (
                           isSoftAccessError(originalErrors[paperKey])
                             ? <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">{renderErrorWithBoldOpenPaper(originalErrors[paperKey])}</div>
@@ -7294,176 +7223,6 @@ ${html}
                           );
                         })()}
 
-                        {/* Per-paper Evidence Chain — gated on the
-                            same EVIDENCE_CHAIN_ENABLED flag as the
-                            click-triggered button above. Same root
-                            blocker: claim_extraction depends on
-                            `core_claim` which only the Curated
-                            multi-agent pipeline populates, so this
-                            section either looked broken (empty
-                            claims) or never appeared for ad-hoc
-                            searches. Flipping the flag re-mounts
-                            this alongside the button. */}
-                        {EVIDENCE_CHAIN_ENABLED && (
-                          <PaperEvidenceChain claims={paper.claims} />
-                        )}
-
-
-                        {/* Empty state: the endpoint returned but produced
-                            zero claims (paper metadata too thin for the
-                            LLM to extract anything useful). Tell the user
-                            rather than silently showing nothing. */}
-                        {deepRead && Array.isArray(deepRead.claims) && deepRead.claims.length === 0 && (
-                          <div className="mt-3 rounded-xl border border-slate-700/60 bg-slate-800/40 px-4 py-2.5 text-xs text-slate-400 flex items-start gap-2">
-                            <ShieldCheck size={14} className="shrink-0 mt-0.5 text-slate-500" />
-                            <span>
-                              Evidence Chain couldn&apos;t pull structured claims from this paper. Open the source page via <span className="font-semibold">Open Paper</span>, or add it to Writing Lab where the full text gets processed.
-                            </span>
-                          </div>
-                        )}
-                        {/* Evidence Chain result — collapsible. Replaces
-                            the old Deep Reading narrative report. Each
-                            claim gets its own card with a chain of source
-                            entries (title / authors / year / strength pill
-                            / clickable link) so users can trace exactly
-                            where a statement came from. */}
-                        {deepRead && Array.isArray(deepRead.claims) && deepRead.claims.length > 0 && (
-                          <details className="mt-3 rounded-xl bg-blue-500/5" open>
-                            <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-bold text-slate-200 hover:text-white transition-colors inline-flex items-center gap-2">
-                              <ShieldCheck size={14} />
-                              Evidence Chain
-                              <span className="text-[10px] font-normal text-slate-500">
-                                · {deepRead.claims.length} claim{deepRead.claims.length !== 1 ? "s" : ""}
-                              </span>
-                            </summary>
-                            <div className="px-4 pb-4 pt-1 space-y-3">
-                              {deepRead.claims.map((claim: Record<string, unknown>, ci: number) => {
-                                const claimText = String((claim?.claim ?? claim?.claim_text) || "").trim();
-                                if (!claimText) return null;
-                                const support  = String(claim?.support_level || "moderate").toLowerCase();
-                                const chain    = Array.isArray(claim?.evidence_chain) ? (claim.evidence_chain as Array<Record<string, unknown>>) : [];
-                                const chainColor =
-                                  support === "strong"   ? "#10b981"
-                                  : support === "weak"   ? "#f59e0b"
-                                  : "#3b82f6";
-                                return (
-                                  <div key={ci} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-                                    {/* Claim text — the thing being supported */}
-                                    <div className="flex items-start gap-2">
-                                      <span
-                                        className="shrink-0 mt-0.5 inline-flex items-center justify-center h-5 min-w-[20px] px-1.5 rounded-full text-[10px] font-bold tabular-nums"
-                                        style={{ backgroundColor: `${chainColor}22`, color: chainColor, border: `1px solid ${chainColor}55` }}
-                                      >
-                                        C{ci + 1}
-                                      </span>
-                                      <div className="flex-1 min-w-0">
-                                        <p className="text-sm leading-snug text-slate-100 break-words">
-                                          {claimText}
-                                        </p>
-                                        {(claim.scope_note || claim.claim_type) ? (
-                                          <p className="mt-0.5 text-[10px] text-slate-500">
-                                            {claim.claim_type ? <span className="uppercase tracking-wider font-bold text-slate-400">{String(claim.claim_type)}</span> : null}
-                                            {claim.claim_type && claim.scope_note ? " · " : ""}
-                                            {claim.scope_note ? String(claim.scope_note) : ""}
-                                          </p>
-                                        ) : null}
-                                      </div>
-                                      {/* Support-level pill */}
-                                      <span
-                                        className="shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded"
-                                        style={{ backgroundColor: `${chainColor}22`, color: chainColor, border: `1px solid ${chainColor}55` }}
-                                      >
-                                        {support}
-                                      </span>
-                                    </div>
-                                    {/* Evidence chain entries */}
-                                    {chain.length > 0 && (
-                                      <div className="mt-2 pl-7 space-y-1.5">
-                                        {chain.map((entry, ei) => {
-                                          const link = String(entry?.link || "").trim();
-                                          const strength = String(entry?.evidence_strength || "moderate").toLowerCase();
-                                          const entryColor =
-                                            strength === "strong" ? "#10b981"
-                                            : strength === "weak" ? "#f59e0b"
-                                            : "#64748b";
-                                          return (
-                                            <div key={ei} className="flex items-start gap-1.5 text-[11px] leading-snug">
-                                              <LinkIcon size={10} className="shrink-0 mt-[3px] text-slate-600" />
-                                              <div className="flex-1 min-w-0">
-                                                <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0">
-                                                  {link ? (
-                                                    <a
-                                                      href={link}
-                                                      target="_blank"
-                                                      rel="noreferrer"
-                                                      className="font-semibold text-blue-300 hover:text-blue-200 underline-offset-2 hover:underline break-words"
-                                                      title={link}
-                                                    >
-                                                      {String(entry?.title || "(untitled)")}
-                                                    </a>
-                                                  ) : (
-                                                    <span className="font-semibold text-slate-300 break-words">
-                                                      {String(entry?.title || "(untitled)")}
-                                                    </span>
-                                                  )}
-                                                  {entry?.year != null && entry.year !== "" && (
-                                                    <span className="text-slate-500">({String(entry.year)})</span>
-                                                  )}
-                                                  <span
-                                                    className="text-[9px] font-bold uppercase tracking-wider px-1 py-0 rounded"
-                                                    style={{ color: entryColor, border: `1px solid ${entryColor}55` }}
-                                                  >
-                                                    {strength}
-                                                  </span>
-                                                </div>
-                                                {entry?.authors ? (
-                                                  <div className="text-slate-500 text-[10px] break-words">
-                                                    {String(entry.authors)}
-                                                    {entry?.source ? <span className="text-slate-600"> · {String(entry.source)}</span> : null}
-                                                  </div>
-                                                ) : null}
-                                                {entry?.summary ? (
-                                                  <div className="mt-0.5 text-slate-400 text-[11px] leading-snug break-words">
-                                                    {String(entry.summary)}
-                                                  </div>
-                                                ) : null}
-                                              </div>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                              {/* Copy / download — shortened since the
-                                  structured output is the better artefact.
-                                  Users who want a file can still reach this. */}
-                              <div className="flex flex-nowrap items-center gap-1.5">
-                                <button
-                                  onClick={() => {
-                                    const lines: string[] = [];
-                                    lines.push(`# Evidence Chain: ${paper.title || "Paper"}`);
-                                    for (const c of (deepRead.claims || [])) {
-                                      const cText = String((c as Record<string, unknown>)?.claim || (c as Record<string, unknown>)?.claim_text || "").trim();
-                                      if (!cText) continue;
-                                      lines.push(`\n## ${cText}`);
-                                      const cc = (c as Record<string, unknown>)?.evidence_chain;
-                                      if (Array.isArray(cc)) {
-                                        for (const e of cc) {
-                                          const en = e as Record<string, unknown>;
-                                          lines.push(`- [${en.evidence_strength || "moderate"}] ${en.title || "(untitled)"} (${en.year ?? "—"}) — ${en.link || "no link"}`);
-                                        }
-                                      }
-                                    }
-                                    void navigator.clipboard.writeText(lines.join("\n"));
-                                  }}
-                                  className="shrink min-w-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-500 hover:text-blue-400 hover:border-blue-500/50 transition-colors"
-                                ><ClipboardList size={11} className="shrink-0" /><span className="truncate">Copy chain</span></button>
-                              </div>
-                            </div>
-                          </details>
-                        )}
                           </>
                         )}
                       </article>
@@ -10133,18 +9892,6 @@ ${html}
                               <div className="flex items-center justify-between mb-1">
                                 <span className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
                                   {USAGE_FEATURE_LABELS[feature]}
-                                  {/* Flag a temporarily-disabled feature so the user
-                                      understands why their "5 left" counter isn't
-                                      matched by a working button in the workspace. */}
-                                  {feature === "deep_read" && !EVIDENCE_CHAIN_ENABLED && (
-                                    <span
-                                      className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
-                                      style={{ color: "#f59e0b", borderColor: "rgba(245,158,11,0.45)", backgroundColor: "rgba(245,158,11,0.10)" }}
-                                      title={EVIDENCE_CHAIN_DISABLED_NOTE}
-                                    >
-                                      Soon
-                                    </span>
-                                  )}
                                 </span>
                                 <span className={`text-[11px] font-semibold tabular-nums ${empty ? "text-amber-300" : "text-slate-300"}`}>
                                   {limit === null
@@ -10290,12 +10037,6 @@ ${html}
                           "150 Quick Searches / month",
                           "10 Deep Analyses / month",
                           "5 Synthesis Lab runs / month",
-                          // Evidence Chain is temporarily offline. When
-                          // it comes back we restore "30 Evidence Chains /
-                          // month" here. The counter key (deep_read) is
-                          // untouched on the backend so allowances don't
-                          // have to be re-migrated.
-                          ...(EVIDENCE_CHAIN_ENABLED ? ["30 Evidence Chains / month"] : []),
                           "Fast-mode Literature Brief",
                           "Community support",
                         ],
@@ -10311,7 +10052,6 @@ ${html}
                           "1,500 Quick Searches / month",
                           "60 Deep Analyses / month",
                           "40 Synthesis Lab runs / month",
-                          ...(EVIDENCE_CHAIN_ENABLED ? ["300 Evidence Chains / month"] : []),
                           "Up to 40 papers per search",
                           "Full Synthesis Lab · PDF export",
                           "Email support",
@@ -10328,7 +10068,6 @@ ${html}
                           "Unlimited Quick Searches",
                           "Unlimited Deep Analyses",
                           "Unlimited Synthesis Lab",
-                          ...(EVIDENCE_CHAIN_ENABLED ? ["Unlimited Evidence Chains"] : []),
                           "Up to 200 papers per search",
                           "6-agent multi-agent reasoning",
                           "Synthesis Lab with Scholar Writer access",
@@ -10587,12 +10326,6 @@ ${html}
                   {[
                     { icon: <Search size={14} />,       title: "How to search",  desc: "Enter a research question and click Run Search or Quick Search." },
                     { icon: <PenLine size={14} />,      title: "Synthesis Lab",  desc: "Select papers from results, then generate a literature review or proposal." },
-                    // Evidence Chain card is gated on the feature flag so
-                    // users don't see a help tip for a button that's
-                    // currently disabled — that would look like a bug.
-                    ...(EVIDENCE_CHAIN_ENABLED
-                      ? [{ icon: <FileText size={14} />, title: "Evidence Chain", desc: "Click Evidence Chain on any paper to trace its claims to citable sources." }]
-                      : []),
                     { icon: <Mail size={14} />,         title: "Contact us",     desc: "Email jy1529098645@gmail.com for feedback or support." },
                   ].map(({ icon, title, desc }) => (
                     <div key={title} className="rounded-xl bg-slate-800/50 px-4 py-3">

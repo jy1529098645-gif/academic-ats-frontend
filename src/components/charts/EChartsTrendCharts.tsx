@@ -327,6 +327,10 @@ export function YearDistributionChartEC({ papers }: { papers: ChartPaper[] }) {
 // quadrants surface the actionable insight: top-right = "well-supported
 // AND influential" — the corpus's heaviest hitters.
 // ─────────────────────────────────────────────────────────────────────────
+// Internals re-exported in a single block at the bottom of the file so
+// unit tests can verify the axis-picker logic against synthetic paper
+// sets (see EChartsTrendCharts.test.ts).  They stay `function`-declared
+// here so the per-function comments remain readable inline.
 function evidenceStrengthScore(s?: string): number | null {
   if (!s) return null;
   const lower = s.toLowerCase();
@@ -717,3 +721,18 @@ export function SourceDonutChartEC({ papers }: { papers: ChartPaper[] }) {
     </ChartCard>
   );
 }
+
+// ── Test-only exports ───────────────────────────────────────────────────
+// Pure helpers that drive the Bullseye axis pick.  Re-exported so a
+// vitest spec can pin the fallback-chain behaviour without rendering
+// the actual echarts component (which touches `window` and is a pain
+// in jsdom).  Marked __ to signal "internal" — production code paths
+// keep using the in-file references.
+export {
+  pickAxisSignal       as __pickAxisSignal,
+  RIGOR_CANDIDATES     as __RIGOR_CANDIDATES,
+  IMPACT_CANDIDATES    as __IMPACT_CANDIDATES,
+  MIN_SPREAD           as __MIN_SPREAD,
+  clamp0to100          as __clamp0to100,
+  impactVisual         as __impactVisual,
+};

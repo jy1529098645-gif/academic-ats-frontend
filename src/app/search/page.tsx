@@ -69,6 +69,11 @@ type StreamState = {
 
 const API_BASE = API_BASE_URL;
 const DEFAULT_SOURCES = ["Semantic Scholar", "OpenAlex", "Crossref", "Google Scholar", "arXiv", "PubMed", "ERIC", "DOAJ", "DiGRA"];
+// Chinese academic platforms — shown in the source picker but OFF by default.
+// Users explicitly opt in per search. Kept separate from DEFAULT_SOURCES so
+// the "All" button only restores the English defaults (matches prior behavior).
+const CHINESE_SOURCES = ["ChinaXiv", "NSTL", "NCPSSD", "CNKI Scholar"];
+const ALL_SOURCES = [...DEFAULT_SOURCES, ...CHINESE_SOURCES];
 const SORT_MODES = ["Balanced", "Newest first", "Research fit", "Relevance score", "Evidence strength", "Open access first"] as const;
 
 function consumeSseBlocks(chunkBuffer: string, onEvent: (eventName: string, dataText: string) => void) {
@@ -664,6 +669,8 @@ export default function SearchPage() {
                 <div className="flex gap-2 text-xs text-slate-500">
                   <button onClick={() => setSettings((p) => ({ ...p, source_filters: [...DEFAULT_SOURCES] }))} className="hover:text-blue-600">All</button>
                   <span>·</span>
+                  <button onClick={() => setSettings((p) => ({ ...p, source_filters: [...ALL_SOURCES] }))} className="hover:text-blue-600">All + 中文</button>
+                  <span>·</span>
                   <button onClick={() => setSettings((p) => ({ ...p, source_filters: [] }))} className="hover:text-blue-600">None</button>
                 </div>
               </div>
@@ -677,6 +684,26 @@ export default function SearchPage() {
                       settings.source_filters.includes(src)
                         ? "border-blue-500 bg-blue-50 text-blue-700"
                         : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                    }`}
+                  >
+                    {src}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                <span className="font-medium">中文平台</span>
+                <span className="text-slate-400">· 默认关闭，开启后纳入检索</span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {CHINESE_SOURCES.map((src) => (
+                  <button
+                    key={src}
+                    type="button"
+                    onClick={() => toggleSource(src)}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      settings.source_filters.includes(src)
+                        ? "border-amber-500 bg-amber-50 text-amber-700"
+                        : "border-dashed border-slate-300 bg-white text-slate-500 hover:bg-slate-50"
                     }`}
                   >
                     {src}
